@@ -1,11 +1,12 @@
 # A corrective revision arrives on a gang whose Create attempt the gang
 # verdict ended with its Create operation kept. The superseded-attempt
 # retirement reads only a Creating row, so the kept Create is not retired;
-# the update trigger rolls the row through its pods instead. The row keeps
-# its operation, so it is not read as a disposed start with no source, and
-# under SurgeThenDrain the roll is a gang surge at the corrective revision
-# onto a free index, the kept Create replaced; a second pass finds the edit
-# consumed and the row the surge's.
+# the update trigger reads the pin instead and rolls the row toward the
+# other revision. A never-promoted row has no source for a surge to keep,
+# so under SurgeThenDrain too the roll is a recreate in place at the
+# corrective revision, the kept Create replaced and no gang surge opened
+# beside the failed gang; the name is still foreign, so the verdict ends the
+# new attempt the same way, once.
 scenario: create-failed-corrective-surge
 cells:
   - instance/Failed/Create/spec.revision/before
@@ -33,8 +34,8 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 3
-    note: the pod template changes; the roll opens a gang surge at the corrective revision onto index 1 and the kept Create is replaced
+    note: the pod template changes; the roll re-enters the row as a recreate at the corrective revision, the incarnation bumped, the kept Create replaced and the ended attempt's members deleted
     events:
       - spec.revision: {image: registry.example.com/runtime:v2}
   - tick: 4
-    note: the edit was consumed once; the replacement gang is announced and created, and the source row is the surge's
+    note: the edit was consumed once; the name is still foreign, so the verdict ends the new attempt, Failed with its recreate kept, and warns once

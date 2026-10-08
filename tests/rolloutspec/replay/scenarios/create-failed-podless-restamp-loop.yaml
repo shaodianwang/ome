@@ -1,12 +1,10 @@
 # A gang's Create attempt is ended by the gang verdict with its Create
 # operation kept, and its members are then all lost. With no pod standing
-# the update trigger has nothing to read and the Create pass finds every
-# name missing: it restamps a Create at the pinned revision over the kept
-# one, gated by a Held block only, and withholds the members from a name
-# the foreign owner holds; the verdict ends that attempt on the pass after,
-# warning again, and the two alternate until the foreign group is gone,
-# when the PodGroup pass announces the name under this owner and the
-# members are created.
+# the Create pass finds every name missing, but it leaves an attempt the
+# verdict ended: no Create is restamped at the pinned revision, the members
+# are not re-created, the verdict is not announced again, and the foreign
+# group going away changes none of that. The row waits for the reset
+# mailbox or a corrective revision.
 scenario: create-failed-podless-restamp-loop
 cells:
   - instance/Failed/Create/pod.deleted[source]/before
@@ -36,16 +34,16 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 3
-    note: both members are lost at once; with no survivor the lost-member repair does not fire, and the Create pass restamps a Create at the pinned revision over the kept one, withholding the members from the foreign name
+    note: both members are lost at once; with no survivor the lost-member repair does not fire, and the Create pass leaves the kept attempt rather than restamping it
     events:
       - pod.deleted[source]: {pod: {index: 0, runner: leader}}
       - pod.deleted[source]: {pod: {index: 0, runner: worker}}
   - tick: 4
-    note: the name still belongs to another controller, so the verdict ends the restamped attempt again, Failed with the Create kept, and warns again
+    note: the name still belongs to another controller; with no attempt restamped there is nothing for the verdict to end again, and no warning
   - tick: 5
-    note: the Create pass restamps the attempt again; the alternation goes on while the name is held
+    note: a further pass writes nothing; there is no alternation to go on
   - tick: 6
-    note: the foreign PodGroup is deleted, so the PodGroup pass announces the name under this owner and the restamped attempt creates both members
+    note: the foreign PodGroup is deleted, so the PodGroup pass announces the name under this owner; nothing re-drives the ended attempt, so no member is created
     events:
       - gang.podGroup[Deleted]: {instance: 0}
   - tick: 7

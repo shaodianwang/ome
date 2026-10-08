@@ -14,35 +14,27 @@ tick=2 hold cleared
 tick=2 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=2 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
 tick=2 pass result=after:5s
-tick=3 note both members are lost at once; with no survivor the lost-member repair does not fire, and the Create pass restamps a Create at the pinned revision over the kept one, withholding the members from the foreign name
+tick=3 note both members are lost at once; with no survivor the lost-member repair does not fire, and the Create pass leaves the kept attempt rather than restamping it
 tick=3 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+0s
 tick=3 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+0s
 tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=3 hold cleared
-tick=3 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=3 pass result=after:5s
-tick=4 note the name still belongs to another controller, so the verdict ends the restamped attempt again, Failed with the Create kept, and warns again
+tick=3 pass result=none
+tick=4 note the name still belongs to another controller; with no attempt restamped there is nothing for the verdict to end again, and no warning
 tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=4 hold cleared
-tick=4 row=0 write no-op precondition=no-change
-tick=4 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=4 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
-tick=4 pass result=after:5s
-tick=5 note the Create pass restamps the attempt again; the alternation goes on while the name is held
+tick=4 pass result=none
+tick=5 note a further pass writes nothing; there is no alternation to go on
 tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=5 hold cleared
-tick=5 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=5 pass result=after:5s
-tick=6 note the foreign PodGroup is deleted, so the PodGroup pass announces the name under this owner and the restamped attempt creates both members
+tick=5 pass result=none
+tick=6 note the foreign PodGroup is deleted, so the PodGroup pass announces the name under this owner; nothing re-drives the ended attempt, so no member is created
 tick=6 apply gang.podGroup[Deleted] podGroup=svc-a-engine-0 state=Deleted now=t+0s
 tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=6 podgroup create name=svc-a-engine-0
 tick=6 hold cleared
-tick=6 row=0 write no-op precondition=no-change
-tick=6 pod create name=svc-a-engine-0-leader-0 revision=4c292506 incarnation=1 ordinal=0
-tick=6 pod create name=svc-a-engine-0-worker-0 revision=4c292506 incarnation=1 ordinal=0
-tick=6 pass result=after:5s
+tick=6 pass result=none
 tick=7 note the attempt waits on its members like any first materialization
 tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=7 hold cleared
-tick=7 pass result=after:5s
+tick=7 pass result=none

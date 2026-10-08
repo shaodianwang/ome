@@ -1,0 +1,51 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and the template then moves to a corrected revision. The
+# superseded-attempt retirement reads only a Creating row, so the kept
+# Create is not retired; the update trigger reads the pin instead and rolls
+# the row as an Instance that never ran a revision: a recreate at the
+# corrective revision replaces the kept Create and drains the ended
+# attempt's members, no surge over a row with no source to keep. A further
+# move retargets that recreate, and the name being foreign still, the
+# verdict ends it the same way.
+scenario: create-failed-corrective-revision
+arrows:
+  - T-failedcreate-corrective
+cells:
+  - instance/Failed/Create/spec.revision/before
+  - instance/Failed/Create/spec.revision/after@T-failedcreate-corrective
+  - instance/Failed/Create/api.conflict/before
+intentional: >-
+  a Create the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it, not a tick, not a freed name, not its members coming
+  up; it resumes through the reset mailbox or a corrective revision
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the template moves to a corrected revision and the first status write of the pass is refused once with a conflict; the roll re-applies it, replacing the kept Create with a recreate at the corrective revision, no surge, and Phase A deletes the ended attempt's members
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+      - api.conflict: {write: 1, count: 1}
+  - tick: 4
+    note: the template moves again, so the recreate in flight is retargeted at a bumped incarnation; the name still belongs to another controller, so the verdict ends the retargeted attempt with the recreate kept
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}

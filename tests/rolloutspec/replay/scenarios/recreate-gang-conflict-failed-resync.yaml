@@ -1,13 +1,19 @@
-# A quota refuses one of the creates of a gang's recreate in Phase B, and
-# the attempt is then ended by the gang verdict with the Update operation
-# kept. The refusal the ended attempt recorded on the kept operation is
-# replaced with it by the re-drive's restamp.
-scenario: recreate-gang-conflict-failed-quota-record-replaced
+# A gang's recreate is ended by the gang verdict with the Update operation
+# kept, and nothing else happens. The row still claims the update verb, but
+# the update trigger withholds the revision the ended attempt pinned, so a
+# pass with nothing new writes nothing: no fresh recreate is restamped, the
+# Incarnation stays where the verdict found it, and the conflict is not
+# announced again.
+scenario: recreate-gang-conflict-failed-resync
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
 cells:
-  - instance/Failed/Drain/api.quotaDenied/before
+  - instance/Failed/Drain/ctrl.resync/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -41,16 +47,15 @@ timeline:
     events:
       - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
   - tick: 5
-    note: both members are gone and a quota refuses the first create of Phase B, so the rebuild places nothing, records the refusal on the operation and parks its deadline
+    note: both members are gone, so Phase B rebuilds the gang at the bumped incarnation behind its existing PodGroup
     events:
       - pod.deleted[source]: {pod: {index: 0, runner: leader}}
       - pod.deleted[source]: {pod: {index: 0, runner: worker}}
-      - api.quotaDenied: {}
   - tick: 6
-    note: the group's controller reference is rewritten to another owner, which is a name this controller may not write, so the gang verdict stamps the Instance Failed with the recreate kept rather than parked
+    note: the group's controller reference is rewritten to another owner, which is a name this controller may not write, so the gang verdict stamps the Instance Failed with the recreate kept
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the re-drive restamps the recreate at a bumped incarnation, replacing the refusal the ended attempt recorded on the kept operation; with no member placed and the name foreign, nothing is drained or created
+    note: a pass with nothing new writes nothing; the update trigger withholds the revision the ended attempt pinned, so the kept recreate is not re-driven and the Incarnation stays where the verdict found it
   - tick: 8
-    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+    note: a further pass with nothing new writes nothing, and the conflict is not announced again

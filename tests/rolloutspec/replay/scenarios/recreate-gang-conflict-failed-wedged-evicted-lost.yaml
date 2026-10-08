@@ -1,18 +1,22 @@
 # A gang's recreate is ended by the gang verdict with the Update operation
-# kept, and in the one pass the row reads Failed its rebuilt leader wedges
-# on its image, its worker is evicted under node pressure and the node under
-# the leader is lost. The escalation pass skips a Failed row, so the recorded
-# reason stays the verdict's; the eviction is a pod gone terminal that the
-# re-drive's Phase A deletes with the rest of the old incarnation; and node
-# death reaches the row only through its pods and the force-delete sweep.
+# kept, and its leader then wedges on its image, its worker is evicted
+# under node pressure and the node under the leader is lost. The escalation
+# pass skips a Failed row, so the recorded reason stays the verdict's; the
+# eviction is a pod gone terminal that holds its name; and node death
+# reaches the row only through its pods and the force-delete sweep. Nothing
+# re-drives the row.
 scenario: recreate-gang-conflict-failed-wedged-evicted-lost
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
 cells:
   - instance/Failed/Drain/pod.waiting[ImagePullBackOff]/before
   - instance/Failed/Drain/pod.evicted/before
   - instance/Failed/Drain/pod.nodeLost[NodeGone]/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -55,17 +59,17 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the rebuilt members are bound, the leader's pull wedges and the worker is evicted, and the escalation skips the Failed row, so the re-drive restamps the recreate and deletes both as old-incarnation pods with the verdict still the recorded reason
+    note: the ended attempt's members are bound, the leader's pull wedges and the worker is evicted; the escalation skips a Failed row, so the recorded reason stays the verdict's, and nothing re-drives the row
     events:
       - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-1}
       - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-1}
       - pod.waiting[ImagePullBackOff]: {pod: {index: 0, runner: leader}, message: "manifest unknown"}
       - pod.evicted: {pod: {index: 0, runner: worker}, message: "The node was low on resource: memory."}
   - tick: 8
-    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept and its own reason
+    note: a pass with nothing new writes nothing
   - tick: 9
-    note: the node under the draining leader is gone, which reaches the row only through its pods and a sweep with no policy to act on, so the re-drive is all that happens
+    note: the node under the wedged leader is gone, which reaches the row only through its pods and a sweep with no policy to act on
     events:
       - pod.nodeLost[NodeGone]: {pod: {index: 0, runner: leader}}
   - tick: 10
-    note: the verdict fails the re-driven attempt again
+    note: a further pass with nothing new writes nothing

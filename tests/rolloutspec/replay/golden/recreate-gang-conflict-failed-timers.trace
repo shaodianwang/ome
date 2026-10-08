@@ -55,67 +55,41 @@ tick=6 hold cleared
 tick=6 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=6 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
 tick=6 pass result=after:5s
-tick=7 note the rebuilt leader is bound and its pull wedges, which the escalation skips on a Failed row, so the re-drive restamps the recreate and drains the set
+tick=7 note the ended attempt's leader is bound and its pull wedges, which the escalation skips on a Failed row; nothing re-drives the row
 tick=7 apply pod.scheduled[source] pod=svc-a-engine-0-leader-0 node=node-1 now=t+0s
 tick=7 apply pod.scheduled[source] pod=svc-a-engine-0-worker-0 node=node-1 now=t+0s
 tick=7 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-leader-0 reason=ImagePullBackOff now=t+0s
 tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=7 row=0 write incarnation=3 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=7 pod delete name=svc-a-engine-0-leader-0 grace=default
-tick=7 pod delete name=svc-a-engine-0-worker-0 grace=default
 tick=7 hold cleared
-tick=7 pass result=after:5s
-tick=8 note the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+tick=7 pass result=none
+tick=8 note the stuck-pod grace elapses on the wedged leader, and the fast escalator skips a row already stamped Failed
+tick=8 apply timer.stuckPodGrace to=t+20m1s now=t+20m1s
 tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=8 row=0 write no-op precondition=no-change
 tick=8 hold cleared
-tick=8 row=0 write incarnation=3 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=8 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
-tick=8 pass result=after:5s
-tick=9 note the stuck-pod grace elapses on the wedged leader, and the fast escalator skips a row already stamped Failed, so the re-drive restamps the recreate under a deadline re-derived at the clock's new reading, while the sweep only reports the two draining members still pinned by their finalizers
-tick=9 apply timer.stuckPodGrace to=t+20m1s now=t+20m1s
+tick=8 pass result=none
+tick=9 note the kept operation's deadline elapses, which the escalation skips on a Failed row too
+tick=9 apply timer.operationDeadline to=t+30m1s now=t+30m1s
 tick=9 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=9 event Warning PodDeleteBlockedByFinalizer OMENative component=engine instance=0: pod svc-a-engine-0-leader-0 is 20m1s past its own deletion deadline but pinned by finalizers [replay.workload.ome.io/pod-lifecycle]; OME never strips another controller's finalizer — the finalizer owner must resolve it
-tick=9 event Warning PodDeleteBlockedByFinalizer OMENative component=engine instance=0: pod svc-a-engine-0-worker-0 is 20m1s past its own deletion deadline but pinned by finalizers [replay.workload.ome.io/pod-lifecycle]; OME never strips another controller's finalizer — the finalizer owner must resolve it
-tick=9 row=0 write incarnation=4 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#3{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+20m1s lastProgressAt=t+20m1s deadline=t+50m1s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=9 hold cleared
-tick=9 pass result=after:5s
-tick=10 note the verdict fails the re-driven attempt again
+tick=9 pass result=none
+tick=10 note something else deletes both members, which hold their names while they terminate; nothing re-drives the row
+tick=10 apply pod.terminating[source] pod=svc-a-engine-0-leader-0 now=t+30m1s
+tick=10 apply pod.terminating[source] pod=svc-a-engine-0-worker-0 now=t+30m1s
 tick=10 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=10 row=0 write no-op precondition=no-change
 tick=10 hold cleared
-tick=10 row=0 write incarnation=4 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#3{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+20m1s lastProgressAt=t+20m1s deadline=t+50m1s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=10 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
-tick=10 pass result=after:5s
-tick=11 note the kept operation's deadline elapses, which the escalation skips on a Failed row, and the re-drive replaces it with a fresh one
-tick=11 apply timer.operationDeadline to=t+50m2s now=t+50m2s
+tick=10 pass result=after:1m0.000000001s
+tick=11 note the kubelets behind both terminating members stop acknowledging their deletion and both are past their overdue slack, so the sweep at the top of the pass force-deletes them on their own evidence while the row stays as it was
+tick=11 apply pod.stuckTerminating pod=svc-a-engine-0-leader-0 deletionDeadline=t+30m1s now=t+30m1s
+tick=11 apply pod.stuckTerminating pod=svc-a-engine-0-worker-0 deletionDeadline=t+30m1s now=t+30m1s
+tick=11 apply timer.forceDelete[overdueSlack] to=t+31m2s now=t+31m2s
 tick=11 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=11 row=0 write incarnation=5 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#4{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+50m2s lastProgressAt=t+50m2s deadline=t+1h20m2s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=11 pod delete name=svc-a-engine-0-leader-0 grace=0 uidPrecondition=set
+tick=11 event Warning PodForceDeleted OMENative component=engine instance=0: force-deleted stuck-Terminating pod svc-a-engine-0-leader-0 on node node-1 (evidence=node-gone, 1m1s past the pod's own deletion deadline)
+tick=11 pod delete name=svc-a-engine-0-worker-0 grace=0 uidPrecondition=set
+tick=11 event Warning PodForceDeleted OMENative component=engine instance=0: force-deleted stuck-Terminating pod svc-a-engine-0-worker-0 on node node-1 (evidence=node-gone, 1m1s past the pod's own deletion deadline)
 tick=11 hold cleared
-tick=11 pass result=after:5s
-tick=12 note the verdict fails the re-driven attempt again
+tick=11 pass result=none
+tick=12 note a further pass with nothing new writes nothing, with no member left
 tick=12 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=12 row=0 write no-op precondition=no-change
 tick=12 hold cleared
-tick=12 row=0 write incarnation=5 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#4{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+50m2s lastProgressAt=t+50m2s deadline=t+1h20m2s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=12 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
-tick=12 pass result=after:5s
-tick=13 note the kubelets behind both draining members stop acknowledging their deletion and both are past their overdue slack on a node the cluster no longer holds, so the sweep at the top of the pass force-deletes them on their own evidence and the re-drive restamps a row with nothing left to drain
-tick=13 apply pod.stuckTerminating pod=svc-a-engine-0-leader-0 deletionDeadline=t+0s now=t+50m2s
-tick=13 apply pod.stuckTerminating pod=svc-a-engine-0-worker-0 deletionDeadline=t+0s now=t+50m2s
-tick=13 apply timer.forceDelete[overdueSlack] already-elapsed now=t+50m2s
-tick=13 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=13 pod delete name=svc-a-engine-0-leader-0 grace=0 uidPrecondition=set
-tick=13 event Warning PodForceDeleted OMENative component=engine instance=0: force-deleted stuck-Terminating pod svc-a-engine-0-leader-0 on node node-1 (evidence=node-gone, 50m2s past the pod's own deletion deadline)
-tick=13 pod delete name=svc-a-engine-0-worker-0 grace=0 uidPrecondition=set
-tick=13 event Warning PodForceDeleted OMENative component=engine instance=0: force-deleted stuck-Terminating pod svc-a-engine-0-worker-0 on node node-1 (evidence=node-gone, 50m2s past the pod's own deletion deadline)
-tick=13 row=0 write incarnation=6 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#4{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+50m2s lastProgressAt=t+50m2s deadline=t+1h20m2s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=13 hold cleared
-tick=13 pass result=after:5s
-tick=14 note the verdict fails the re-driven attempt again, with no member left to drain
-tick=14 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=14 row=0 write no-op precondition=no-change
-tick=14 hold cleared
-tick=14 row=0 write incarnation=6 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#4{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+50m2s lastProgressAt=t+50m2s deadline=t+1h20m2s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=14 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
-tick=14 pass result=after:5s
+tick=12 pass result=none

@@ -55,35 +55,25 @@ tick=6 hold cleared
 tick=6 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=6 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
 tick=6 pass result=after:5s
-tick=7 note the rebuilt members are bound, the leader exits and the worker is refused by its node, and the re-drive restamps the recreate at a bumped incarnation and deletes both as old-incarnation pods
+tick=7 note the ended attempt's members are bound, the leader exits and the worker is refused by its node; neither is the restart pass's, and nothing re-drives the row, so both dead pods hold their names
 tick=7 apply pod.scheduled[source] pod=svc-a-engine-0-leader-0 node=node-1 now=t+0s
 tick=7 apply pod.scheduled[source] pod=svc-a-engine-0-worker-0 node=node-1 now=t+0s
 tick=7 apply pod.phaseTerminal[Failed] pod=svc-a-engine-0-leader-0 now=t+0s
 tick=7 apply pod.admissionRejected[UnexpectedAdmissionError] pod=svc-a-engine-0-worker-0 reason=UnexpectedAdmissionError now=t+0s
 tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=7 row=0 write incarnation=3 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=7 pod delete name=svc-a-engine-0-leader-0 grace=default
-tick=7 pod delete name=svc-a-engine-0-worker-0 grace=default
 tick=7 hold cleared
-tick=7 pass result=after:5s
-tick=8 note the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+tick=7 pass result=none
+tick=8 note a pass with nothing new writes nothing
 tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=8 row=0 write no-op precondition=no-change
 tick=8 hold cleared
-tick=8 row=0 write incarnation=3 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=8 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
-tick=8 pass result=after:5s
-tick=9 note both dead members are gone, and the re-drive restamps the recreate again with nothing left to drain; the members stay withheld from a name this controller may not write
+tick=8 pass result=none
+tick=9 note both dead members are gone, and the row still waits for the reset mailbox or a corrective revision
 tick=9 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+0s
 tick=9 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+0s
 tick=9 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=9 row=0 write incarnation=4 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=9 hold cleared
-tick=9 pass result=after:5s
-tick=10 note the verdict fails the re-driven attempt again
+tick=9 pass result=none
+tick=10 note a further pass with nothing new writes nothing
 tick=10 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=10 row=0 write no-op precondition=no-change
 tick=10 hold cleared
-tick=10 row=0 write incarnation=4 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=10 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
-tick=10 pass result=after:5s
+tick=10 pass result=none

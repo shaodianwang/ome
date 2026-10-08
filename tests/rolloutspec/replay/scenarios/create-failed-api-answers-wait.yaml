@@ -2,8 +2,9 @@
 # under a pause are consumed by nobody: the row issues no pod create and no
 # pod delete of its own, so a refused quota, an invalid pod spec, a shed
 # write, a name already taken, a terminating namespace and a delete answered
-# not found all wait. The roll the unpause admits is what meets them, on the
-# replacement gang it creates.
+# not found all wait. The unpause admits no roll at the pinned revision
+# either, so they stay armed; the attempt a corrective revision or a reset
+# opens is what would meet them.
 scenario: create-failed-api-answers-wait
 cells:
   - instance/Failed/Create/api.quotaDenied/before
@@ -35,7 +36,7 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 3
-    note: the Component is paused, so the roll is parked and the row rests
+    note: the Component is paused; the row rests, as it would without the pause
     events:
       - spec.pauseTrue: {}
   - tick: 4
@@ -50,10 +51,10 @@ timeline:
   - tick: 5
     note: a further pass under the pause consumes nothing either
   - tick: 6
-    note: the pause is cleared and the roll takes the unready set as a gang surge onto index 1; the surge's first create is the write the armed answers wait for
+    note: the pause is cleared; no roll opens at the pinned revision, so the row rests and the armed answers wait on
     events:
       - spec.unpause: {}
   - tick: 7
-    note: the replacement gang's first create is shed, which paces the pass on the server's delay and leaves the other answers armed for the creates that follow
+    note: a further pass issues no create for the row, so the shed answer is never met and the pass keeps its cadence
   - tick: 8
-    note: the next create meets the quota refusal, recorded on the replacement's own operation
+    note: the quota refusal too waits for the attempt a corrective revision or a reset opens

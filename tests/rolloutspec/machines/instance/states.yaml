@@ -444,7 +444,7 @@ states:
     applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [gang]}
     planned: true
     decided_in: pkg/controller/v1beta1/workload/escalation/gang.go
-    note: a Create attempt ended by the gang verdict - its PodGroup name belongs to another controller - with the committed Create operation kept, since the verdict's stamp keeps every operation; every other way a Create attempt ends clears it. The engine resolves this shape to Failed. The row claims the create verb, so it is no fresh start for the ladder to gate, the reset mailbox owns it, a lost member re-arms the gang under RecreateInstanceOnPodRestart, and a corrective revision rolls it as an Instance that never ran a revision; what the Create pass does with it once the name is free is undecided
+    note: a Create attempt ended by the gang verdict - its PodGroup name belongs to another controller - with the committed Create operation kept, since the verdict's stamp keeps every operation; every other way a Create attempt ends clears it. The engine resolves this shape to Failed. The row claims the create verb, so it is no fresh start for the ladder to gate, and no pass re-drives the attempt the verdict ended - not a tick, not the name freeing, not a strategy edit, not its members coming up - since nothing this controller does frees a name another controller holds. It leaves through the reset mailbox, which clears the operation, a corrective revision, which rolls it as an Instance that never ran a revision, or a lost member, which re-arms the gang under RecreateInstanceOnPodRestart
     not_applicable:
       timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
       timer.migrationDeadline: no operation pins this index to a migration record
@@ -466,7 +466,7 @@ states:
     applies: {strategies: [RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [gang]}
     planned: true
     decided_in: pkg/controller/v1beta1/workload/escalation/gang.go
-    note: a recreate attempt on a gang ended by the gang verdict - its PodGroup name belongs to another controller - with the Update operation kept rather than parked, since the verdict's stamp keeps every operation. The engine resolves this shape to Failed. The row still claims the update verb, so the update pass re-drives it as a continuation on the next pass, restamping a fresh recreate over it with the Incarnation bumped; nothing parks it for the name to free
+    note: a recreate attempt on a gang ended by the gang verdict - its PodGroup name belongs to another controller - with the Update operation kept rather than parked, since the verdict's stamp keeps every operation. The engine resolves this shape to Failed. The row still claims the update verb and holds its slot of the unavailability budget, but no pass re-drives it at the revision the ended attempt pinned - not a tick, not the name freeing, not a strategy edit - since nothing this controller does frees a name another controller holds. It leaves through a revision other than the pinned one, which restamps a fresh recreate over it as a continuation, or the reset mailbox, which clears the operation
     not_applicable:
       timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
       timer.migrationDeadline: no operation pins this index to a migration record

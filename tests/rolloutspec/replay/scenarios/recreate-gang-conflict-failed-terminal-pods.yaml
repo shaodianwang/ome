@@ -1,15 +1,19 @@
 # A gang's recreate is ended by the gang verdict with the Update operation
-# kept, and its rebuilt members die in the one pass the row reads Failed: one
-# exits, the other is refused by its node. Neither is the restart pass's,
-# and the re-drive's Phase A deletes both as old-incarnation pods when it
-# restamps the recreate; the verdict then fails the Instance again.
+# kept, and its members then die: one exits, the other is refused by its
+# node. Neither is the restart pass's, and nothing re-drives the row, so
+# both dead pods hold their names until they are gone, and the row still
+# waits for the reset mailbox or a corrective revision.
 scenario: recreate-gang-conflict-failed-terminal-pods
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
 cells:
   - instance/Failed/Drain/pod.phaseTerminal[Failed]/before
   - instance/Failed/Drain/pod.admissionRejected[UnexpectedAdmissionError]/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -52,18 +56,18 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the rebuilt members are bound, the leader exits and the worker is refused by its node, and the re-drive restamps the recreate at a bumped incarnation and deletes both as old-incarnation pods
+    note: the ended attempt's members are bound, the leader exits and the worker is refused by its node; neither is the restart pass's, and nothing re-drives the row, so both dead pods hold their names
     events:
       - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-1}
       - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-1}
       - pod.phaseTerminal[Failed]: {pod: {index: 0, runner: leader}}
       - pod.admissionRejected[UnexpectedAdmissionError]: {pod: {index: 0, runner: worker}, message: "Allocate failed due to device plugin error"}
   - tick: 8
-    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+    note: a pass with nothing new writes nothing
   - tick: 9
-    note: both dead members are gone, and the re-drive restamps the recreate again with nothing left to drain; the members stay withheld from a name this controller may not write
+    note: both dead members are gone, and the row still waits for the reset mailbox or a corrective revision
     events:
       - pod.deleted[source]: {pod: {index: 0, runner: leader}}
       - pod.deleted[source]: {pod: {index: 0, runner: worker}}
   - tick: 10
-    note: the verdict fails the re-driven attempt again
+    note: a further pass with nothing new writes nothing

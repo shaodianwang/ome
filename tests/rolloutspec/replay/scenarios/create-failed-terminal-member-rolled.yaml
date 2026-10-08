@@ -1,10 +1,10 @@
 # A gang's Create attempt is ended by the gang verdict with its Create
 # operation kept, and one member then exits under a restart policy that
-# repairs nothing. The dead pod is not recycled by the Create pass: the
-# update trigger reads the set first, a dead member beside a live one is a
-# set on the target that is not runtime-ready, and the roll takes the row
-# as a fresh start - a gang surge onto a free index - with the kept Create
-# replaced; the dead occupant is left to the source's eventual drain.
+# repairs nothing. The dead pod is not recycled by the Create pass, which
+# leaves an attempt the verdict ended, and the update trigger withholds the
+# pinned revision, so no roll takes the set: the row stays Failed with its
+# Create kept and the dead occupant holds its name until a corrective
+# recreate drains it or the reset deletes it.
 scenario: create-failed-terminal-member-rolled
 cells:
   - instance/Failed/Create/pod.phaseTerminal[Failed]/before
@@ -33,9 +33,9 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 3
-    note: the worker exits and the leader is on its way out; neither frees its name to the Create pass, and the roll takes the set on the target as a gang surge at the same target onto index 1
+    note: the worker exits and the leader is on its way out; neither frees its name to the Create pass, and no roll opens at the pinned revision
     events:
       - pod.phaseTerminal[Failed]: {pod: {index: 0, runner: worker}}
       - pod.terminating[source]: {pod: {index: 0, runner: leader}}
   - tick: 4
-    note: the replacement gang is announced and its members are created; the source row is the surge's from here
+    note: a further pass writes nothing; no replacement gang is built beside the ended one

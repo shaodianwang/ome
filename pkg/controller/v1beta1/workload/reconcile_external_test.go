@@ -1287,6 +1287,9 @@ type recoveryHarness struct {
 	// gate, when set, is the coordination UpdateGate the passes consult
 	// before a fresh start opens.
 	gate func(strategy workloadtypes.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workloadtypes.RolloutHoldGate, string)
+	// gangs, when set, is the PodGroup reading the passes see, as the
+	// PodGroup pass would have recorded it ahead of the reconcile.
+	gangs *workloadtypes.GangObservations
 	// repairBatchSize is the input's RepairBatchSize: how many crash-loop
 	// repairs a pass may open. Nil leaves the pass unbounded.
 	repairBatchSize *int32
@@ -2874,6 +2877,7 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		MigrationAudit:     h.migrationAudit,
 		RemoveInstance:     h.removeInstance(),
 		UpdateGate:         h.gate,
+		Gangs:              h.gangs,
 		UpdateRetryPolicy:  h.retryPolicy,
 		StuckPodGrace:      h.stuckGrace,
 		UnschedulableGrace: h.unschedulableGrace,
@@ -14195,5 +14199,169 @@ func TestGangSurgeAfterHandover_ThrottledRebuildChargesNoFurtherWave(t *testing.
 	if !h.run(40, func() bool { return h.converged(h.revFixed.Name) }) {
 		h.dumpState("handoff never finished")
 		t.Fatalf("the rebuilt replacement was never promoted on the pinned revision")
+	}
+}
+
+// TestGangVerdict_FailedCreateOpensNoSurgeToTheSameRevision: a gang's
+// Create ended by the gang verdict leaves a row that never ran a
+// revision. A never-promoted row has no source for a surge to keep, so
+// the passes that follow must not open a gang surge to the same
+// revision: a second gang beside the failed one is a phantom that
+// doubles the capacity asked for and serves nothing. Nor does the name
+// freeing re-drive the attempt: the row stays Failed with its Create
+// kept until the reset mailbox or a corrective revision arrives.
+//
+// Cells: instance/Failed/Create/ctrl.resync/before, instance/Failed/Create/gang.podGroup[Deleted]/before
+func TestGangVerdict_FailedCreateOpensNoSurgeToTheSameRevision(t *testing.T) {
+	h := newRecoveryHarness(t, true)
+	h.useStrategy(workloadtypes.UpdateStrategySurgeThenDrain)
+	h.stuckGrace = time.Hour
+	h.setTarget(h.revBad, badImage)
+	h.step()
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhaseCreating || len(h.podsOf(0)) != 2 {
+		h.dumpState("after the first materialization")
+		t.Fatalf("the gang's first materialization did not open: %+v", s)
+	}
+
+	h.gangs = gangObservations(0, workloadtypes.GangStateOwnershipConflict, gangConflictMessage)
+	h.step()
+	s := h.instance(0)
+	if s == nil || s.Phase != workloadtypes.InstancePhaseFailed || s.LastFailure == nil || s.LastFailure.Reason != workloadtypes.PodGroupOwnershipConflictReason {
+		h.dumpState("after the verdict")
+		t.Fatalf("the gang verdict did not end the Create: %+v", s)
+	}
+	ended, warnings := *s.Operation, len(h.failedWarnings)
+
+	stays := func(label string) {
+		t.Helper()
+		if marker := h.gangSurgeMarker(); marker != nil {
+			t.Errorf("%s: a gang surge opened over the never-promoted row: marker %+v", label, marker)
+		}
+		got := h.instance(0)
+		if got == nil || got.Phase != workloadtypes.InstancePhaseFailed || got.Operation == nil || got.Operation.ID != ended.ID || got.Incarnation != s.Incarnation {
+			t.Errorf("%s: the row did not keep the ended Create: %+v", label, got)
+		}
+		if pods := h.podsOf(1); len(pods) != 0 {
+			t.Errorf("%s: a second gang was built beside the failed one: %d pod(s) at index 1", label, len(pods))
+		}
+		if len(h.failedWarnings) != warnings {
+			t.Errorf("%s: the conflict was announced again: %v", label, h.failedWarnings[warnings:])
+		}
+	}
+	for i := 0; i < 3; i++ {
+		h.step()
+	}
+	stays("while the name stays foreign")
+
+	h.gangs = nil
+	for i := 0; i < 3; i++ {
+		h.step()
+	}
+	stays("after the name freed")
+}
+
+// TestGangVerdict_FailedRecreateIsNotRedrivenOnItsOwn: a gang's recreate
+// ended by the gang verdict is not driven again while the name stays
+// foreign, and not when it frees either. A pass with nothing new leaves
+// the incarnation where the verdict found it and announces the conflict
+// no second time; the row waits for the reset mailbox or a corrective
+// revision.
+//
+// Cells: instance/Failed/Drain/ctrl.resync/before, instance/Failed/Drain/gang.podGroup[Deleted]/before
+func TestGangVerdict_FailedRecreateIsNotRedrivenOnItsOwn(t *testing.T) {
+	h := newRecoveryHarness(t, true)
+	h.useStrategy(workloadtypes.UpdateStrategyRecreatePod)
+	h.stuckGrace = time.Hour
+	h.driveToReadyOnV1()
+
+	h.pushRevision(badImage)
+	if !h.run(20, func() bool {
+		s := h.instance(0)
+		return s != nil && s.Incarnation == 2 && len(h.podsOf(0)) == 2
+	}) {
+		h.dumpState("recreate never rebuilt the gang")
+		t.Fatalf("the recreate did not rebuild the gang at the bumped incarnation")
+	}
+
+	h.gangs = gangObservations(0, workloadtypes.GangStateOwnershipConflict, gangConflictMessage)
+	h.step()
+	s := h.instance(0)
+	if s == nil || s.Phase != workloadtypes.InstancePhaseFailed || s.LastFailure == nil || s.LastFailure.Reason != workloadtypes.PodGroupOwnershipConflictReason {
+		h.dumpState("after the verdict")
+		t.Fatalf("the gang verdict did not end the recreate: %+v", s)
+	}
+	ended, warnings := *s.Operation, len(h.failedWarnings)
+
+	stays := func(label string) {
+		t.Helper()
+		got := h.instance(0)
+		if got == nil || got.Phase != workloadtypes.InstancePhaseFailed || got.Incarnation != s.Incarnation || got.Operation == nil || got.Operation.ID != ended.ID {
+			t.Errorf("%s: the row did not keep the ended recreate at incarnation %d: %+v", label, s.Incarnation, got)
+		}
+		if len(h.failedWarnings) != warnings {
+			t.Errorf("%s: the conflict was announced again: %v", label, h.failedWarnings[warnings:])
+		}
+	}
+	for i := 0; i < 4; i++ {
+		h.step()
+	}
+	stays("while the name stays foreign")
+
+	h.gangs = nil
+	for i := 0; i < 4; i++ {
+		h.step()
+	}
+	stays("after the name freed")
+}
+
+// TestGangVerdict_CorrectiveRevisionResumesTheFailedCreate: a corrective
+// revision is one of the two ways out of a Create the gang verdict
+// ended. With the name this controller's again, the roll replaces the
+// kept Create with a recreate at the new revision, no surge, since the
+// row never ran a revision and has no source to keep, and the gang is
+// rebuilt at its own index and promoted on the corrective revision.
+//
+// Cells: instance/Failed/Create/spec.revision/before
+func TestGangVerdict_CorrectiveRevisionResumesTheFailedCreate(t *testing.T) {
+	h := newRecoveryHarness(t, true)
+	h.useStrategy(workloadtypes.UpdateStrategySurgeThenDrain)
+	h.stuckGrace = time.Hour
+	h.setTarget(h.revBad, badImage)
+	h.step()
+	h.gangs = gangObservations(0, workloadtypes.GangStateOwnershipConflict, gangConflictMessage)
+	h.step()
+	s := h.instance(0)
+	if s == nil || s.Phase != workloadtypes.InstancePhaseFailed || s.Operation == nil || s.Operation.Type != workloadtypes.InstanceOperationCreate {
+		h.dumpState("after the verdict")
+		t.Fatalf("the gang verdict did not end the Create with its operation kept: %+v", s)
+	}
+	h.gangs = nil
+	h.step()
+	h.step()
+	if got := h.instance(0); got == nil || got.Phase != workloadtypes.InstancePhaseFailed || got.Operation == nil || got.Operation.ID != s.Operation.ID {
+		t.Fatalf("the freed name re-drove the ended Create: %+v", got)
+	}
+
+	fix := h.pushRevision(goodImage)
+	h.step()
+	got := h.instance(0)
+	if got == nil || got.Phase != workloadtypes.InstancePhaseUpdating || got.Operation == nil ||
+		got.Operation.Type != workloadtypes.InstanceOperationUpdate || got.Operation.Step != workloadtypes.UpdateStepDrain ||
+		got.Operation.TargetRevision != fix.Name || got.Incarnation != s.Incarnation+1 {
+		h.dumpState("after the corrective revision")
+		t.Fatalf("the corrective revision did not replace the kept Create with a recreate at the fix: %+v", got)
+	}
+	if marker := h.gangSurgeMarker(); marker != nil {
+		t.Errorf("the corrective roll surged over the never-promoted row: marker %+v", marker)
+	}
+	if !h.run(30, func() bool { return h.converged(fix.Name) }) {
+		h.dumpState("corrective rollout")
+		t.Fatalf("the gang never converged on the corrective revision")
+	}
+	if pods := h.podsOf(1); len(pods) != 0 {
+		t.Errorf("a second gang was built beside the rebuilt one: %d pod(s) at index 1", len(pods))
+	}
+	if pods := h.podsOf(0); len(pods) != 2 {
+		t.Errorf("the gang was not rebuilt at its own index: %d pod(s) at index 0", len(pods))
 	}
 }

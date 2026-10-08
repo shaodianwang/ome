@@ -1,0 +1,43 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and nothing else happens. A pass with nothing new writes
+# nothing: the update trigger withholds the revision the ended attempt
+# pinned, so no gang surge opens to the same revision and no second gang is
+# built beside the failed one, and the Create pass leaves the row. A
+# strategy edit mints no revision and re-drives nothing either.
+scenario: create-failed-resync
+cells:
+  - instance/Failed/Create/ctrl.resync/before
+  - instance/Failed/Create/spec.strategy/before
+intentional: >-
+  a Create the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it, not a tick, not a freed name, not its members coming
+  up; it resumes through the reset mailbox or a corrective revision
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: a pass with nothing new writes nothing; the update trigger withholds the revision the ended attempt pinned, so no gang surge opens to it, and the Create pass leaves the row
+  - tick: 4
+    note: the strategy is edited to recreate, which mints no revision and re-drives nothing
+    events:
+      - spec.strategy: {strategy: RecreatePod}
+  - tick: 5
+    note: a further pass with nothing new writes nothing

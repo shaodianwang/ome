@@ -1,9 +1,10 @@
 # A gang's Create attempt is ended by the gang verdict with its Create
 # operation kept, and the foreign PodGroup is then deleted while the members
 # stand short of readiness. The PodGroup pass announces the name under this
-# owner again, and in the same pass the roll takes the unready set on the
-# target as a fresh start - a gang surge onto a free index - with the kept
-# Create replaced.
+# owner again, and that is all: the Create pass leaves an attempt the
+# verdict ended and the update trigger withholds the pinned revision, so a
+# freed name re-drives nothing and the row stays Failed with its Create
+# kept until a corrective revision or the reset mailbox.
 scenario: create-failed-group-deleted-set-rolled
 cells:
   - instance/Failed/Create/gang.podGroup[Deleted]/before
@@ -30,8 +31,8 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 3
-    note: the foreign PodGroup is deleted; the ensure pass re-creates the name under this owner, and the roll takes the unready set as a gang surge at the same target onto index 1
+    note: the foreign PodGroup is deleted; the ensure pass re-creates the name under this owner, and nothing re-drives the ended attempt
     events:
       - gang.podGroup[Deleted]: {instance: 0}
   - tick: 4
-    note: the replacement gang is announced and its members are created; the source row is the surge's from here
+    note: a further pass writes nothing; the row rests with its Create kept

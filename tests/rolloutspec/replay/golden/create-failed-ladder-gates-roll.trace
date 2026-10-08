@@ -33,19 +33,15 @@ tick=4 hold gate=RetryBlock target=svc-a-engine-4c292506 reason=update to svc-a-
 tick=4 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=4 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
 tick=4 pass result=after:5s
-tick=5 note the roll that would take the first gang's unready set is a fresh start the Backoff block denies, with the remaining wait as the requeue; the kept attempt itself consults no ladder
+tick=5 note the Backoff block gates nothing of the first gang's; no roll of its unready set opens at the pinned revision and the kept attempt itself consults no ladder, so the pass waits on the block for the sibling alone
 tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=5 hold gate=RetryBlock target=svc-a-engine-4c292506 reason=update to svc-a-engine-4c292506 in backoff after 1 failed attempt(s): ImagePullBackOff
 tick=5 pass result=after:5s
-tick=6 note the block comes due, so the roll is admitted - a gang surge at the same target onto a free index - and the ladder flips to one attempt in flight
+tick=6 note the block comes due, so the sibling's rebuild is admitted and the ladder flips to one attempt in flight; the first gang's row stays Failed with its Create kept
 tick=6 apply timer.retryAt to=t+2h1m2s now=t+2h1m2s
 tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=6 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
-tick=6 row=0 write incarnation=1 phase=Updating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#3{type=Update step=Surge target=svc-a-engine-4c292506 strategy=SurgeThenDrain surgeIndex=2 started=t+2h1m2s lastProgressAt=t+2h1m2s deadline=t+2h31m2s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=6 row=2 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#4{type=Update step=GangSurgeTarget target=svc-a-engine-4c292506 started=t+2h1m2s lastProgressAt=t+2h1m2s deadline=t+2h31m2s} precondition=ok
+tick=6 row=1 write incarnation=2 phase=Updating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#3{type=Update step=Drain target=svc-a-engine-4c292506 reason=revision  -> svc-a-engine-4c292506 strategy=RecreatePod started=t+2h1m2s lastProgressAt=t+2h1m2s deadline=t+2h31m2s} lastFailure={pod=svc-a-engine-1-leader-0 reason=ImagePullBackOff container=ome-container message=manifest unknown} precondition=ok
 tick=6 retryblock target=svc-a-engine-4c292506 persist {state=Backoff attempts=1 nextRetryAt=t+2h1m1s reason=ImagePullBackOff}→{state=RetryInProgress attempts=1 nextRetryAt=t+2h1m1s reason=ImagePullBackOff}
-tick=6 event Normal RecreateUpdateStarted OMENative component=engine instance=0 gang surge to revision svc-a-engine-4c292506 (surge-index=2)
-tick=6 row=1 write incarnation=2 phase=Updating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#5{type=Update step=Drain target=svc-a-engine-4c292506 reason=revision  -> svc-a-engine-4c292506 strategy=RecreatePod started=t+2h1m2s lastProgressAt=t+2h1m2s deadline=t+2h31m2s} lastFailure={pod=svc-a-engine-1-leader-0 reason=ImagePullBackOff container=ome-container message=manifest unknown} precondition=ok
 tick=6 event Normal RecreateUpdateStarted OMENative component=engine instance=1 recreate (revision  -> svc-a-engine-4c292506, incarnation=2)
 tick=6 pod delete name=svc-a-engine-1-leader-0 grace=default
 tick=6 pod delete name=svc-a-engine-1-worker-0 grace=default

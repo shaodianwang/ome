@@ -14,7 +14,7 @@ tick=2 hold cleared
 tick=2 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=2 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
 tick=2 pass result=after:5s
-tick=3 note the Component is paused, so the roll that would take the unready set is parked and the row rests
+tick=3 note the Component is paused; the row rests, as it would without the pause
 tick=3 apply spec.pauseTrue paused=true freeze=false generation=1 now=t+0s
 tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=3 pass result=none
@@ -23,7 +23,7 @@ tick=4 apply pod.scheduled[source] pod=svc-a-engine-0-leader-0 node=node-0 now=t
 tick=4 apply pod.scheduled[source] pod=svc-a-engine-0-worker-0 node=node-0 now=t+0s
 tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=4 pass result=none
-tick=5 note the leader alone reports ContainersReady and PodReady, enters the rotation and has its serving gate written by another writer; the adoption needs every member ContainersReady, so nothing is written
+tick=5 note the leader alone reports ContainersReady and PodReady, enters the rotation and has its serving gate written by another writer; nothing adopts or promotes members under a group another controller owns, so nothing is written
 tick=5 apply pod.containersReady[source] pod=svc-a-engine-0-leader-0 now=t+0s
 tick=5 apply pod.ready[source] pod=svc-a-engine-0-leader-0 now=t+0s
 tick=5 apply endpoint.rotationIn[source] pod=svc-a-engine-0-leader-0 now=t+0s
@@ -79,12 +79,8 @@ tick=16 note the controller restarts; the kept operation and the recorded verdic
 tick=16 apply ctrl.crash expectations=dropped now=t+30m1s
 tick=16 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=16 pass result=none
-tick=17 note the pause is cleared, and the roll takes the unready set on the target as a fresh start - a gang surge at the same target onto index 1 - with the kept Create replaced
+tick=17 note the pause is cleared; no roll opens at the pinned revision, so the row stays Failed with its Create kept
 tick=17 apply spec.unpause paused=false freeze=false generation=2 now=t+30m1s
 tick=17 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=17 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
-tick=17 row=0 write incarnation=1 phase=Updating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#2{type=Update step=Surge target=svc-a-engine-4c292506 strategy=SurgeThenDrain surgeIndex=1 started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=17 row=1 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#3{type=Update step=GangSurgeTarget target=svc-a-engine-4c292506 started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} precondition=ok
-tick=17 event Normal RecreateUpdateStarted OMENative component=engine instance=0 gang surge to revision svc-a-engine-4c292506 (surge-index=1)
 tick=17 hold cleared
-tick=17 pass result=after:5s
+tick=17 pass result=none

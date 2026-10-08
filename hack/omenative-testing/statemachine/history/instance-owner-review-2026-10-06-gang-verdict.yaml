@@ -1,0 +1,26 @@
+# Provenance for the instance-machine cells decided in the owner review of
+# 2026-10-06 on a gang whose PodGroup name another controller owns: the
+# build attempt the gang verdict ends stays Failed with its operation kept,
+# no second gang is ever started for the Instance, and nothing re-drives it
+# on its own - not a tick, not the name freeing, not a strategy edit, not
+# its members coming up. The Instance resumes only through the reset
+# mailbox, which clears the operation, or a corrective revision, which
+# re-drives the row as a recreate at the new target.
+#
+# Selectors match the cells files exactly: an empty variants, windows or
+# transition matches all of them.
+history:
+  # --- cells-create.yaml ---
+  - {state: Failed/Create, event: ctrl.resync, variants: [], windows: [], transition: "", decision: owner-review-2026-10-06-gang-verdict}
+  - {state: Failed/Create, event: spec.strategy, variants: [], windows: [], transition: "", decision: owner-review-2026-10-06-gang-verdict}
+  - {state: Failed/Create, event: spec.revision, variants: [], windows: [before], transition: "", decision: owner-review-2026-10-06-gang-verdict}
+  - {state: Failed/Create, event: gang.podGroup, variants: [Deleted], windows: [], transition: "", decision: owner-review-2026-10-06-gang-verdict}
+  - {state: Failed/Create, event: pod.containersReady, variants: [source], windows: [], transition: "", decision: owner-review-2026-10-06-gang-verdict}
+
+  # --- cells-update-inplace-recreate.yaml ---
+  - {state: Failed/Drain, event: ctrl.resync, variants: [], windows: [], transition: "", decision: owner-review-2026-10-06-gang-verdict}
+  - {state: Failed/Drain, event: spec.strategy, variants: [], windows: [], transition: "", decision: owner-review-2026-10-06-gang-verdict}
+  - {state: Failed/Drain, event: spec.revision, variants: [], windows: [before], transition: "", decision: owner-review-2026-10-06-gang-verdict}
+  - {state: Failed/Drain, event: gang.podGroup, variants: [Deleted], windows: [], transition: "", decision: owner-review-2026-10-06-gang-verdict}
+  - {state: Failed/Drain, event: gang.podGroup, variants: [OwnershipConflict], windows: [], transition: "", decision: owner-review-2026-10-06-gang-verdict}
+  - {state: Failed/Drain, event: spec.resetInstances, variants: [], windows: [before], transition: "", decision: owner-review-2026-10-06-gang-verdict}

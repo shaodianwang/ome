@@ -14,17 +14,14 @@ tick=2 hold cleared
 tick=2 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=2 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
 tick=2 pass result=after:5s
-tick=3 note both members report ContainersReady on the target revision, so the Failed row is adopted in place, Ready on the target with its kept operation cleared
+tick=3 note both members report ContainersReady on the pinned revision, which nobody adopts or promotes; the row stays Failed with its Create kept
 tick=3 apply pod.containersReady[source] pod=svc-a-engine-0-leader-0 now=t+0s
 tick=3 apply pod.containersReady[source] pod=svc-a-engine-0-worker-0 now=t+0s
 tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=3 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-4c292506 readySince=t+0s op=nil lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=3 hold cleared
 tick=3 pass result=none
-tick=4 note the leader's readiness is observed again; the adoption stamp is idempotent and the row is already Ready, so nothing is written
-tick=4 apply pod.containersReady[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=4 note the worker's containers stop being ready again, which moves counters and nothing else
+tick=4 apply pod.containersNotReady[source] pod=svc-a-engine-0-worker-0 now=t+0s
 tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=4 hold cleared
-tick=4 pod status-patch name=svc-a-engine-0-leader-0 serving=absent→True
-tick=4 pod status-patch name=svc-a-engine-0-worker-0 serving=absent→True
-tick=4 pass result=after:5s
+tick=4 pass result=none

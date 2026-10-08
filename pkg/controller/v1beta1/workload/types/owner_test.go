@@ -391,3 +391,37 @@ func TestParkedAttempt_IsSettledAndClaimsNothing(t *testing.T) {
 		}
 	}
 }
+
+// A row keeps an attempt the gang verdict ended when it is Failed with
+// its operation kept and the recorded failure is the PodGroup ownership
+// conflict; a gang surge's rows are the surge machine's and are not read.
+func TestEndedByOwnershipVerdict_FailedRowKeepingTheEndedAttempt(t *testing.T) {
+	verdict := &InstanceTermination{Reason: PodGroupOwnershipConflictReason}
+	deadline := &InstanceTermination{Reason: "DeadlineExceeded"}
+	one := int32(1)
+	create := &InstanceOperation{Type: InstanceOperationCreate, Step: "CreatePods", TargetRevision: "rev-a"}
+	drain := &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepDrain, TargetRevision: "rev-b"}
+	surgeSource := &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurge, SurgeIndex: &one}
+	marker := &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTarget}
+	restart := &InstanceOperation{Type: InstanceOperationRestart, Step: "Drain"}
+	cases := []struct {
+		name string
+		row  *InstanceStatus
+		want bool
+	}{
+		{"nil row", nil, false},
+		{"create ended by the verdict", &InstanceStatus{Phase: InstancePhaseFailed, Operation: create, LastFailure: verdict}, true},
+		{"recreate ended by the verdict", &InstanceStatus{Phase: InstancePhaseFailed, Operation: drain, LastFailure: verdict}, true},
+		{"create ended by its deadline", &InstanceStatus{Phase: InstancePhaseFailed, Operation: create, LastFailure: deadline}, false},
+		{"verdict recorded, operation cleared", &InstanceStatus{Phase: InstancePhaseFailed, LastFailure: verdict}, false},
+		{"verdict recorded, attempt in flight", &InstanceStatus{Phase: InstancePhaseCreating, Operation: create, LastFailure: verdict}, false},
+		{"gang surge source", &InstanceStatus{Phase: InstancePhaseFailed, Operation: surgeSource, LastFailure: verdict}, false},
+		{"gang surge marker", &InstanceStatus{Phase: InstancePhaseFailed, Operation: marker, LastFailure: verdict}, false},
+		{"repair ended by the verdict", &InstanceStatus{Phase: InstancePhaseFailed, Operation: restart, LastFailure: verdict}, false},
+	}
+	for _, tc := range cases {
+		if got := EndedByOwnershipVerdict(tc.row); got != tc.want {
+			t.Errorf("%s: EndedByOwnershipVerdict = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

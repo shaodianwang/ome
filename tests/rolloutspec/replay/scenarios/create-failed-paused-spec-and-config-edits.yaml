@@ -4,9 +4,9 @@
 # the template, the operator configuration knobs and a partition write
 # nothing on the row: each is read by the next decision that consults it,
 # and under a policy that repairs nothing a wider gang is not a loss. The
-# unpause lets the roll take the unready set under the edited strategy - a
-# recreate now, which drains the set in place - beside the fresh index the
-# replica increase added, once the partition releases the row.
+# unpause and the partition's release re-drive nothing at the pinned
+# revision - a strategy edit mints no revision - so the row stays Failed
+# with its Create kept beside the fresh index the replica increase added.
 scenario: create-failed-paused-spec-and-config-edits
 cells:
   - instance/Failed/Create/spec.annotationOnly/before
@@ -48,7 +48,7 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 3
-    note: the Component is paused, so the roll is parked and the row rests
+    note: the Component is paused; the row rests, as it would without the pause
     events:
       - spec.pauseTrue: {}
   - tick: 4
@@ -81,10 +81,10 @@ timeline:
       - spec.replicasUp: {to: 2}
       - spec.partition: {to: 1}
   - tick: 9
-    note: the pause is cleared; the partition still holds this row, so the roll does not take it, and the Create pass materializes the fresh index beside it
+    note: the pause is cleared; the partition still holds this row, which rests either way, and the Create pass materializes the fresh index beside it
     events:
       - spec.unpause: {}
   - tick: 10
-    note: the partition is released, so the roll takes the unready set under the edited strategy - a recreate, which bumps the incarnation and takes the serving gates down - with the kept Create replaced
+    note: the partition is released and nothing follows; the edited strategy mints no revision, so no roll opens at the pinned revision and the row stays Failed with its Create kept
     events:
       - spec.partition: {to: 0}

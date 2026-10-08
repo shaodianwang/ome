@@ -3565,3 +3565,84 @@ func TestParkedAttempt_PinsNoStrategyAndIsScannedForWreckage(t *testing.T) {
 		t.Errorf("a parked attempt whose pods are on a withdrawn revision is wreckage while its set serves too")
 	}
 }
+
+// TestDetectUpdate_VerdictEndedAttemptRollsOnlyTowardAnotherRevision: a
+// row keeping an attempt the gang verdict ended is withheld at the
+// revision that attempt pinned, whatever its pod set says, and rolls
+// toward any other target, with or without pods, since the pin already
+// proves it off target. A rollback onto the running revision is such a
+// target for a recreate pinned past it.
+//
+// Cells: instance/Failed/Create/ctrl.resync/before, instance/Failed/Create/spec.revision/before, instance/Failed/Drain/ctrl.resync/before, instance/Failed/Drain/spec.revision/before, instance/Failed/Drain/spec.rollbackTarget[set]/before
+func TestDetectUpdate_VerdictEndedAttemptRollsOnlyTowardAnotherRevision(t *testing.T) {
+	const other = "llama-70b-engine-otherrev"
+	verdict := &workload.InstanceTermination{Reason: workload.PodGroupOwnershipConflictReason, Message: "PodGroup llama-70b-engine-0 is controlled by StatefulSet/other-owner, not by this owner"}
+	create := func(pin string) *workload.InstanceOperation {
+		return &workload.InstanceOperation{ID: "create-0-1", Type: workload.InstanceOperationCreate, Step: status.CreateStepCreatePods, TargetRevision: pin}
+	}
+	drain := func(pin string) *workload.InstanceOperation {
+		return &workload.InstanceOperation{ID: "update-0-1", Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepDrain, TargetRevision: pin}
+	}
+	cases := []struct {
+		name        string
+		running     string
+		op          func(target string) *workload.InstanceOperation
+		unreadyPod  bool
+		wantTrigger bool
+	}{
+		{"create pinned to the target, members unready on it", "", func(target string) *workload.InstanceOperation { return create(target) }, true, false},
+		{"create pinned to the target, members never placed", "", func(target string) *workload.InstanceOperation { return create(target) }, false, false},
+		{"create pinned elsewhere, members never placed", "", func(string) *workload.InstanceOperation { return create(other) }, false, true},
+		{"recreate pinned to the target", "llama-70b-engine-oldrev", func(target string) *workload.InstanceOperation { return drain(target) }, false, false},
+		{"recreate pinned elsewhere", "llama-70b-engine-oldrev", func(string) *workload.InstanceOperation { return drain(other) }, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t0 := time.Now()
+			input, plan, tcr, calls, c, isvc := retryGateFixture(t, t0)
+			row := &input.ObservedState.InstanceStatuses[0]
+			row.Phase = workload.InstancePhaseFailed
+			row.RunningRevision = tc.running
+			row.Operation = tc.op(tcr.Name)
+			row.LastFailure = verdict
+			var pods []*corev1.Pod
+			if tc.unreadyPod {
+				pod := legacyPodForInstance(isvc, 0, false, false)
+				pod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(tcr.Name)
+				pods = []*corev1.Pod{pod}
+			}
+
+			trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, pods)
+			if err != nil {
+				t.Fatalf("detect: %v", err)
+			}
+			if trigger != tc.wantTrigger {
+				t.Errorf("trigger = %v, want %v", trigger, tc.wantTrigger)
+			}
+			if retryAfter != 0 {
+				t.Errorf("retryAfter: got %v want 0", retryAfter)
+			}
+			if len(*calls) != 0 {
+				t.Errorf("the trigger must not touch a RetryBlock: %d calls", len(*calls))
+			}
+		})
+	}
+
+	t.Run("recreate pinned past a rollback onto the running revision", func(t *testing.T) {
+		t0 := time.Now()
+		input, plan, tcr, _, c, _ := retryGateFixture(t, t0)
+		row := &input.ObservedState.InstanceStatuses[0]
+		row.Phase = workload.InstancePhaseFailed
+		row.RunningRevision = tcr.Name
+		row.Operation = drain(other)
+		row.LastFailure = verdict
+
+		trigger, _, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, nil)
+		if err != nil {
+			t.Fatalf("detect: %v", err)
+		}
+		if !trigger {
+			t.Errorf("a target other than the pinned revision re-drives the ended recreate, the running revision included")
+		}
+	})
+}

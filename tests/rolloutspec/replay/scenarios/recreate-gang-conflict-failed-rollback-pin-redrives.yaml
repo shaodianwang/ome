@@ -1,14 +1,21 @@
 # The roll is pinned back to the running revision while a gang's recreate
-# stands ended by the gang verdict with the Update operation kept. At zero
-# revision distance the re-drive cannot fire, so the wreckage scan takes
-# the ended attempt's pods out and deletes them; the kept operation stays
-# on the Failed row until no pod is left, when the Create pass's
-# write-ahead stamp replaces it with a fresh Create at the running revision.
-scenario: recreate-gang-conflict-failed-rollback-pin-cleans-wreckage
+# stands ended by the gang verdict with the Update operation kept. The
+# running revision is not the revision the ended attempt pinned, so the pin
+# re-drives the continuation as a recreate at the running revision: the
+# ended attempt's members are the old incarnation Phase A drains, and the
+# name being foreign still, the verdict ends the new attempt the same way,
+# pinned to the running revision now, where nothing re-drives it.
+scenario: recreate-gang-conflict-failed-rollback-pin-redrives
 arrows:
   - T-ready-recreate
+  - T-faileddrain-corrective
 cells:
   - instance/Failed/Drain/spec.rollbackTarget[set]/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -51,15 +58,15 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the roll is pinned back to the stored running revision; at zero revision distance the re-drive cannot fire, so the wreckage scan deletes the ended attempt's pods and the kept operation stays on the Failed row
+    note: the roll is pinned back to the stored running revision, which is not the revision the ended attempt pinned, so the continuation is re-driven as a recreate at the running revision with the Incarnation bumped, and Phase A deletes the ended attempt's members
     events:
       - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
   - tick: 8
-    note: the ended attempt's pods are still Terminating, so the kept operation stays where it is
+    note: the name still belongs to another controller, so the verdict ends the re-driven attempt with the recreate kept, pinned to the running revision now
   - tick: 9
-    note: no pod is left, so the Create pass's write-ahead stamp replaces the kept operation with a fresh Create at the running revision; its members are withheld for as long as the gang name belongs to another controller
+    note: the ended attempt's members are gone, and nothing re-drives the row at the revision it is pinned to
     events:
       - pod.deleted[source]: {pod: {index: 0, runner: leader}}
       - pod.deleted[source]: {pod: {index: 0, runner: worker}}
   - tick: 10
-    note: the name still belongs to another controller, so the gang verdict fails the fresh Create attempt with its operation kept
+    note: a pass with nothing new writes nothing

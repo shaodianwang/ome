@@ -1,8 +1,8 @@
 # A migration is requested for a gang whose Create attempt the gang verdict
 # ended with its Create operation kept. A source that is not steady Ready
-# defers the move without taking ownership: the record stays Accepted while
-# the roll takes the unready set, and it closes at its own deadline naming
-# a surge that was never allocated.
+# defers the move without taking ownership: the record stays Accepted on a
+# row no pass re-drives at the pinned revision, and it closes at its own
+# deadline naming a surge that was never allocated.
 scenario: create-failed-migrate-request-waits
 cells:
   - instance/Failed/Create/spec.migrateRequest/before
@@ -32,11 +32,11 @@ timeline:
       - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 3
-    note: the operator asks the Instance off node-0; a source that is not steady Ready defers the move without taking ownership, the record stays Accepted, and the roll takes the unready set as a gang surge onto index 1
+    note: the operator asks the Instance off node-0; a source that is not steady Ready defers the move without taking ownership, the record stays Accepted, and no roll opens at the pinned revision
     events:
       - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
   - tick: 4
-    note: the replacement gang is created; the record still waits
+    note: a further pass writes nothing; the record still waits
   - tick: 5
     note: the record's deadline elapses with no surge ever allocated for it, so the expiry closes it Failed naming that wait
     events:

@@ -1,13 +1,13 @@
 # A gang's Create attempt is ended by the gang verdict with its Create
-# operation kept, and the operator pauses the Component so the row rests
-# instead of being rolled. What its members then report - binding, a
-# readiness that comes and goes on one member, the serving gate and the
-# rotation moving, a runner restart, a pull that wedges past the stuck-pod
-# grace, a kubelet that stops reporting, a new UID, a lost node, a queue
-# gate entered and left, a member on its way out, the availability window and the kept operation's deadline elapsing, a stale
+# operation kept, and the operator pauses the Component. What its members
+# then report - binding, a readiness that comes and goes on one member, the
+# serving gate and the rotation moving, a runner restart, a pull that wedges
+# past the stuck-pod grace, a kubelet that stops reporting, a new UID, a
+# lost node, a queue gate entered and left, a member on its way out, the
+# availability window and the kept operation's deadline elapsing, a stale
 # cache and a controller restart - writes nothing: no clock runs on a Failed
-# row, the escalation pass skips it, and the adoption needs every member
-# ContainersReady. The unpause lets the roll take the unready set.
+# row, the escalation pass skips it, and nothing adopts or re-drives a row
+# the verdict ended. The unpause changes nothing either.
 scenario: create-failed-paused-set-observations
 cells:
   - instance/Failed/Create/pod.scheduled[source]/before
@@ -56,7 +56,7 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 3
-    note: the Component is paused, so the roll that would take the unready set is parked and the row rests
+    note: the Component is paused; the row rests, as it would without the pause
     events:
       - spec.pauseTrue: {}
   - tick: 4
@@ -65,7 +65,7 @@ timeline:
       - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
       - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
   - tick: 5
-    note: the leader alone reports ContainersReady and PodReady, enters the rotation and has its serving gate written by another writer; the adoption needs every member ContainersReady, so nothing is written
+    note: the leader alone reports ContainersReady and PodReady, enters the rotation and has its serving gate written by another writer; nothing adopts or promotes members under a group another controller owns, so nothing is written
     events:
       - pod.containersReady[source]: {pod: {index: 0, runner: leader}}
       - pod.ready[source]: {pod: {index: 0, runner: leader}}
@@ -121,6 +121,6 @@ timeline:
     events:
       - ctrl.crash: {}
   - tick: 17
-    note: the pause is cleared, and the roll takes the unready set on the target as a fresh start - a gang surge at the same target onto index 1 - with the kept Create replaced
+    note: the pause is cleared; no roll opens at the pinned revision, so the row stays Failed with its Create kept
     events:
       - spec.unpause: {}

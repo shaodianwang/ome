@@ -1,12 +1,11 @@
 # A gang's Create attempt is ended by the gang verdict with its Create
 # operation kept while its members stand short of readiness. The update
-# trigger reads a Failed row with no running revision through its pods: a
-# set on the target that is not runtime-ready is a row to recover, so the
-# very next pass rolls it as a fresh start at the same target - under
-# SurgeThenDrain a gang surge onto a free index, whose PodGroup name the
-# foreign owner does not hold - with the kept Create replaced by the surge.
-# The coordination gate is consulted inside that roll and only removes a
-# denial; the collision itself stands unread.
+# trigger reads a Failed row with no running revision through its pods, but
+# not one keeping an attempt the verdict ended: it withholds the revision
+# that attempt pinned, so the very next pass opens no fresh start at the
+# same target - under SurgeThenDrain no gang surge onto a free index - and
+# the Create pass leaves the row. It stays Failed with its Create kept; the
+# collision itself stands unread.
 scenario: create-failed-unready-set-rolled
 cells:
   - instance/Failed/Create/ctrl.resync/before
@@ -36,6 +35,6 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 3
-    note: a pass with nothing new reads two members on the target that are not runtime-ready, so the roll takes the row as a fresh start - a gang surge at the same target onto index 1 - and the kept Create is replaced
+    note: a pass with nothing new reads two members on the target that are not runtime-ready and writes nothing; no gang surge opens at the same target and the kept Create stays
   - tick: 4
-    note: the replacement gang is announced under a name the foreign owner does not hold and its members are created; the source row is the surge's from here
+    note: a further pass writes nothing either; no second gang is built beside the failed one

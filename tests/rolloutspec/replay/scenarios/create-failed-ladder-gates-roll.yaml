@@ -1,10 +1,10 @@
 # A sibling gang's first attempt at the revision wedges on its image and is
 # disposed, which puts the revision's retry ladder into Backoff, and the
 # gang verdict then ends this gang's Create attempt with its Create kept.
-# The kept attempt is no fresh start the ladder admits or denies on its own,
-# but the roll that would take its unready set is one: the Backoff block
-# denies it with the remaining wait as the requeue, and the block coming due
-# admits it, flipping the ladder to one attempt in flight.
+# The kept attempt is no fresh start the ladder admits or denies, and no
+# roll of its unready set opens at the pinned revision for the ladder to
+# gate: the block coming due admits the sibling's rebuild alone, flipping
+# the ladder to one attempt in flight, while the verdict-ended row stays.
 scenario: create-failed-ladder-gates-roll
 cells:
   - instance/Failed/Create/gate.deny[RetryBlock]/before
@@ -41,8 +41,8 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 5
-    note: the roll that would take the first gang's unready set is a fresh start the Backoff block denies, with the remaining wait as the requeue; the kept attempt itself consults no ladder
+    note: the Backoff block gates nothing of the first gang's; no roll of its unready set opens at the pinned revision and the kept attempt itself consults no ladder, so the pass waits on the block for the sibling alone
   - tick: 6
-    note: the block comes due, so the roll is admitted - a gang surge at the same target onto a free index - and the ladder flips to one attempt in flight
+    note: the block comes due, so the sibling's rebuild is admitted and the ladder flips to one attempt in flight; the first gang's row stays Failed with its Create kept
     events:
       - timer.retryAt: {slack: 1s}

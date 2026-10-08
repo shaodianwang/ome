@@ -55,45 +55,34 @@ tick=6 hold cleared
 tick=6 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=6 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
 tick=6 pass result=after:5s
-tick=7 note the controller restarts, and the kept operation is persisted, so the next manager re-drives the continuation the same way and drains the rebuilt members
+tick=7 note the controller restarts; the kept operation and the recorded verdict are persisted, so the next manager reads the same row and re-drives nothing
 tick=7 apply ctrl.crash expectations=dropped now=t+0s
 tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=7 row=0 write incarnation=3 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=7 pod delete name=svc-a-engine-0-leader-0 grace=default
-tick=7 pod delete name=svc-a-engine-0-worker-0 grace=default
 tick=7 hold cleared
-tick=7 pass result=after:5s
-tick=8 note a pass with nothing new finds the restamp written once and the row Update/Drain, and the verdict fails it again with the recreate kept
+tick=7 pass result=none
+tick=8 note a pass with nothing new writes nothing
 tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=8 row=0 write no-op precondition=no-change
 tick=8 hold cleared
-tick=8 row=0 write incarnation=3 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=8 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
-tick=8 pass result=after:5s
-tick=9 note the cache lags a tick behind, and the restamp re-reads the row inside the mutation, so the re-drive lands as before
+tick=8 pass result=none
+tick=9 note the cache lags a tick behind, and a row no pass re-drives reads the same either way
 tick=9 apply ctrl.staleRead cache=end-of-tick-8 now=t+0s
 tick=9 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=9 row=0 write incarnation=4 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=9 hold cleared
-tick=9 pass result=after:5s
-tick=10 note the verdict fails the re-driven attempt again
+tick=9 pass result=none
+tick=10 note the template moves to a third revision and the first status write of the pass is refused once with a conflict; the restamp of the re-driven recreate is re-read and re-applied against a fresh snapshot, and Phase A deletes the ended attempt's members
+tick=10 apply spec.revision image=registry.example.com/runtime:v3 generation=2 now=t+0s
+tick=10 apply api.conflict resource=inferencereplicas write=1 count=1 now=t+0s
 tick=10 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=10 row=0 write no-op precondition=no-change
+tick=10 status conflict write=1 attempt=1/5
+tick=10 row=0 write incarnation=3 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-1b9f8264 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-1b9f8264 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-1b9f8264 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=10 pod delete name=svc-a-engine-0-leader-0 grace=default
+tick=10 pod delete name=svc-a-engine-0-worker-0 grace=default
 tick=10 hold cleared
-tick=10 row=0 write incarnation=4 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=10 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
 tick=10 pass result=after:5s
-tick=11 note the first status write of the pass is refused with a conflict, so the restamp is re-read and re-applied against a fresh snapshot
-tick=11 apply api.conflict resource=inferencereplicas write=1 count=1 now=t+0s
+tick=11 note the name still belongs to another controller, so the verdict ends the re-driven attempt with the recreate kept
 tick=11 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=11 status conflict write=1 attempt=1/5
-tick=11 row=0 write incarnation=5 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=11 row=0 write no-op precondition=no-change
 tick=11 hold cleared
+tick=11 row=0 write incarnation=3 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-1b9f8264 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-1b9f8264 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-1b9f8264 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=11 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
 tick=11 pass result=after:5s
-tick=12 note the verdict fails the re-driven attempt again
-tick=12 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=12 row=0 write no-op precondition=no-change
-tick=12 hold cleared
-tick=12 row=0 write incarnation=5 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=12 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
-tick=12 pass result=after:5s

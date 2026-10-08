@@ -14,7 +14,8 @@ import (
 // Delete) belong to the rollout and migration machinery: the gang
 // abandon, wreckage cleanup, release-held, and migration-expiry paths
 // own them, and clearing one from a reset would orphan its surge marker
-// or migration record.
+// or migration record. ResetOwnsRow adds the one continuation no
+// machinery re-drives.
 func ResetOwnsOperation(op *types.InstanceOperation) bool {
 	if op == nil {
 		return true
@@ -26,6 +27,13 @@ func ResetOwnsOperation(op *types.InstanceOperation) bool {
 		return types.OperationParked(op)
 	}
 	return false
+}
+
+// ResetOwnsRow is ResetOwnsOperation read against the whole row: a recreate
+// the gang verdict ended is a continuation no pass re-drives at its pinned
+// revision, so the reset clears it like a parked attempt.
+func ResetOwnsRow(s *types.InstanceStatus) bool {
+	return ResetOwnsOperation(s.Operation) || types.EndedByOwnershipVerdict(s)
 }
 
 // ClearFailedInstanceOperation drops the Operation a Failed Instance kept
@@ -42,14 +50,14 @@ func ResetOwnsOperation(op *types.InstanceOperation) bool {
 // happened: a non-Failed Instance with no parked attempt, a Failed
 // Instance with no Operation, a fresh-empty slot (Phase=="") from the
 // seam's append path — a status deleted out from under the caller — and
-// an Operation the reset does not own (ResetOwnsOperation) all write
+// an Operation the reset does not own (ResetOwnsRow) all write
 // nothing; the ownership check is enforced here on the fresh read,
 // whatever the caller classified.
 func ClearFailedInstanceOperation(ctx context.Context, mutate func(context.Context, int32, func(*types.InstanceStatus) bool) error, idx int32) (bool, error) {
 	cleared := false
 	err := mutate(ctx, idx, func(s *types.InstanceStatus) bool {
 		cleared = false
-		if s.Operation == nil || !ResetOwnsOperation(s.Operation) {
+		if s.Operation == nil || !ResetOwnsRow(s) {
 			return false
 		}
 		if s.Phase != types.InstancePhaseFailed && !types.OperationParked(s.Operation) {

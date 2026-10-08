@@ -1,0 +1,65 @@
+tick=1 note the gang's PodGroup is announced before its first member, and the Create pass materializes both
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-leader-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-worker-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note both members are bound to node-0 and report Ready, and the leader enters rotation, so the Instance promotes as one
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-leader-0 node=node-0 now=t+0s
+tick=2 apply pod.scheduled[source] pod=svc-a-engine-0-worker-0 node=node-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 hold cleared
+tick=2 pod status-patch name=svc-a-engine-0-leader-0 serving=absent→True
+tick=2 pod status-patch name=svc-a-engine-0-worker-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (2 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the pod template changes and the strategy rebuilds the gang in place of surging, so Phase A takes the serving gates down
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 gate consult strategy=RecreatePod surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 recreate (revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7, incarnation=2)
+tick=3 pod status-patch name=svc-a-engine-0-leader-0 serving=True→False
+tick=3 pod status-patch name=svc-a-engine-0-worker-0 serving=True→False
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the leader leaves rotation, so Phase A deletes both members
+tick=4 apply endpoint.rotationOut[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod delete name=svc-a-engine-0-leader-0 grace=default
+tick=4 pod delete name=svc-a-engine-0-worker-0 grace=default
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note both members are gone, so Phase B rebuilds the gang at the bumped incarnation behind its existing PodGroup
+tick=5 apply pod.deleted[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=5 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod create name=svc-a-engine-0-leader-0 revision=367ef4b7 incarnation=2 ordinal=0
+tick=5 pod create name=svc-a-engine-0-worker-0 revision=367ef4b7 incarnation=2 ordinal=0
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the group's controller reference is rewritten to another owner, which is a name this controller may not write, so the gang verdict stamps the Instance Failed with the recreate kept
+tick=6 apply gang.podGroup[OwnershipConflict] podGroup=svc-a-engine-0 state=OwnershipConflict now=t+0s
+tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=6 row=0 write no-op precondition=no-change
+tick=6 hold cleared
+tick=6 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-367ef4b7 reason=revision svc-a-engine-3363fef6 -> svc-a-engine-367ef4b7 strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
+tick=6 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
+tick=6 pass result=after:5s
+tick=7 note a pass with nothing new writes nothing; the update trigger withholds the revision the ended attempt pinned, so the kept recreate is not re-driven and the Incarnation stays where the verdict found it
+tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=7 hold cleared
+tick=7 pass result=none
+tick=8 note a further pass with nothing new writes nothing, and the conflict is not announced again
+tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=8 hold cleared
+tick=8 pass result=none

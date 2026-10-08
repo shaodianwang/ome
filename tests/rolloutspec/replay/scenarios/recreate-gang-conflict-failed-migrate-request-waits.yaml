@@ -1,14 +1,18 @@
 # A migration is requested for a gang whose recreate stands ended by the
 # gang verdict with the Update operation kept. A source that is not steady
 # Ready defers the move without taking ownership: the record stays Accepted
-# while the continuation is re-driven and failed again, and it closes at its
-# own deadline naming a surge that was never allocated.
+# while the row stays Failed, and it closes at its own deadline naming a
+# surge that was never allocated.
 scenario: recreate-gang-conflict-failed-migrate-request-waits
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
 cells:
   - instance/Failed/Drain/spec.migrateRequest/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -53,14 +57,14 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the operator asks the Instance off node-0, and a source that is not steady Ready defers the move without taking ownership, so the record stays Accepted and the re-drive restamps the recreate
+    note: the operator asks the Instance off node-0, and a source that is not steady Ready defers the move without taking ownership, so the record stays Accepted and the row stays Failed
     events:
       - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
   - tick: 8
-    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+    note: a pass with nothing new writes nothing
   - tick: 9
     note: the record's deadline elapses with no surge ever allocated, so the expiry closes it Failed naming that wait and this row is untouched
     events:
       - timer.migrationDeadline: {slack: 1s}
   - tick: 10
-    note: the continuation is re-driven again under a deadline re-derived at the clock's new reading
+    note: a further pass with nothing new writes nothing

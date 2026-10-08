@@ -1,17 +1,22 @@
 # The clocks around a gang's recreate that the gang verdict ended with the
 # Update operation kept. The fast escalator skips a row already stamped
 # Failed, so an elapsed stuck-pod grace ends nothing; the kept operation's
-# deadline is replaced by the re-drive's fresh one, so its elapsing ends
-# nothing either; and the Component sweep acts on a stuck pod, not on the
-# row. Each Failed pass is re-driven and failed again on the pass after.
+# deadline keeps elapsing and the escalation skips the row for it too; and
+# the Component sweep acts on a stuck pod on its own evidence, not on the
+# row, which nothing re-drives.
 scenario: recreate-gang-conflict-failed-timers
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
 cells:
   - instance/Failed/Drain/timer.stuckPodGrace/before
   - instance/Failed/Drain/timer.operationDeadline/before
   - instance/Failed/Drain/timer.forceDelete[overdueSlack]/before
+  - instance/Failed/Drain/pod.stuckTerminating/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -56,30 +61,29 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the rebuilt leader is bound and its pull wedges, which the escalation skips on a Failed row, so the re-drive restamps the recreate and drains the set
+    note: the ended attempt's leader is bound and its pull wedges, which the escalation skips on a Failed row; nothing re-drives the row
     events:
       - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-1}
       - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-1}
       - pod.waiting[ImagePullBackOff]: {pod: {index: 0, runner: leader}, message: "manifest unknown"}
   - tick: 8
-    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
-  - tick: 9
-    note: the stuck-pod grace elapses on the wedged leader, and the fast escalator skips a row already stamped Failed, so the re-drive restamps the recreate under a deadline re-derived at the clock's new reading, while the sweep only reports the two draining members still pinned by their finalizers
+    note: the stuck-pod grace elapses on the wedged leader, and the fast escalator skips a row already stamped Failed
     events:
       - timer.stuckPodGrace: {slack: 1s}
-  - tick: 10
-    note: the verdict fails the re-driven attempt again
-  - tick: 11
-    note: the kept operation's deadline elapses, which the escalation skips on a Failed row, and the re-drive replaces it with a fresh one
+  - tick: 9
+    note: the kept operation's deadline elapses, which the escalation skips on a Failed row too
     events:
       - timer.operationDeadline: {slack: 1s}
-  - tick: 12
-    note: the verdict fails the re-driven attempt again
-  - tick: 13
-    note: the kubelets behind both draining members stop acknowledging their deletion and both are past their overdue slack on a node the cluster no longer holds, so the sweep at the top of the pass force-deletes them on their own evidence and the re-drive restamps a row with nothing left to drain
+  - tick: 10
+    note: something else deletes both members, which hold their names while they terminate; nothing re-drives the row
+    events:
+      - pod.terminating[source]: {pod: {index: 0, runner: leader}}
+      - pod.terminating[source]: {pod: {index: 0, runner: worker}}
+  - tick: 11
+    note: the kubelets behind both terminating members stop acknowledging their deletion and both are past their overdue slack, so the sweep at the top of the pass force-deletes them on their own evidence while the row stays as it was
     events:
       - pod.stuckTerminating: {pod: {index: 0, runner: leader}}
       - pod.stuckTerminating: {pod: {index: 0, runner: worker}}
       - timer.forceDelete[overdueSlack]: {slack: 1s}
-  - tick: 14
-    note: the verdict fails the re-driven attempt again, with no member left to drain
+  - tick: 12
+    note: a further pass with nothing new writes nothing, with no member left

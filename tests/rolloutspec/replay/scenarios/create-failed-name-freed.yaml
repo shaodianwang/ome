@@ -1,0 +1,65 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and the foreign PodGroup is then deleted. The PodGroup
+# pass announces the group again under this owner and the members stop
+# being withheld, but a freed name re-drives nothing: the Create pass leaves
+# an attempt the verdict ended and the update trigger withholds the revision
+# it pinned. A corrective revision resumes the row: a recreate at the new
+# revision replaces the kept Create, drains the ended attempt's members and
+# rebuilds the gang behind its own group, which promotes.
+scenario: create-failed-name-freed
+arrows:
+  - T-failedcreate-corrective
+  - T-drain-ready
+cells:
+  - instance/Failed/Create/gang.podGroup[Deleted]/before
+  - instance/Failed/Create/ctrl.resync/before
+  - instance/Failed/Create/spec.revision/before
+intentional: >-
+  a Create the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it, not a tick, not a freed name, not its members coming
+  up; it resumes through the reset mailbox or a corrective revision
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: the foreign PodGroup is deleted, so the PodGroup pass announces the group again under this owner; the members stop being withheld, and still nothing re-drives the attempt the verdict ended
+    events:
+      - gang.podGroup[Deleted]: {instance: 0}
+  - tick: 4
+    note: a pass with nothing new writes nothing; the row waits for the reset mailbox or a corrective revision
+  - tick: 5
+    note: the template moves to a corrected revision; the roll replaces the kept Create with a recreate at it, no surge over a row that never ran a revision, and Phase A deletes the ended attempt's members
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 6
+    note: both members are gone, so Phase B rebuilds the gang at the bumped incarnation behind the group this owner announced
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 7
+    note: both members are bound and report Ready, and the leader enters rotation, so the Instance promotes on the corrective revision
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}

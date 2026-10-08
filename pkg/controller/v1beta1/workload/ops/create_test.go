@@ -26,6 +26,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -2280,4 +2281,55 @@ func TestCreateFreshStart_ParkedAttemptIsAFreshStart(t *testing.T) {
 	if createFreshStart(inFlight, nil) {
 		t.Errorf("an attempt in flight is not a fresh start")
 	}
+}
+
+// TestCreate_AttemptEndedByTheGangVerdictIsLeftAlone: a row keeping a
+// Create the gang verdict ended is not the Create pass's, whether the
+// name is still foreign or free again: no member is built, nothing is
+// written and no wake-up is asked for. The row waits for the reset
+// mailbox or a corrective revision.
+//
+// Cells: instance/Failed/Create/gang.podGroup[Deleted]/before, instance/Failed/Create/ctrl.resync/before
+func TestCreate_AttemptEndedByTheGangVerdictIsLeftAlone(t *testing.T) {
+	t0 := time.Now()
+	ended := disposedFreshStart()
+	ended.Operation = &v1beta1.InstanceOperation{ID: "create-0-1", Type: v1beta1.InstanceOperationCreate, Step: status.CreateStepCreatePods, StartedAt: metav1.NewTime(t0), Deadline: metav1.NewTime(t0.Add(30 * time.Minute))}
+	ended.LastFailure = &v1beta1.InstanceTermination{Reason: workload.PodGroupOwnershipConflictReason, Message: "PodGroup llama-70b-engine-0 is controlled by StatefulSet/other-owner, not by this owner", Time: metav1.NewTime(t0)}
+	input, plan, tcr, calls, c, isvc := createGateFixture(t, t0, ended)
+	// The attempt pinned the revision the pass would otherwise build at.
+	input.ObservedState.InstanceStatuses[0].Operation.TargetRevision = tcr.Name
+	before := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+
+	for _, gangs := range []*workload.GangObservations{
+		gangObservationsFor(0, workload.GangStateOwnershipConflict),
+		nil,
+	} {
+		input.Gangs = gangs
+		for pass := 0; pass < 2; pass++ {
+			res, err := Create(context.Background(), legacyTestDeps(c), *input, plan, tcr)
+			if err != nil {
+				t.Fatalf("create pass %d (gangs=%v): %v", pass, gangs != nil, err)
+			}
+			if res != (ctrl.Result{}) {
+				t.Errorf("pass %d (gangs=%v): an ended attempt asks for no wake-up: got %+v", pass, gangs != nil, res)
+			}
+		}
+	}
+	if pods := createGatePods(t, c, isvc.Namespace); len(pods) != 0 {
+		t.Errorf("no member may be built for an ended attempt: got %d pod(s)", len(pods))
+	}
+	if len(*calls) != 0 {
+		t.Errorf("an ended attempt touches no RetryBlock: %d calls", len(*calls))
+	}
+	if after := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]; after.Phase != before.Phase || after.Operation == nil || after.Operation.ID != before.Operation.ID {
+		t.Errorf("row after the passes = %+v, want the kept Create left as it was", after)
+	}
+}
+
+// gangObservationsFor wires one Instance's PodGroup classification into
+// the input, the way the PodGroup pass does ahead of the dispatcher.
+func gangObservationsFor(idx int32, state workload.GangState) *workload.GangObservations {
+	g := workload.NewGangObservations()
+	g.Record(idx, workload.GangObservation{Name: "llama-70b-engine-0", State: state, Message: "PodGroup llama-70b-engine-0 is controlled by StatefulSet/other-owner, not by this owner"})
+	return g
 }

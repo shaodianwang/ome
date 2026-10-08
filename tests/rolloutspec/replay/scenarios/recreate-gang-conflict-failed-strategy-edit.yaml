@@ -1,15 +1,18 @@
 # The update strategy is edited while a gang's recreate stands ended by the
-# gang verdict with the Update operation kept. The mode is re-resolved on
-# every pass, so the re-drive opens the continuation under the mechanism the
-# edited strategy resolves to for this diff: a gang surge at a fresh index
-# with its own PodGroup, which the verdict on the old name no longer
-# reaches.
+# gang verdict with the Update operation kept. The edit mints no revision
+# and re-drives nothing: no replacement gang opens at a fresh index, and the
+# mechanism is re-resolved only when a corrective revision re-drives the
+# continuation.
 scenario: recreate-gang-conflict-failed-strategy-edit
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
 cells:
   - instance/Failed/Drain/spec.strategy/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -52,10 +55,10 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the strategy is edited to surge, and the re-drive opens the continuation as a gang surge at index 1 instead of restamping the recreate
+    note: the strategy is edited to surge, which mints no revision and re-drives nothing; the mechanism is re-resolved only when a corrective revision re-drives the continuation
     events:
       - spec.strategy: {strategy: SurgeThenDrain}
   - tick: 8
-    note: the replacement gang's PodGroup is announced under its own name and both members are created; the source row is a gang-surge source now and the foreign name no longer fails it
+    note: a pass with nothing new writes nothing; no replacement gang is opened at a fresh index
   - tick: 9
-    note: a tick with nothing changed waits on the replacement gang
+    note: a further pass with nothing new writes nothing

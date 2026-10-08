@@ -1,19 +1,21 @@
 # Spec and config edits land on a gang's recreate that the gang verdict
 # ended with the Update operation kept. A label the hasher derives changes
-# nothing; the ready timeout is read by the re-drive, which re-derives the
-# kept operation's deadline from it; a config edit writes nothing on the row;
-# and a replica increase adds a fresh index beside this one, which is left
-# as it was. Each Failed pass is re-driven and failed again on the pass
-# after.
+# nothing, the ready timeout and a config edit write nothing on a row no
+# pass re-drives, and a replica increase adds a fresh index beside this one,
+# which is left as it was.
 scenario: recreate-gang-conflict-failed-spec-edits
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
 cells:
   - instance/Failed/Drain/spec.annotationOnly/before
   - instance/Failed/Drain/spec.policyTuning[instanceReadyTimeout]/before
   - instance/Failed/Drain/config.changed[stuckPodGrace]/before
   - instance/Failed/Drain/spec.replicasUp/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -57,28 +59,28 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the queue label is re-pointed, which the hasher derives rather than reads, so the target revision stands and the re-drive restamps the recreate as it would have anyway
+    note: the queue label is re-pointed, which the hasher derives rather than reads, so the target revision stands and nothing re-drives the row
     events:
       - spec.annotationOnly: {labels: {kueue.x-k8s.io/queue-name: queue-b}}
   - tick: 8
-    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+    note: a pass with nothing new writes nothing
   - tick: 9
-    note: the ready timeout is shortened, and the re-drive opens the continuation under the fresh timeout, re-deriving the kept operation's deadline from it
+    note: the ready timeout is shortened, which writes nothing on a row no pass re-drives
     events:
       - spec.policyTuning[instanceReadyTimeout]: {value: 5m}
   - tick: 10
-    note: the verdict fails the re-driven attempt again
+    note: a pass with nothing new writes nothing
   - tick: 11
-    note: the stuck-pod grace is configured, which arms the fast escalation for later passes and writes nothing on the row; the re-drive restamps as before
+    note: the stuck-pod grace is configured, which arms the fast escalation for later passes and writes nothing on the row
     events:
       - config.changed[stuckPodGrace]: {config: {stuckPodGrace: 1m}}
   - tick: 12
-    note: the verdict fails the re-driven attempt again
+    note: a pass with nothing new writes nothing
   - tick: 13
-    note: the replica count rises, so a fresh index is materialized beside this one in the same pass, and the re-drive restamps this row's recreate with its index left as it was
+    note: the replica count rises, so a fresh index is materialized beside this one, which is left as it was
     events:
       - spec.replicasUp: {to: 2}
   - tick: 14
-    note: the verdict fails the re-driven attempt again while the fresh index builds beside it
+    note: the fresh index builds beside the Failed row, which stays as it was
   - tick: 15
-    note: the re-drive restamps this row again
+    note: a further pass finds the same

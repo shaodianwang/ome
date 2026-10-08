@@ -1648,18 +1648,10 @@ transitions:
   - id: T-failedcreate-corrective
     from: Failed/Create
     event: spec.revision
-    guard: the pods carry a revision other than the roll target and no RetryBlock denies the target; an Instance that never ran a revision has no serving source for a surge to keep, so it re-enters as a recreate under every strategy
+    guard: the roll target is a revision other than the one the kept Create pinned and no RetryBlock denies it, whatever the pod set says; an Instance that never ran a revision has no serving source for a surge to keep, so it re-enters as a recreate under every strategy
     to: Update/Drain
-    effects: [Incarnation bumped, Phase Updating with the Drain step at the corrective revision, the kept Create operation replaced]
+    effects: [Incarnation bumped, Phase Updating with the Drain step at the corrective revision, the kept Create operation replaced, the ended attempt's members the set Phase A drains]
     decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
-  - id: T-failedcreate-adopt
-    from: Failed/Create
-    event: pod.containersReady
-    variant: source
-    guard: RunningRevision is empty, every pod carries the target revision's hash and is ContainersReady, so the update trigger selects the AdoptRevision backfill instead of a roll
-    to: Ready
-    effects: [Phase Ready on the target revision with the operation cleared and that revision's RetryBlock pruned]
-    decided_in: pkg/controller/v1beta1/workload/ops/update.go
   - id: T-failedcreate-reset
     from: Failed/Create
     event: spec.resetInstances
@@ -1694,13 +1686,22 @@ transitions:
     why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Failed/Drain (planned) --------------------------------------------
-  - id: T-faileddrain-redrive
+  - id: T-faileddrain-corrective
     from: Failed/Drain
-    event: ctrl.resync
-    guard: the row still claims the update verb and its running revision is not the roll target, so the update pass selects it as a continuation, exempt from the budget, the ladder and the gate
+    event: spec.revision
+    guard: the roll target is a revision other than the one the ended recreate pinned, the running revision included, so the update pass selects the continuation again, exempt from the budget, the ladder and the gate
     to: Update/Drain
-    effects: [Incarnation bumped and a fresh recreate attempt with its own identity and deadline restamped over the kept one, so the pods of the ended attempt are the set the drain phase replaces]
+    effects: [Incarnation bumped and a fresh recreate attempt at the new target with its own identity and deadline restamped over the kept one, so the pods of the ended attempt are the set the drain phase replaces]
     decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-faileddrain-reset
+    from: Failed/Drain
+    event: spec.resetInstances
+    guard: the operator named this Instance, or all, and no pod of it is still in the serving rotation
+    to: Failed
+    effects: [every live-listed pod deleted with the expectation recorded before each delete, the kept Update operation cleared through the MutateInstance seam, Phase and LastFailure untouched so the row is left in the fresh-start shape the roll rebuilds at the target, InstancesReset event, the annotation consumed only after those effects commit]
+    decided_in: pkg/controller/v1beta1/inferencereplica/reset_instances.go
+    lane: adapter
+    why: the operator reset mailbox is the spec.resetInstances annotation, which the adapter consumes outside workload.Reconcile
   - id: T-faileddrain-scaledown
     from: Failed/Drain
     event: spec.replicasDown

@@ -70,7 +70,9 @@ func gangFailureSummary(reason, message string) string {
 // escalateGangFailure ends an attempt whose PodGroup name belongs to
 // another controller. ENVIRONMENT-CAUSED: no corrected pod template
 // frees a name someone else owns, so the revision keeps a clean retry
-// ladder, and the Operation is preserved for the gang abandon path.
+// ladder. The Operation is kept: it records the attempt the verdict ended,
+// which no pass re-drives at the revision it pinned, and a gang surge's
+// continuation drives the abandon path.
 //
 // Idempotent announcement: the stamp is a no-op on a row already Failed
 // for this reason, so the warning is withheld there too. Nothing clears

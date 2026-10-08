@@ -1,19 +1,25 @@
 # The controller and the apiserver around a gang's recreate that the gang
-# verdict ended with the Update operation kept. The kept operation is
-# persisted, so a restarted manager re-drives the continuation the same
-# way; a pass with nothing new finds the restamp written once and the row
-# Update/Drain; a stale read changes nothing because the restamp re-reads
-# the row inside the mutation; and a status write refused with a conflict
-# is re-read and re-applied.
+# verdict ended with the Update operation kept. The kept operation and the
+# recorded verdict are persisted, so a restarted manager reads the same row
+# and re-drives nothing; a pass with nothing new writes nothing; a stale
+# read changes nothing; and when a corrective revision re-drives the
+# continuation, a status write refused with a conflict is re-read and
+# re-applied.
 scenario: recreate-gang-conflict-failed-controller-observations
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
+  - T-faileddrain-corrective
 cells:
   - instance/Failed/Drain/ctrl.crash/before
-  - instance/Failed/Drain/ctrl.resync/after@T-faileddrain-redrive
+  - instance/Failed/Drain/ctrl.resync/before
   - instance/Failed/Drain/ctrl.staleRead/before
   - instance/Failed/Drain/api.conflict/before
+  - instance/Failed/Drain/spec.revision/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -56,20 +62,19 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the controller restarts, and the kept operation is persisted, so the next manager re-drives the continuation the same way and drains the rebuilt members
+    note: the controller restarts; the kept operation and the recorded verdict are persisted, so the next manager reads the same row and re-drives nothing
     events:
       - ctrl.crash: {}
   - tick: 8
-    note: a pass with nothing new finds the restamp written once and the row Update/Drain, and the verdict fails it again with the recreate kept
+    note: a pass with nothing new writes nothing
   - tick: 9
-    note: the cache lags a tick behind, and the restamp re-reads the row inside the mutation, so the re-drive lands as before
+    note: the cache lags a tick behind, and a row no pass re-drives reads the same either way
     events:
       - ctrl.staleRead: {}
   - tick: 10
-    note: the verdict fails the re-driven attempt again
-  - tick: 11
-    note: the first status write of the pass is refused with a conflict, so the restamp is re-read and re-applied against a fresh snapshot
+    note: the template moves to a third revision and the first status write of the pass is refused once with a conflict; the restamp of the re-driven recreate is re-read and re-applied against a fresh snapshot, and Phase A deletes the ended attempt's members
     events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
       - api.conflict: {write: 1, count: 1}
-  - tick: 12
-    note: the verdict fails the re-driven attempt again
+  - tick: 11
+    note: the name still belongs to another controller, so the verdict ends the re-driven attempt with the recreate kept

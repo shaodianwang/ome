@@ -1,11 +1,11 @@
 # A gang's Create attempt is ended by the gang verdict with its Create
 # operation kept, and every member then dies - one exits, one is refused
-# by its node, one is evicted - under a restart policy that repairs nothing. A dead
-# pod is absent for the Create pass's missing-pod diff, but the update
-# trigger reads the set first: dead members on the target are a set that is
-# not runtime-ready, so the roll takes the row as a fresh start - a gang
-# surge onto a free index - with the kept Create replaced, and the dead
-# occupants are left to the source's eventual drain rather than recycled.
+# by its node, one is evicted - under a restart policy that repairs nothing.
+# A dead pod is absent for the Create pass's missing-pod diff, but the pass
+# leaves an attempt the verdict ended and the update trigger withholds the
+# pinned revision, so the row stays Failed with its Create kept and the dead
+# occupants hold their names until a corrective recreate drains them or the
+# reset deletes them; nothing is recycled.
 scenario: create-failed-dead-set-rolled
 cells:
   - instance/Failed/Create/pod.phaseTerminal[Failed]/before
@@ -35,7 +35,7 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 3
-    note: the leader exits, one worker is refused by its node and the other is evicted; the roll reads a dead set on the target and takes the row as a gang surge at the same target onto index 1, leaving the occupants where they are
+    note: the leader exits, one worker is refused by its node and the other is evicted; no roll opens at the pinned revision and nothing recycles a kept Create, so the row stays Failed and the occupants stay where they are
     events:
       - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
       - pod.scheduled[source]: {pod: {index: 0, runner: worker, ordinal: 1}, message: node-0}
@@ -43,9 +43,9 @@ timeline:
       - pod.admissionRejected[OutOfResource]: {pod: {index: 0, runner: worker}, resource: cpu, message: "Node didn't have enough resource: cpu"}
       - pod.evicted: {pod: {index: 0, runner: worker, ordinal: 1}, message: "The node was low on resource: memory"}
   - tick: 4
-    note: the replacement gang is announced under a free name and its members are created; the source row is the surge's from here
+    note: a further pass writes nothing; no replacement gang is built beside the dead one
   - tick: 5
-    note: the dead occupants are collected; nothing of the surge waits on them
+    note: the dead occupants are collected; the row still rests with its Create kept
     events:
       - pod.deleted[source]: {pod: {index: 0, runner: leader}}
       - pod.deleted[source]: {pod: {index: 0, runner: worker}}

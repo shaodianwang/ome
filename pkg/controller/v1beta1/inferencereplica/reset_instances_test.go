@@ -354,6 +354,54 @@ func TestConsumeResetInstances_ParkedAttemptReadingUpdating_Reset(t *testing.T) 
 	})
 }
 
+// verdictEndedRecreateRow is a gang's recreate the gang verdict ended on
+// Instance idx: Failed with the Update continuation kept and the
+// ownership conflict recorded.
+func verdictEndedRecreateRow(idx int32) v1beta1.OMENativeInstanceStatus {
+	now := metav1.Now()
+	return v1beta1.OMENativeInstanceStatus{
+		Index: idx, Phase: v1beta1.OMENativeInstanceFailed, RunningRevision: "llama-engine-aaaaaaaa", TargetRevision: "llama-engine-bbbbbbbb", Incarnation: 2,
+		Operation: &v1beta1.InstanceOperation{
+			ID: "update-6-1", Type: v1beta1.InstanceOperationUpdate, Step: workloadtypes.UpdateStepDrain,
+			StartedAt: now, LastProgressAt: now, Deadline: now, TargetRevision: "llama-engine-bbbbbbbb",
+			Reason: "revision llama-engine-aaaaaaaa -> llama-engine-bbbbbbbb",
+		},
+		LastFailure: &v1beta1.InstanceTermination{Reason: workloadtypes.PodGroupOwnershipConflictReason, Message: "PodGroup llama-engine-6 is controlled by StatefulSet/other-owner, not by this owner", Time: now},
+	}
+}
+
+// A recreate the gang verdict ended is the reset's to clear, named
+// outright or under "all": no pass re-drives it at its pinned revision,
+// so the mailbox is the operator's way out beside a corrective revision.
+// Its members are deleted and the kept Update continuation cleared, with
+// Phase, LastFailure, Incarnation and the running revision kept.
+//
+// Cells: instance/Failed/Drain/spec.resetInstances[indexList]/before, instance/Failed/Drain/spec.resetInstances[all]/before
+// Arrows: T-faileddrain-reset
+func TestConsumeResetInstances_RecreateEndedByTheGangVerdict_Reset(t *testing.T) {
+	for _, value := range []string{"6", "all"} {
+		t.Run(value, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			seed := resetIR(value)
+			seed.Status.InstanceStatuses = append(seed.Status.InstanceStatuses, verdictEndedRecreateRow(6))
+			pods := append(resetPods(seed), podForIR(seed, 6, "leader", 0, false, false), podForIR(seed, 6, "worker", 0, false, false))
+			r, c, rec, ir := newResetFixture(t, seed, pods, nil)
+			want6 := instanceStatusAt(t, ir, 6)
+
+			requeue, err := r.consumeResetInstancesRequest(context.Background(), r.Log, ir, nil)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(requeue).To(gomega.BeFalse())
+
+			assertInstanceReset(t, g, c, ir, 6, want6)
+			assertResetAnnotationConsumed(t, g, c, ir)
+			events := drainEvents(rec)
+			g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.HaveLen(1))
+			g.Expect(eventsContaining(events, "6 ")).NotTo(gomega.BeEmpty(), "the event must name the reset recreate")
+			g.Expect(eventsContaining(events, "6 (")).To(gomega.BeEmpty(), "the ended recreate must not be skipped")
+		})
+	}
+}
+
 // TestConsumeResetInstances_ServingTarget_SkipConsumed pins the serving
 // guard: a Failed Instance with a pod still in the serving rotation is
 // left exactly as it was — pod and preserved Operation — no expectation

@@ -51,11 +51,11 @@ type resetSkip struct {
 // keeps serving on its old pods) is skipped untouched: draining a
 // serving source is the rollout machinery's job, not this verb's. And
 // only repair-owned parked attempts are in scope (no Operation, Create,
-// Restart — status.ResetOwnsOperation): an Instance parked behind an
-// Update or Migrate continuation is skipped, because the gang abandon,
-// wreckage cleanup, release-held, and migration-expiry paths own those
-// continuations and clearing one here would orphan its surge marker or
-// migration record.
+// Restart, and the recreate the gang verdict ended — status.ResetOwnsRow):
+// an Instance parked behind any other Update or a Migrate continuation is
+// skipped, because the gang abandon, wreckage cleanup, release-held, and
+// migration-expiry paths own those continuations and clearing one here
+// would orphan its surge marker or migration record.
 //
 // Mailbox discipline mirrors consumeReleaseHeldRequest: every present
 // request is answered. A candidate has every pod deleted (live list,
@@ -177,7 +177,8 @@ func (r *Reconciler) resetInstances(ctx context.Context, log logr.Logger, ir *v1
 	// skipped with its owner named.
 	var candidates []int32
 	classify := func(idx int32, s *v1beta1.OMENativeInstanceStatus) {
-		if !status.ResetOwnsOperation(v1beta1convert.InstanceOperationToWorkload(s.Operation)) {
+		row := v1beta1convert.InstanceStatusToWorkload(*s)
+		if !status.ResetOwnsRow(&row) {
 			skipped = append(skipped, resetSkip{index: idx, reason: "owned by " + string(s.Operation.Type)})
 			return
 		}

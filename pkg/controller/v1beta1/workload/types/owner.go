@@ -309,6 +309,26 @@ func RecreateOfDarkRow(s *InstanceStatus, strategy UpdateStrategyType) bool {
 		s.Phase == InstancePhaseFailed && s.ServingPodCount == 0
 }
 
+// EndedByOwnershipVerdict reports whether the row keeps an attempt the gang
+// verdict ended: Failed, operation kept, the ownership conflict recorded. No
+// pass re-drives it at the pinned revision; it resumes through the reset
+// mailbox or another revision. A gang surge's rows are the surge machine's.
+func EndedByOwnershipVerdict(s *InstanceStatus) bool {
+	if s == nil || s.Phase != InstancePhaseFailed || s.Operation == nil ||
+		s.LastFailure == nil || s.LastFailure.Reason != PodGroupOwnershipConflictReason {
+		return false
+	}
+	switch s.Operation.Type {
+	case InstanceOperationCreate:
+		return true
+	case InstanceOperationUpdate:
+		state := updateStateOf(s.Operation.Step)
+		return s.Operation.SurgeIndex == nil &&
+			state != StateUpdateGangSurgeTarget && state != StateUpdateGangSurgeTargetCleanup
+	}
+	return false
+}
+
 // RemembersCrash reports whether the row records a failure of its current
 // promoted pod set: a LastFailure dated after the row entered Ready. A
 // rebuild enters Ready anew, so a record of the set it replaced reads as

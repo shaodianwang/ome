@@ -1,15 +1,10 @@
 # A gang's recreate is ended by the gang verdict - its PodGroup name belongs
-# to another controller - with the Update operation kept, so the row reads
-# Failed/Drain for the one pass before the update pass re-drives it as a
-# continuation. What the rebuilt members report in that pass is read by
-# nobody: the re-drive restamps a fresh recreate with the Incarnation bumped
-# and drains them as the old incarnation, and the verdict fails the Instance
-# again on the pass after; readiness, serving gates and rotation move
-# counters and nothing else.
+# to another controller - with the Update operation kept, and what its
+# members report afterwards is read by nobody: readiness, serving gates and
+# rotation move counters on a row no pass re-drives, and nothing else.
 scenario: recreate-gang-conflict-failed-readiness-observations
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
 cells:
   - instance/Failed/Drain/pod.scheduled[source]/before
   - instance/Failed/Drain/pod.containersReady[source]/before
@@ -19,6 +14,11 @@ cells:
   - instance/Failed/Drain/endpoint.rotationOut[source]/before
   - instance/Failed/Drain/pod.servingOff[source]/before
   - instance/Failed/Drain/pod.containersNotReady[source]/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -61,7 +61,7 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the rebuilt members are bound, report readiness and the leader's serving gate and endpoint come up, none of which anyone reads before the re-drive restamps the recreate at a bumped incarnation and takes the leader's gate down again to drain them as the old one
+    note: the ended attempt's members are bound, report readiness and the leader's serving gate and endpoint come up, all of which moves counters on a row no pass re-drives
     events:
       - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-1}
       - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-1}
@@ -70,12 +70,12 @@ timeline:
       - pod.servingOn[source]: {pod: {index: 0, runner: leader}}
       - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
   - tick: 8
-    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+    note: a pass with nothing new writes nothing
   - tick: 9
-    note: the draining leader leaves rotation and its serving gate reads False while the worker's containers stop being ready, which move counters on the Failed row; the re-drive that follows finds the leader unrouted and deletes both members as the old incarnation
+    note: the leader leaves rotation and its serving gate reads False while the worker's containers stop being ready, which moves counters and nothing else
     events:
       - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
       - pod.servingOff[source]: {pod: {index: 0, runner: leader}}
       - pod.containersNotReady[source]: {pod: {index: 0, runner: worker}}
   - tick: 10
-    note: the verdict fails the re-driven attempt again
+    note: a further pass with nothing new writes nothing

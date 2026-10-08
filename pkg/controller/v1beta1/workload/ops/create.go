@@ -295,6 +295,12 @@ func createFilteredBatched(
 			}
 			continue
 		}
+		// A row keeping an attempt the gang verdict ended is not this
+		// pass's to build or promote: the roll replaces it at a corrective
+		// revision and the reset mailbox clears it.
+		if workload.EndedByOwnershipVerdict(input.ObservedState.Instance(inst.Index)) {
+			continue
+		}
 		existing := byInstance[inst.Index]
 		observed := input.ObservedState.Instance(inst.Index)
 		// A parked attempt whose set stands is the roll's: nothing of it is

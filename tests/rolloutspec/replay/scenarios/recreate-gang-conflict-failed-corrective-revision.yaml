@@ -1,0 +1,80 @@
+# A gang's recreate is ended by the gang verdict with the Update operation
+# kept, and the template then moves to a corrected revision. A revision
+# other than the one the ended attempt pinned re-drives the continuation: a
+# fresh recreate at the new target is restamped over the kept one with the
+# Incarnation bumped, exempt from the budget, the ladder and the gate, and
+# Phase A drains the ended attempt's members. The foreign PodGroup is
+# deleted meanwhile, so the group is announced again under this owner, the
+# rebuilt gang is placed behind it and the Instance promotes on the
+# corrective revision.
+scenario: recreate-gang-conflict-failed-corrective-revision
+arrows:
+  - T-ready-recreate
+  - T-faileddrain-corrective
+  - T-drain-ready
+cells:
+  - instance/Failed/Drain/spec.revision/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members are bound to node-0 and report Ready, and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds the gang in place of surging, so Phase A takes the serving gates down
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation, so Phase A deletes both members
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 5
+    note: both members are gone, so Phase B rebuilds the gang at the bumped incarnation behind its existing PodGroup
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 6
+    note: the group's controller reference is rewritten to another owner, which is a name this controller may not write, so the gang verdict stamps the Instance Failed with the recreate kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 7
+    note: the template moves to a third revision, which is not the one the ended attempt pinned, so the continuation is re-driven; a fresh recreate at the new target is restamped over the kept one with the Incarnation bumped, and Phase A deletes the ended attempt's members
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 8
+    note: both members are gone and the foreign PodGroup is deleted, so the PodGroup pass announces the group again under this owner and Phase B rebuilds the gang behind it at the new revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+      - gang.podGroup[Deleted]: {instance: 0}
+  - tick: 9
+    note: both members are bound and report Ready, and the leader enters rotation, so the Instance promotes on the corrective revision
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-0}
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}

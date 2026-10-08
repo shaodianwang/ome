@@ -14,19 +14,11 @@ tick=2 hold cleared
 tick=2 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=2 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
 tick=2 pass result=after:5s
-tick=3 note a pass with nothing new reads two members on the target that are not runtime-ready, so the roll takes the row as a fresh start - a gang surge at the same target onto index 1 - and the kept Create is replaced
+tick=3 note a pass with nothing new reads two members on the target that are not runtime-ready and writes nothing; no gang surge opens at the same target and the kept Create stays
 tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=3 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
-tick=3 row=0 write incarnation=1 phase=Updating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#2{type=Update step=Surge target=svc-a-engine-4c292506 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=3 row=1 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#3{type=Update step=GangSurgeTarget target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
-tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 gang surge to revision svc-a-engine-4c292506 (surge-index=1)
 tick=3 hold cleared
-tick=3 pass result=after:5s
-tick=4 note the replacement gang is announced under a name the foreign owner does not hold and its members are created; the source row is the surge's from here
+tick=3 pass result=none
+tick=4 note a further pass writes nothing either; no second gang is built beside the failed one
 tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=4 podgroup create name=svc-a-engine-1
-tick=4 row=1 write no-op precondition=no-change
-tick=4 pod create name=svc-a-engine-1-leader-0 revision=4c292506 incarnation=1 ordinal=0
-tick=4 pod create name=svc-a-engine-1-worker-0 revision=4c292506 incarnation=1 ordinal=0
 tick=4 hold cleared
-tick=4 pass result=after:5s
+tick=4 pass result=none

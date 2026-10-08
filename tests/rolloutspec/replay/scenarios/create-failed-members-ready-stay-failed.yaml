@@ -1,0 +1,45 @@
+# A gang's Create attempt is ended by the gang verdict with its Create
+# operation kept, and its members then all come up under the group another
+# controller owns. Their readiness is this controller's neither to adopt
+# nor to promote: the update trigger withholds the revision the ended
+# attempt pinned and the Create pass leaves the row, so it stays Failed with
+# its Create kept, and a regression afterwards moves counters alone.
+scenario: create-failed-members-ready-stay-failed
+cells:
+  - instance/Failed/Create/pod.containersReady[source]/before
+  - instance/Failed/Create/pod.containersNotReady[source]/before
+intentional: >-
+  a Create the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it, not a tick, not a freed name, not its members coming
+  up; it resumes through the reset mailbox or a corrective revision
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner; the gang verdict ends the attempt, Failed with its Create operation kept
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}
+  - tick: 3
+    note: both members report ContainersReady on the pinned revision, which nobody adopts or promotes; the row stays Failed with its Create kept
+    events:
+      - pod.containersReady[source]: {pod: {index: 0, runner: leader}}
+      - pod.containersReady[source]: {pod: {index: 0, runner: worker}}
+  - tick: 4
+    note: the worker's containers stop being ready again, which moves counters and nothing else
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0, runner: worker}}

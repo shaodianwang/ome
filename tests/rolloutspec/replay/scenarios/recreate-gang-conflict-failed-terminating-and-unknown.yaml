@@ -1,17 +1,21 @@
 # A gang's recreate is ended by the gang verdict with the Update operation
-# kept, and in the one pass the row reads Failed something else deletes its
-# rebuilt leader while its worker's kubelet stops reporting. A pod on its way
-# out and a member whose kubelet is gone are both the force-delete sweep's,
-# which has no policy to act on, so the re-drive's Phase A waits on both
-# names; a kubelet that never acknowledges the deletion changes nothing.
+# kept, and something else then deletes one of its members while the
+# other's kubelet stops reporting. A pod on its way out holds its name and a
+# member whose kubelet is gone is the force-delete sweep's, which has no
+# policy to act on; nothing re-drives the row, and a kubelet that never
+# acknowledges the deletion changes nothing.
 scenario: recreate-gang-conflict-failed-terminating-and-unknown
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
 cells:
   - instance/Failed/Drain/pod.terminating[source]/before
   - instance/Failed/Drain/pod.phaseTerminal[Unknown]/before
   - instance/Failed/Drain/pod.stuckTerminating/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -54,17 +58,17 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the rebuilt members are bound, something else deletes the leader and the worker's kubelet stops reporting it, and the re-drive restamps the recreate and issues the worker's delete while the leader is already on its way out
+    note: the ended attempt's members are bound, something else deletes the leader and the worker's kubelet stops reporting it; a pod on its way out holds its name, the Unknown member is the force-delete sweep's, and nothing re-drives the row
     events:
       - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-1}
       - pod.scheduled[source]: {pod: {index: 0, runner: worker}, message: node-1}
       - pod.terminating[source]: {pod: {index: 0, runner: leader}}
       - pod.phaseTerminal[Unknown]: {pod: {index: 0, runner: worker}}
   - tick: 8
-    note: the hold pass records the worker's node-unknown token on the re-driven row, and the name still belongs to another controller, so the verdict fails the attempt again with the recreate kept
+    note: a pass with nothing new writes nothing; the sweep has no policy to act on the member whose kubelet is gone
   - tick: 9
-    note: the kubelet behind the leader stops acknowledging the deletion, and with no force-delete policy the sweep leaves it where it is, so the re-drive restamps again and Phase A keeps waiting on both names
+    note: the kubelet behind the leader stops acknowledging the deletion, and with no force-delete policy the sweep leaves it where it is; the row still waits for the reset mailbox or a corrective revision
     events:
       - pod.stuckTerminating: {pod: {index: 0, runner: leader}}
   - tick: 10
-    note: the node-unknown token is recorded again and the verdict fails the re-driven attempt again
+    note: a further pass with nothing new writes nothing

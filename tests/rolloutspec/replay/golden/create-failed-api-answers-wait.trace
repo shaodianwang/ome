@@ -14,7 +14,7 @@ tick=2 hold cleared
 tick=2 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
 tick=2 warn instanceFailed index=0 pod=nil reason=PodGroupOwnershipConflict: PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner
 tick=2 pass result=after:5s
-tick=3 note the Component is paused, so the roll is parked and the row rests
+tick=3 note the Component is paused; the row rests, as it would without the pause
 tick=3 apply spec.pauseTrue paused=true freeze=false generation=1 now=t+0s
 tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=3 pass result=none
@@ -30,29 +30,16 @@ tick=4 pass result=none
 tick=5 note a further pass under the pause consumes nothing either
 tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=5 pass result=none
-tick=6 note the pause is cleared and the roll takes the unready set as a gang surge onto index 1; the surge's first create is the write the armed answers wait for
+tick=6 note the pause is cleared; no roll opens at the pinned revision, so the row rests and the armed answers wait on
 tick=6 apply spec.unpause paused=false freeze=false generation=2 now=t+0s
 tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=6 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
-tick=6 row=0 write incarnation=1 phase=Updating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#2{type=Update step=Surge target=svc-a-engine-4c292506 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=6 row=1 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#3{type=Update step=GangSurgeTarget target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
-tick=6 event Normal RecreateUpdateStarted OMENative component=engine instance=0 gang surge to revision svc-a-engine-4c292506 (surge-index=1)
 tick=6 hold cleared
-tick=6 pass result=after:5s
-tick=7 note the replacement gang's first create is shed, which paces the pass on the server's delay and leaves the other answers armed for the creates that follow
+tick=6 pass result=none
+tick=7 note a further pass issues no create for the row, so the shed answer is never met and the pass keeps its cadence
 tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=7 podgroup create name=svc-a-engine-1
-tick=7 row=1 write no-op precondition=no-change
-tick=7 pod create-rejected name=svc-a-engine-1-leader-0 rejection=api.throttled[TooManyRequests]
 tick=7 hold cleared
-tick=7 pass result=after:30s
-tick=8 note the next create meets the quota refusal, recorded on the replacement's own operation
+tick=7 pass result=none
+tick=8 note the quota refusal too waits for the attempt a corrective revision or a reset opens
 tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
-tick=8 row=1 write no-op precondition=no-change
-tick=8 pod create-rejected name=svc-a-engine-1-leader-0 rejection=api.quotaDenied
-tick=8 row=1 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#3{type=Update step=GangSurgeTarget target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
-tick=8 event Normal InstanceQuotaBlocked OMENative component=engine instance=1 waiting on capacity: pods "svc-a" is forbidden: exceeded quota: compute-resources, requested: pods=1, used: pods=4, limited: pods=4
 tick=8 hold cleared
-tick=8 pass result=after:5s
-tick=8 row=0 write incarnation=1 phase=Updating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#2{type=Update step=Surge target=svc-a-engine-4c292506 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod= reason=PodGroupOwnershipConflict message=PodGroup svc-a-engine-0 is controlled by StatefulSet/other-owner, not by this owner} precondition=ok
-tick=8 row=1 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-4c292506 readySince=nil op=op#3{type=Update step=GangSurgeTarget target=svc-a-engine-4c292506 started=t+0s lastProgressAt=t+0s deadline=nil} precondition=ok
+tick=8 pass result=none

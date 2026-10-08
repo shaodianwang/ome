@@ -1,16 +1,19 @@
 # A gang's recreate is ended by the gang verdict with the Update operation
-# kept, and one rebuilt member is then deleted from outside. The lost
-# member is not the restart pass's: the re-drive restamps the recreate at a
-# bumped incarnation and deletes what is left of the ended attempt's set,
-# but rebuilds nothing while the PodGroup name is held by another
-# controller, so the loss is absorbed into the next verdict cycle.
+# kept, and one of its members is then deleted from outside. The lost member
+# is not the restart pass's, which declines a preserved Update claim, and no
+# pass re-drives the row, so the loss is absorbed: the row stays Failed with
+# the recreate kept, and the members are rebuilt only by the recreate a
+# corrective revision opens or after the reset mailbox clears the row.
 scenario: recreate-gang-conflict-failed-member-lost-absorbed
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
 cells:
   - instance/Failed/Drain/pod.deleted[source]/before
-  - instance/Failed/Drain/pod.deleted[source]/boundary@T-faileddrain-redrive
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -53,14 +56,14 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the rebuilt worker is deleted from outside; the loss is not the restart pass's, and the re-drive restamps the recreate at a bumped incarnation and deletes the leader as an old-incarnation pod, rebuilding nothing while the name belongs to another controller
+    note: the ended attempt's worker is deleted from outside; the loss is not the restart pass's and nothing re-drives the row, so it is absorbed
     events:
       - pod.deleted[source]: {pod: {index: 0, runner: worker}}
   - tick: 8
-    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+    note: a pass with nothing new writes nothing
   - tick: 9
-    note: the leader is gone too; the re-drive restamps once more with nothing left to drain, and the members stay withheld from a name this controller may not write
+    note: the leader is gone too, and the row still waits for the reset mailbox or a corrective revision
     events:
       - pod.deleted[source]: {pod: {index: 0, runner: leader}}
   - tick: 10
-    note: the verdict fails the re-driven attempt again
+    note: a further pass with nothing new writes nothing

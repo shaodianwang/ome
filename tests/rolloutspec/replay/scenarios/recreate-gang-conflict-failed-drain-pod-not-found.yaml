@@ -1,13 +1,20 @@
-# The re-drive of a gang's recreate that the gang verdict ended with the
-# Update operation kept finds one of its old-incarnation pods already gone
-# when it issues the drain: the delete is answered not found, which is one
-# fewer pod for Phase A to drain, and the other member is deleted as usual.
+# A gang's recreate is ended by the gang verdict with the Update operation
+# kept, and a corrective revision re-drives it while one of the ended
+# attempt's members is already gone: the delete Phase A issues for it is
+# answered not found, which is one fewer pod to drain, and the other member
+# is deleted as usual.
 scenario: recreate-gang-conflict-failed-drain-pod-not-found
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
+  - T-faileddrain-corrective
 cells:
   - instance/Failed/Drain/api.notFound/before
+  - instance/Failed/Drain/spec.revision/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -50,12 +57,9 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 7
-    note: the rebuilt leader is gone by the time the re-drive's Phase A deletes it, so its delete is answered not found and treated as done while the worker's delete goes out
+    note: the template moves to a third revision with the ended attempt's leader already gone, so the re-driven recreate's Phase A finds its delete answered not found and treated as done while the worker's delete goes out
     events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
       - api.notFound: {}
   - tick: 8
-    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
-  - tick: 9
-    note: the worker is gone, and the re-drive restamps the recreate with nothing left to drain and its members withheld from the foreign name
-    events:
-      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+    note: the name still belongs to another controller, so the verdict ends the re-driven attempt with the recreate kept

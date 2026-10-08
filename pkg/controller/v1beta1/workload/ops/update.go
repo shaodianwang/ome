@@ -296,11 +296,15 @@ func inPlaceStrategy(strategy workload.UpdateStrategyType) bool {
 // SurgeHasNoSource reports whether a fresh start on the row has nothing a
 // surge could keep in rotation: the Instance was never promoted, so no pod
 // of its is a serving source, and the attempt that built its pod set has
-// been disposed. Such a start runs as a recreate under every strategy, so
-// the update pass reads it here to consult the admission gate for a
-// rebuild rather than a surge.
+// ended, disposed or kept as the Create the gang verdict ended. Such a
+// start runs as a recreate under every strategy, so the update pass reads
+// it here to consult the admission gate for a rebuild rather than a surge.
+// A kept surge operation is the surge machine's own continuation.
 func SurgeHasNoSource(s *workload.InstanceStatus) bool {
-	return s != nil && s.RunningRevision == "" && s.Phase == workload.InstancePhaseFailed && s.Operation == nil
+	if s == nil || s.RunningRevision != "" || s.Phase != workload.InstancePhaseFailed {
+		return false
+	}
+	return s.Operation == nil || s.Operation.Type == workload.InstanceOperationCreate
 }
 
 // InPlaceFallsBackToRecreate reports whether an in-place strategy runs as
@@ -734,6 +738,14 @@ func evaluateUpdateTriggerFast(input workload.ReconcileInput, inst workload.Inst
 		if denied {
 			return UpdateTriggerDecision{RetryAfter: retryAfter, RetryBlockDenied: true}, false
 		}
+	}
+
+	// A row keeping an attempt the gang verdict ended rolls toward a
+	// corrective revision alone, whatever its pod set: the pin proves it
+	// off target, and the pinned revision waits for the reset mailbox.
+	if workload.EndedByOwnershipVerdict(s) {
+		pinned := s.Operation.TargetRevision
+		return UpdateTriggerDecision{Trigger: pinned != "" && pinned != target.Name}, false
 	}
 
 	// RunningRevision is the cheap fast-path comparison.

@@ -227,3 +227,33 @@ func TestResetOwnsOperation_ParkedUpdateAttempt(t *testing.T) {
 		t.Fatalf("a parked Update attempt must be reset-owned")
 	}
 }
+
+// A recreate the gang verdict ended keeps an Update continuation no pass
+// re-drives at its pinned revision, so the reset owns it as it owns a
+// parked attempt; any other Update continuation stays the rollout's.
+func TestResetOwnsRow_RecreateEndedByTheGangVerdict(t *testing.T) {
+	drain := &types.InstanceOperation{ID: "update-3-1", Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain, TargetRevision: "rev-b"}
+	verdict := &types.InstanceTermination{Reason: types.PodGroupOwnershipConflictReason, Message: "PodGroup engine-3 is controlled by StatefulSet/other-owner, not by this owner"}
+	ended := types.InstanceStatus{Index: 3, Phase: types.InstancePhaseFailed, RunningRevision: "rev-a", Operation: drain, LastFailure: verdict, Incarnation: 2}
+	if !status.ResetOwnsRow(&ended) {
+		t.Fatalf("a recreate the gang verdict ended must be reset-owned")
+	}
+	deadline := ended
+	deadline.LastFailure = &types.InstanceTermination{Reason: "DeadlineExceeded"}
+	if status.ResetOwnsRow(&deadline) {
+		t.Errorf("an Update continuation ended any other way stays the rollout's")
+	}
+
+	store := map[int32]*types.InstanceStatus{3: &ended}
+	mutate := func(_ context.Context, idx int32, fn func(*types.InstanceStatus) bool) error {
+		fn(store[idx])
+		return nil
+	}
+	cleared, err := status.ClearFailedInstanceOperation(context.Background(), mutate, 3)
+	if err != nil || !cleared {
+		t.Fatalf("ClearFailedInstanceOperation: cleared=%v err=%v, want the kept recreate cleared", cleared, err)
+	}
+	if got := store[3]; got.Operation != nil || got.Phase != types.InstancePhaseFailed || got.LastFailure != verdict || got.RunningRevision != "rev-a" || got.Incarnation != 2 {
+		t.Errorf("row after the reset = %+v, want Failed with no operation and everything else kept", got)
+	}
+}

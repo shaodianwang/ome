@@ -1,19 +1,22 @@
 # A gang's recreate is ended by the gang verdict with the Update operation
-# kept, and what its rebuilt members report about their runner, their
-# readiness over time and their identity decides nothing: restart evidence
-# is read only on a Ready row, no clock runs on a Failed row and no promote
-# waits on an ended attempt, and the re-drive partitions pods by the
-# incarnation label rather than the UID. Each Failed pass is re-driven and
-# failed again on the pass after.
+# kept, and what its members report about their runner, their readiness
+# over time and their identity decides nothing: restart evidence is read
+# only on a Ready row, no clock runs on a Failed row, no promote waits on an
+# ended attempt, and pod identity is re-read from the live list; nothing
+# re-drives the row.
 scenario: recreate-gang-conflict-failed-runner-observations
 arrows:
   - T-ready-recreate
-  - T-faileddrain-redrive
 cells:
   - instance/Failed/Drain/pod.containerRestart/before
   - instance/Failed/Drain/pod.runningNotReady[source]/before
   - instance/Failed/Drain/timer.minReady/before
   - instance/Failed/Drain/pod.uidRotated/before
+intentional: >-
+  a recreate the gang verdict ended stays Failed with its operation kept:
+  nothing this controller does frees a name another controller holds, so no
+  pass re-drives it at the pinned revision; it resumes through a revision
+  other than the pinned one or the reset mailbox
 initial:
   spec:
     replicas: 1
@@ -63,23 +66,23 @@ timeline:
     events:
       - gang.podGroup[OwnershipConflict]: {instance: 0}
   - tick: 8
-    note: the rebuilt leader is bound, its containers come up, drop out of readiness again and its runner restarts, all of which is read by nobody before the re-drive restamps the recreate at a bumped incarnation and drains the set
+    note: the ended attempt's leader is bound, its containers come up, drop out of readiness again and its runner restarts, none of which anything reads on a row no pass re-drives
     events:
       - pod.scheduled[source]: {pod: {index: 0, runner: leader}, message: node-1}
       - pod.containersReady[source]: {pod: {index: 0, runner: leader}}
       - pod.containersNotReady[source]: {pod: {index: 0, runner: leader}}
       - pod.containerRestart: {pod: {index: 0, runner: leader}, message: Error}
   - tick: 9
-    note: the name still belongs to another controller, so the verdict fails the re-driven attempt again with the recreate kept
+    note: a pass with nothing new writes nothing
   - tick: 10
-    note: two minutes pass, longer than the stuck-pod grace and the minReadySeconds window, while the leader runs without readiness; no clock runs on a Failed row and no promote waits on an ended attempt, so the re-drive is all that happens
+    note: two minutes pass, longer than the stuck-pod grace and the minReadySeconds window, while the leader runs without readiness; no clock runs on a Failed row and no promote waits on an ended attempt
     events:
       - clock.advance: 2m
   - tick: 11
-    note: the verdict fails the re-driven attempt again
+    note: a further pass with nothing new writes nothing
   - tick: 12
-    note: the worker reappears under a new UID, and the re-drive partitions pods by the incarnation label, so the successor is drained as the old incarnation like the pod it replaced
+    note: the worker reappears under a new UID, and pod identity is re-read from the live list; nothing re-drives the row
     events:
       - pod.uidRotated: {pod: {index: 0, runner: worker}}
   - tick: 13
-    note: the verdict fails the re-driven attempt again
+    note: a further pass with nothing new writes nothing
