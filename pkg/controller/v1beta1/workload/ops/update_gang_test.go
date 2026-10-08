@@ -3633,7 +3633,7 @@ func gangCleanupRejectionPass(t *testing.T, input *workload.ReconcileInput, stor
 		}
 		source := input.ObservedState.Instance(0)
 		return abandonFailedGangSurge(context.Background(), deps, *input, plan, 0, surgeIndex,
-			source.RunningRevision, source.Operation.TargetRevision, "gang surge abandoned after a corrective edit", workload.CauseUnattributed)
+			source.RunningRevision, source.Operation.TargetRevision, "gang surge abandoned after a corrective edit", workload.CauseUnattributed, gangSurgeEnd{})
 	}
 }
 
