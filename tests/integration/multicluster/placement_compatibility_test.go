@@ -1,6 +1,7 @@
 package multicluster
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/yaml"
@@ -151,10 +153,22 @@ func TestMigratedPlacementSurvivesSchemaUpgrade(t *testing.T) {
 		if err := cl.Update(t.Context(), source); err != nil {
 			t.Fatal(err)
 		}
-		for _, p := range []*v1beta1.PlacementSpec{nil, {Mode: v1beta1.PlacementModeSingle}, {Policy: v1beta1.PlacementPolicy("Legacy"), Mode: v1beta1.PlacementModeSingle}} {
+		removals := []*v1beta1.PlacementSpec{nil, {Mode: v1beta1.PlacementModeSingle}, {Policy: v1beta1.PlacementPolicy("Legacy"), Mode: v1beta1.PlacementModeSingle}}
+		refused := func(p *v1beta1.PlacementSpec) bool {
 			changed := source.DeepCopy()
 			changed.Spec.Placement = p
-			if err := cl.Update(t.Context(), changed, client.DryRunAll); err == nil {
+			return cl.Update(t.Context(), changed, client.DryRunAll) != nil
+		}
+		// A replaced CRD's transition rules reach the apiserver's validators
+		// through its informer after the resource is already discoverable; the
+		// rules are in force once the first removal is refused.
+		if err := wait.PollUntilContextTimeout(t.Context(), eventuallyPoll, eventuallyTimeout, true, func(context.Context) (bool, error) {
+			return refused(removals[0]), nil
+		}); err != nil {
+			t.Fatal("schema allowed ClusterAffinity policy removal")
+		}
+		for _, p := range removals {
+			if !refused(p) {
 				t.Fatal("schema allowed ClusterAffinity policy removal")
 			}
 		}

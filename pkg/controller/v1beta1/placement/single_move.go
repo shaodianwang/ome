@@ -33,7 +33,7 @@ func (r *Reconciler) reconcileSingleMove(ctx context.Context, source *v1beta1.In
 	if active {
 		if r.singleMoveEmpty(ctx, source, clusters, standing) {
 			if r.graceRemaining(source.UID, time.Now()) > 0 || len(eligible) == 0 {
-				return r.writeSinglePlanStatus(ctx, source, standing, "AwaitingWinnerRecovery")
+				return r.writeSinglePlanStatus(ctx, source, standing, "AwaitingWinnerRecovery", "")
 			}
 			store := plan.Store{Client: r.Client, Reader: r.APIReader}
 			reset, err := store.Persist(ctx, source, emptySingleMove(source))
@@ -52,7 +52,7 @@ func (r *Reconciler) reconcileSingleMove(ctx context.Context, source *v1beta1.In
 		}
 		return r.writeSplitHold(ctx, source, standing, "AwaitingHomeInputs", err)
 	}
-	return r.executePlannedAllocation(ctx, source, eligible, standing, proposal)
+	return r.executePlannedAllocation(ctx, source, eligible, standing, proposal, nil)
 }
 
 // singleMoveProposal keeps the original floor across probing and handoff.

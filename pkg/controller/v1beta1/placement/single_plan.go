@@ -31,19 +31,19 @@ func (r *Reconciler) reconcileSinglePlanned(ctx context.Context, source *v1beta1
 			home = observations.refresh(ctx, r, source, winner)
 		}
 		if home.state == homeUnknown || home.terminal {
-			return r.writeSinglePlanStatus(ctx, source, observations, "")
+			return r.writeSinglePlanStatus(ctx, source, observations, "", "")
 		}
 		retainZero, err := r.retainZeroFloorWinner(ctx, source, winner)
 		if err != nil {
 			r.Log.Error(err, "planned member observation failed", "cluster", winner)
-			return r.writeSinglePlanStatus(ctx, source, observations, "AwaitingMemberConvergence")
+			return r.writeSinglePlanStatus(ctx, source, observations, "AwaitingMemberConvergence", "")
 		}
 		if home.state == homeAbsent || (home.candidate.Phase != v1beta1.CandidatePhaseAdmitted && !retainZero) {
 			if r.graceRemaining(source.UID, time.Now()) > 0 {
-				return r.writeSinglePlanStatus(ctx, source, observations, "AwaitingWinnerRecovery")
+				return r.writeSinglePlanStatus(ctx, source, observations, "AwaitingWinnerRecovery", "")
 			}
 			if len(eligible) == 0 {
-				return r.writeSinglePlanStatus(ctx, source, observations, "AwaitingWinnerRecovery")
+				return r.writeSinglePlanStatus(ctx, source, observations, "AwaitingWinnerRecovery", "")
 			}
 			r.clearGrace(source.UID)
 			winner = ""
@@ -53,7 +53,7 @@ func (r *Reconciler) reconcileSinglePlanned(ctx context.Context, source *v1beta1
 				return r.reconcileSingleMove(ctx, source, clusters, eligible, observations)
 			}
 			if !slices.Contains(eligible, winner) {
-				return r.writeSinglePlanStatus(ctx, source, observations, "AwaitingHomeInputs")
+				return r.writeSinglePlanStatus(ctx, source, observations, "AwaitingHomeInputs", "")
 			}
 		}
 	}
@@ -73,13 +73,13 @@ func (r *Reconciler) reconcileSinglePlanned(ctx context.Context, source *v1beta1
 	proposal, err := r.singleProposal(ctx, source, clusters, winner, nominated)
 	if err != nil {
 		r.Log.Error(err, "Single home policy unresolved")
-		return r.writeSinglePlanStatus(ctx, source, observations, "HomePolicyUnresolved")
+		return r.writeSinglePlanStatus(ctx, source, observations, "HomePolicyUnresolved", err.Error())
 	}
 	store := plan.Store{Client: r.Client, Reader: r.APIReader}
 	accepted, err := store.Persist(ctx, source, proposal)
 	if err != nil {
 		r.Log.Error(err, "Single plan persistence held")
-		return r.writeSinglePlanStatus(ctx, source, observations, "PlanNotPersisted")
+		return r.writeSinglePlanStatus(ctx, source, observations, "PlanNotPersisted", "")
 	}
 	applied := map[string]bool{}
 	for _, candidate := range accepted.Status.Placement.Candidates {
@@ -119,7 +119,7 @@ func (r *Reconciler) reconcileSinglePlanned(ctx context.Context, source *v1beta1
 			selected, err := store.Persist(ctx, accepted, proposal)
 			if err != nil {
 				r.Log.Error(err, "Single winner persistence held")
-				return r.writeSinglePlanStatus(ctx, accepted, observations, "WinnerNotPersisted")
+				return r.writeSinglePlanStatus(ctx, accepted, observations, "WinnerNotPersisted", "")
 			}
 			accepted = selected
 			winner = name
@@ -136,7 +136,7 @@ func (r *Reconciler) reconcileSinglePlanned(ctx context.Context, source *v1beta1
 			waiting = waiting && applied[name] && observations.homes[name].state == homePresent
 		}
 	}
-	result, err := r.writePlacement(ctx, accepted, r.singlePlanStatus(ctx, accepted, observations, ""))
+	result, err := r.writePlacement(ctx, accepted, r.singlePlanStatus(ctx, accepted, observations, "", ""))
 	// A materialized race waits for member events or the configured backstop.
 	// Failed writes, unknown observations and stale snapshots retry promptly.
 	if !waiting && result.RequeueAfter > 0 {
@@ -215,7 +215,7 @@ func (r *Reconciler) singleProposal(ctx context.Context, source *v1beta1.Inferen
 			cancel()
 			if resolveErr != nil {
 				if name == winner {
-					return out, resolveErr
+					return out, fmt.Errorf("home policy is unresolved on %s: %w", name, resolveErr)
 				}
 				a.HomeInputsPending = true
 			} else {
@@ -261,15 +261,15 @@ func (r *Reconciler) deletePlannedRaceLoser(ctx context.Context, source *v1beta1
 	return r.deletePlannedOn(ctx, source, candidate, true)
 }
 
-func (r *Reconciler) writeSinglePlanStatus(ctx context.Context, source *v1beta1.InferenceService, observations *placementObservations, reason string) (ctrl.Result, error) {
-	result, err := r.writePlacement(ctx, source, r.singlePlanStatus(ctx, source, observations, reason))
+func (r *Reconciler) writeSinglePlanStatus(ctx context.Context, source *v1beta1.InferenceService, observations *placementObservations, reason, message string) (ctrl.Result, error) {
+	result, err := r.writePlacement(ctx, source, r.singlePlanStatus(ctx, source, observations, reason, message))
 	if result.RequeueAfter > 0 {
 		result.RequeueAfter = r.requeue()
 	}
 	return result, err
 }
 
-func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.InferenceService, observations *placementObservations, reason string) placementResult {
+func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.InferenceService, observations *placementObservations, reason, message string) placementResult {
 	winner := winnerCluster(source)
 	res := placementResult{winner: winner, phase: v1beta1.PlacementPhasePending}
 	cleanupPending, winnerApplied, winnerIdle, winnerKeptPlaced := false, false, false, false
@@ -376,7 +376,7 @@ func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.Infer
 				reason = "AwaitingMemberConvergence"
 			}
 		}
-		res.conditions = []policyCondition{splitProgressCondition(reason, "")}
+		res.conditions = []policyCondition{splitProgressCondition(reason, message)}
 	}
 	return res
 }

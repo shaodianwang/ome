@@ -45,6 +45,8 @@ type Step struct {
 	Resume   []string
 	Reason   string
 	Complete bool
+	// Message explains a hold in operator terms; empty uses the reason's text.
+	Message string
 }
 
 // Advance moves toward Desired while retaining old replicas until replacement

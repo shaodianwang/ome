@@ -2585,9 +2585,9 @@ func TestSplitScaleComponentsAndAccounting(t *testing.T) {
 		v1beta1.DecoderComponent: &ds,
 	}
 	comps := []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}
-	assert.Equal(t, int32(2), placementAdmittedReplicas(comps, statuses), "min admitted = complete pairs")
-	assert.Equal(t, int32(1), placementReadyReplicas(comps, statuses), "min ready across components")
+	assert.Equal(t, int32(2), placementAdmittedReplicas(comps, statuses, nil), "min admitted = complete pairs")
+	assert.Equal(t, int32(1), placementReadyReplicas(comps, statuses, nil), "min ready across components")
 
 	// Engine-only accounting is just the engine's counts.
-	assert.Equal(t, int32(3), placementAdmittedReplicas([]v1beta1.ComponentType{v1beta1.EngineComponent}, statuses))
+	assert.Equal(t, int32(3), placementAdmittedReplicas([]v1beta1.ComponentType{v1beta1.EngineComponent}, statuses, nil))
 }

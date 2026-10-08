@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -56,7 +57,7 @@ func TestAllPlanSurvivesMemberStatusUpdates(t *testing.T) {
 				f.connections.m[name] = workloadcluster.NewNeverCachingClient(watched)
 			}
 			for range 3 {
-				proposal, err := f.reconciler.allProposal(t.Context(), source, f.clusters, []string{"member-a", "member-b"})
+				proposal, _, err := f.reconciler.allProposal(t.Context(), source, f.clusters, []string{"member-a", "member-b"})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -422,7 +423,7 @@ func TestAllUnknownRuntimeRetainsDesiredAuthority(t *testing.T) {
 	if err := f.workers["member-a"].Delete(t.Context(), backendTestRuntime()); err != nil {
 		t.Fatal(err)
 	}
-	proposal, err := f.reconciler.allProposal(t.Context(), f.source, f.clusters, []string{"member-a", "member-b"})
+	proposal, _, err := f.reconciler.allProposal(t.Context(), f.source, f.clusters, []string{"member-a", "member-b"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,5 +567,99 @@ func TestAllAbsentMemberWithUnreadableInventoryIsUnknown(t *testing.T) {
 	}
 	if condition := unknown.Status.GetCondition(v1beta1.PlacementSatisfied); condition == nil || condition.Status == corev1.ConditionTrue {
 		t.Fatalf("retained evidence satisfied the plan: %+v", condition)
+	}
+}
+
+// ratioAllSource gives the fixture source a decoder and a router whose
+// minimums differ from the engine's.
+func ratioAllSource(t *testing.T, f *backendFixture) {
+	t.Helper()
+	if err := f.reconciler.Get(t.Context(), client.ObjectKeyFromObject(f.source), f.source); err != nil {
+		t.Fatal(err)
+	}
+	runner := &v1beta1.RunnerSpec{Container: corev1.Container{Name: "ome-container", Image: "img"}}
+	f.source.Spec.Engine.MinReplicas, f.source.Spec.Engine.MaxReplicas = ptr.To(60), 60
+	f.source.Spec.Decoder = &v1beta1.DecoderSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(40), MaxReplicas: 40}, Runner: runner.DeepCopy()}
+	f.source.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(8), MaxReplicas: 8}, Runner: runner.DeepCopy()}
+	if err := f.reconciler.Update(t.Context(), f.source); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAllPlanPlacesRatioFloorsOnEveryHome(t *testing.T) {
+	f := newBackendFixture(t, v1beta1.PlacementModeAll)
+	ratioAllSource(t, f)
+	live := f.reconcile(t)
+	want := []v1beta1.PlacementComponentFloor{{Component: v1beta1.DecoderComponent, Replicas: 40}, {Component: v1beta1.EngineComponent, Replicas: 60}, {Component: v1beta1.RouterComponent, Replicas: 8}}
+	if live.Status.Placement == nil || live.Status.Placement.Plan == nil {
+		t.Fatalf("no accepted plan: %+v", live.Status)
+	}
+	// Every full home requests its own 60 primary units.
+	if diff := cmp.Diff(int64(60*len(live.Status.Placement.Candidates)), live.Status.Placement.Plan.RequestedReplicas); diff != "" {
+		t.Errorf("requested primary units (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(2, len(live.Status.Placement.Candidates)); diff != "" {
+		t.Errorf("planned homes (-want +got):\n%s", diff)
+	}
+	if condition := live.Status.GetCondition(v1beta1.PlacementConverged); condition == nil || condition.Reason == "AwaitingHomeInputs" {
+		t.Errorf("ratio floors held as unresolved: %+v", condition)
+	}
+	for _, candidate := range live.Status.Placement.Candidates {
+		a := candidate.Allocation
+		if a == nil || a.HomeInputsPending || a.DesiredHome == nil {
+			t.Fatalf("%s home is unresolved: %+v", candidate.Cluster, a)
+		}
+		if diff := cmp.Diff(want, a.DesiredHome.ReplicaFloors); diff != "" {
+			t.Errorf("%s desired floors (-want +got):\n%s", candidate.Cluster, diff)
+		}
+		if diff := cmp.Diff(int32(60), a.DesiredReplicas); diff != "" {
+			t.Errorf("%s desired primary units (-want +got):\n%s", candidate.Cluster, diff)
+		}
+		member, ok := allMemberOn(t, f, candidate.Cluster)
+		if !ok {
+			t.Fatalf("%s has no member", candidate.Cluster)
+		}
+		policy, err := protocol.FromDerived(member)
+		if err != nil || policy == nil {
+			t.Fatalf("%s full-home authority: %v", candidate.Cluster, err)
+		}
+		if diff := cmp.Diff(want, policy.ReplicaFloors); diff != "" {
+			t.Errorf("%s member floors (-want +got):\n%s", candidate.Cluster, diff)
+		}
+		if diff := cmp.Diff(f.source.Spec.Decoder.MinReplicas, member.Spec.Decoder.MinReplicas); diff != "" {
+			t.Errorf("%s decoder policy changed (-want +got):\n%s", candidate.Cluster, diff)
+		}
+	}
+}
+
+func TestAllPlanReportsUnresolvedHomePolicy(t *testing.T) {
+	f := newBackendFixture(t, v1beta1.PlacementModeAll)
+	if err := f.reconciler.Get(t.Context(), client.ObjectKeyFromObject(f.source), f.source); err != nil {
+		t.Fatal(err)
+	}
+	f.source.Spec.Engine.MinReplicas = nil
+	if err := f.reconciler.Update(t.Context(), f.source); err != nil {
+		t.Fatal(err)
+	}
+	unresolved := backendTestRuntime()
+	if err := f.workers["member-b"].Get(t.Context(), client.ObjectKeyFromObject(unresolved), unresolved); err != nil {
+		t.Fatal(err)
+	}
+	unresolved.Spec.EngineConfig = nil
+	if err := f.workers["member-b"].Update(t.Context(), unresolved); err != nil {
+		t.Fatal(err)
+	}
+	live := f.reconcile(t)
+	condition := live.Status.GetCondition(v1beta1.PlacementConverged)
+	if condition == nil || condition.Reason != "AwaitingHomeInputs" {
+		t.Fatalf("unresolved home did not hold inputs: %+v", condition)
+	}
+	if !strings.Contains(condition.Message, "home policy is unresolved on member-b: ") {
+		t.Fatalf("condition message does not name the unresolved home: %q", condition.Message)
+	}
+	for _, candidate := range live.Status.Placement.Candidates {
+		if candidate.Cluster == "member-b" && !candidate.Allocation.HomeInputsPending {
+			t.Fatalf("member-b inputs were not held: %+v", candidate.Allocation)
+		}
 	}
 }

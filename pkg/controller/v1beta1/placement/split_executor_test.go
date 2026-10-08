@@ -578,9 +578,13 @@ func TestAdoptSplitMembers(t *testing.T) {
 		{name: "unresolved member floor holds adoption", edit: func(f *plannedObservationFixture) {
 			f.member.Spec.Engine.MinReplicas = nil
 		}, wantErr: true},
-		{name: "mismatched component floors hold adoption", edit: func(f *plannedObservationFixture) {
+		{name: "engine floor leads a differently sized decoder", edit: func(f *plannedObservationFixture) {
 			f.member.Spec.Engine.MinReplicas = ptr.To(1)
 			f.member.Spec.Decoder = &v1beta1.DecoderSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(2)}}
+		}, wantFloor: 1},
+		{name: "unresolved decoder floor holds adoption", edit: func(f *plannedObservationFixture) {
+			f.member.Spec.Engine.MinReplicas = ptr.To(1)
+			f.member.Spec.Decoder = &v1beta1.DecoderSpec{}
 		}, wantErr: true},
 		{name: "missing registration cannot erase a standing home", edit: func(f *plannedObservationFixture) {
 			f.source.Status.Placement.Candidates = append(f.source.Status.Placement.Candidates, v1beta1.CandidatePlacement{Cluster: "removed"})

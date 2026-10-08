@@ -490,41 +490,29 @@ func placementScaleComponents(isvc *v1beta1.InferenceService) []v1beta1.Componen
 	return cs
 }
 
-// placementAdmittedReplicas is a home's admitted replica count: the MIN
-// admitted instances across the scaled components, since a PD replica is
-// admitted only when BOTH its engine and decoder instances are (an engine-only
-// home is just the engine count). Zero when no scaled component is declared.
-func placementAdmittedReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus) int32 {
-	if len(comps) == 0 {
-		return 0
-	}
-	mn := int32(math.MaxInt32)
+// placementAdmittedReplicas is a home's admitted count in primary units: each
+// scaled component covers admitted/floor of its share and the home has the
+// smallest coverage. Equal floors make this the minimum admitted count, so a
+// PD replica is admitted only when both its engine and decoder instances are;
+// an engine-only home is just the engine count. Zero without scaled components.
+func placementAdmittedReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus, floors map[v1beta1.ComponentType]int32) int32 {
+	counts := make(map[v1beta1.ComponentType]int32, len(comps))
 	for _, c := range comps {
-		if n := admittedReplicaCount(statuses[c]); n < mn {
-			mn = n
-		}
+		counts[c] = admittedReplicaCount(statuses[c])
 	}
-	return mn
+	return primaryUnits(comps, counts, floors)
 }
 
-// placementReadyReplicas is a home's ready replica count (the endpoint weight):
-// the MIN ReadyReplicas across the scaled components, for the same pairing
-// reason.
-func placementReadyReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus) int32 {
-	if len(comps) == 0 {
-		return 0
-	}
-	mn := int32(math.MaxInt32)
+// placementReadyReplicas is a home's ready count (the endpoint weight) in
+// primary units, with the same per-component coverage as admission.
+func placementReadyReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus, floors map[v1beta1.ComponentType]int32) int32 {
+	counts := make(map[v1beta1.ComponentType]int32, len(comps))
 	for _, c := range comps {
-		var r int32
 		if st := statuses[c]; st != nil {
-			r = st.ReadyReplicas
-		}
-		if r < mn {
-			mn = r
+			counts[c] = st.ReadyReplicas
 		}
 	}
-	return mn
+	return primaryUnits(comps, counts, floors)
 }
 
 func (r *Reconciler) deleteDerivedOnBounded(ctx context.Context, cluster string, isvc *v1beta1.InferenceService) error {

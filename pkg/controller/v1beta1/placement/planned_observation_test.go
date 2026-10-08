@@ -3,6 +3,7 @@ package placement
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -153,6 +154,27 @@ func TestObservePlannedHome(t *testing.T) {
 			f.extraObjects = []client.Object{ir, pod}
 			f.components = append(f.components, v1beta1.DecoderComponent)
 		}, want: result{Home: allocation.Home{Known: true, Applied: true, Occupied: 2, Ready: 1}, PauseAcknowledged: true, Applied: "plan-a", Ready: 1, Admitted: 1}},
+		{name: "ratio floors count whole primary units", edit: func(f *plannedObservationFixture) {
+			f.source.Status.Placement.Plan.Mode = v1beta1.PlacementModeAll
+			home := &v1beta1.PlacementHomePolicy{InputDigest: "intent", ReplicaFloors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.DecoderComponent, Replicas: 2}, {Component: v1beta1.EngineComponent, Replicas: 1}}}
+			a := f.source.Status.Placement.Candidates[0].Allocation
+			a.CurrentHome, a.DesiredHome = home, home.DeepCopy()
+			policy := executionPolicy(f.source, a)
+			raw, err := protocol.Encode(policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.member.Annotations[constants.PlacementExecution] = raw
+			f.resources.ir.Spec.PlacementExecution = policy.DeepCopy()
+			f.extraObjects = f.decoderTwin(policy, 2)
+			f.components = append(f.components, v1beta1.DecoderComponent)
+		}, want: steady},
+		{name: "split decoder is held to its apportioned floor", edit: func(f *plannedObservationFixture) {
+			// Two fleet engines carry six decoders, so this one-engine home owes three.
+			f.source.Spec.Decoder = &v1beta1.DecoderSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(6)}}
+			f.extraObjects = f.decoderTwin(f.resources.ir.Spec.PlacementExecution, 2)
+			f.components = append(f.components, v1beta1.DecoderComponent)
+		}, want: result{Home: allocation.Home{Known: true, Occupied: 1}}},
 		{name: "columnar component acknowledges pause", edit: func(f *plannedObservationFixture) {
 			f.resources.ir = columnarTwin(t, f.resources.ir)
 			f.decodeBound = 1
@@ -350,6 +372,27 @@ func busyReads(stable int, matches func(client.Object) bool) interceptor.Funcs {
 		}
 		return nil
 	}}
+}
+
+// decoderTwin clones the engine component as a decoder with the given
+// replica count, two of which are admitted, ready and backed by live pods.
+func (f *plannedObservationFixture) decoderTwin(policy *v1beta1.PlacementExecutionPolicy, replicas int32) []client.Object {
+	ir := f.resources.ir.DeepCopy()
+	ir.UID, ir.Name, ir.Spec.Component = "decoder-uid", "service-decoder", v1beta1.DecoderComponent
+	ir.Spec.Replicas, ir.Spec.PlacementReplicaLimit = ptr.To(replicas), ptr.To(replicas)
+	ir.Spec.PlacementExecution = policy.DeepCopy()
+	ir.Status.ReadyReplicas = 2
+	second := ir.Status.InstanceStatuses[0]
+	second.Index = 1
+	ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, second)
+	out := []client.Object{ir}
+	for index := range 2 {
+		pod := f.resources.pods[0].DeepCopy()
+		pod.Name, pod.UID, pod.OwnerReferences[0].UID = fmt.Sprintf("decoder-%d", index), types.UID(fmt.Sprintf("decoder-pod-%d", index)), ir.UID
+		pod.Labels[query.LabelInstanceIdx] = strconv.Itoa(index)
+		out = append(out, pod)
+	}
+	return out
 }
 
 func (f *plannedObservationFixture) attachContract(t *testing.T) {

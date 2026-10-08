@@ -182,7 +182,8 @@ func TestSetPlannedReplicas(t *testing.T) {
 				Router:  &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(1), MaxReplicas: 7}},
 			}}
 			router := member.Spec.Router.DeepCopy()
-			setPlannedReplicas(member, tt.floor, tt.cap)
+			bound := plannedBound{Floor: tt.floor, Ceiling: tt.cap}
+			setPlannedReplicas(member, map[v1beta1.ComponentType]plannedBound{v1beta1.EngineComponent: bound, v1beta1.DecoderComponent: bound})
 			want := v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(int(tt.floor)), MaxReplicas: tt.wantMaximum}
 			for _, got := range []v1beta1.ComponentExtensionSpec{member.Spec.Engine.ComponentExtensionSpec, member.Spec.Decoder.ComponentExtensionSpec} {
 				if diff := cmp.Diff(want, got); diff != "" {

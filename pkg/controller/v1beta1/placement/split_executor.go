@@ -6,6 +6,7 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -53,10 +54,13 @@ func (r *Reconciler) reconcileSplit(ctx context.Context, source *v1beta1.Inferen
 			return r.writeSplitHold(ctx, source, standing, "ObservationUnknown", err)
 		}
 	}
-	return r.executePlannedAllocation(ctx, source, eligible, standing, proposal)
+	return r.executePlannedAllocation(ctx, source, eligible, standing, proposal, nil)
 }
 
-func (r *Reconciler) executePlannedAllocation(ctx context.Context, source *v1beta1.InferenceService, eligible []string, standing *placementObservations, proposal plan.Proposal) (ctrl.Result, error) {
+// executePlannedAllocation persists the proposal, advances it against member
+// observations and applies the step. holds explain unresolved home inputs in
+// the status condition while the step waits for them.
+func (r *Reconciler) executePlannedAllocation(ctx context.Context, source *v1beta1.InferenceService, eligible []string, standing *placementObservations, proposal plan.Proposal, holds []string) (ctrl.Result, error) {
 	proposal.PauseSurge = splitPauseRequired(proposal)
 	if proposal.AdoptionDigest != "" {
 		proposal.PauseSurge = false
@@ -88,6 +92,9 @@ func (r *Reconciler) executePlannedAllocation(ctx context.Context, source *v1bet
 	}
 	if err != nil {
 		return r.writeSplitObservations(ctx, accepted, observations, "ObservationUnknown", err.Error())
+	}
+	if step.Reason == "AwaitingHomeInputs" && len(holds) > 0 {
+		step.Message = strings.Join(holds, "; ")
 	}
 	if proposal.SingleMove != nil && proposal.SingleMove.Selected != "" && proposal.SingleMove.Selected != proposal.Winner {
 		selected := observations[proposal.SingleMove.Selected]
@@ -190,7 +197,7 @@ func (r *Reconciler) executePlannedAllocation(ctx context.Context, source *v1bet
 			}
 		}
 	}
-	return r.writeSplitObservations(ctx, next, observations, step.Reason, "")
+	return r.writeSplitObservations(ctx, next, observations, step.Reason, step.Message)
 }
 
 func splitPauseRequired(proposal plan.Proposal) bool {
@@ -255,6 +262,9 @@ func (r *Reconciler) adoptSplitMembers(ctx context.Context, source *v1beta1.Infe
 	return nil
 }
 
+// adoptedMemberFloor reads a standing member's floor in primary units: the
+// engine minimum when declared, otherwise the decoder minimum. Every scalable
+// component must carry a resolved count.
 func adoptedMemberFloor(member *v1beta1.InferenceService) (int32, error) {
 	if member == nil {
 		return 0, fmt.Errorf("remaining member resources have no verifiable service floor")
@@ -266,20 +276,15 @@ func adoptedMemberFloor(member *v1beta1.InferenceService) (int32, error) {
 	if member.Spec.Decoder != nil {
 		floors = append(floors, member.Spec.Decoder.MinReplicas)
 	}
-	var floor int32
-	for i, value := range floors {
-		if value == nil || *value < 0 || int64(*value) > math.MaxInt32 {
-			return 0, fmt.Errorf("standing component floor is unresolved")
-		}
-		if i > 0 && floor != int32(*value) {
-			return 0, fmt.Errorf("standing engine and decoder floors must use whole replica units")
-		}
-		floor = int32(*value)
-	}
 	if len(floors) == 0 {
 		return 0, fmt.Errorf("standing service has no scalable component")
 	}
-	return floor, nil
+	for _, value := range floors {
+		if value == nil || *value < 0 || int64(*value) > math.MaxInt32 {
+			return 0, fmt.Errorf("standing component floor is unresolved")
+		}
+	}
+	return int32(*floors[0]), nil
 }
 
 func (r *Reconciler) observeSplitMembers(ctx context.Context, source *v1beta1.InferenceService, eligible []string) map[string]plannedHomeObservation {
@@ -402,7 +407,7 @@ func (r *Reconciler) writeSplitObservations(ctx context.Context, source *v1beta1
 			standing.homes[name] = homeObservation{state: state, candidate: observed.Candidate, serving: serving, terminal: observed.Terminal}
 			standing.standing = append(standing.standing, name)
 		}
-		return r.writeSinglePlanStatus(ctx, source, standing, reason)
+		return r.writeSinglePlanStatus(ctx, source, standing, reason, message)
 	}
 	res := placementResult{phase: v1beta1.PlacementPhasePending, conditions: []policyCondition{splitProgressCondition(reason, message)}}
 	if placementMode(source) == v1beta1.PlacementModeSplitByCapacity {
@@ -439,7 +444,7 @@ func (r *Reconciler) writeSplitObservations(ctx context.Context, source *v1beta1
 
 func (r *Reconciler) writeSplitHold(ctx context.Context, source *v1beta1.InferenceService, standing *placementObservations, reason string, cause error) (ctrl.Result, error) {
 	if source.Status.Placement != nil && source.Status.Placement.Plan != nil && source.Status.Placement.Plan.Mode == v1beta1.PlacementModeSingle {
-		return r.writeSinglePlanStatus(ctx, source, standing, reason)
+		return r.writeSinglePlanStatus(ctx, source, standing, reason, cause.Error())
 	}
 	res := placementResult{phase: v1beta1.PlacementPhasePending, conditions: []policyCondition{splitProgressCondition(reason, cause.Error())}}
 	if placementMode(source) == v1beta1.PlacementModeSplitByCapacity {

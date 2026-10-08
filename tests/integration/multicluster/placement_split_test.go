@@ -114,6 +114,73 @@ var _ = ginkgo.Describe("Multi-cluster placement split mode", func() {
 		ginkgo.Entry("explicit weights allocate exact ratios", int32(4), true, []int{3, 1}),
 	)
 
+	// componentBounds reads a derived component's pinned replica band on a
+	// member, or {-1, -1} while the derived or the band is absent.
+	componentBounds := func(member cluster, component v1beta1.ComponentType) [2]int {
+		derived, ok := getDerivedOn(member, isvcNS, isvcName)
+		if !ok {
+			return [2]int{-1, -1}
+		}
+		var ext *v1beta1.ComponentExtensionSpec
+		switch component {
+		case v1beta1.EngineComponent:
+			if derived.Spec.Engine != nil {
+				ext = &derived.Spec.Engine.ComponentExtensionSpec
+			}
+		case v1beta1.DecoderComponent:
+			if derived.Spec.Decoder != nil {
+				ext = &derived.Spec.Decoder.ComponentExtensionSpec
+			}
+		}
+		if ext == nil || ext.MinReplicas == nil {
+			return [2]int{-1, -1}
+		}
+		return [2]int{*ext.MinReplicas, ext.MaxReplicas}
+	}
+
+	ginkgo.It("splits a prefill and decode source in its declared ratio", func() {
+		source := splitSourceISVC(isvcNS, isvcName, requirement(), nil)
+		source.Spec.Engine.MinReplicas, source.Spec.Engine.MaxReplicas = ptr.To(60), 60
+		source.Spec.Decoder = &v1beta1.DecoderSpec{
+			ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(40), MaxReplicas: 40},
+			Runner:                 &v1beta1.RunnerSpec{Container: corev1.Container{Name: "ome-container", Image: "example/model-server:test"}},
+		}
+		mustCreate(controlCluster, source)
+
+		ginkgo.By("asserting each member carries half of each component's minimum")
+		type bounds struct{ Engine, Decoder [2]int }
+		want := map[string]bounds{wc1Name: {Engine: [2]int{30, 30}, Decoder: [2]int{20, 20}}, wc2Name: {Engine: [2]int{30, 30}, Decoder: [2]int{20, 20}}}
+		observe := func() map[string]bounds {
+			return map[string]bounds{
+				wc1Name: {Engine: componentBounds(member1Cluster, v1beta1.EngineComponent), Decoder: componentBounds(member1Cluster, v1beta1.DecoderComponent)},
+				wc2Name: {Engine: componentBounds(member2Cluster, v1beta1.EngineComponent), Decoder: componentBounds(member2Cluster, v1beta1.DecoderComponent)},
+			}
+		}
+		gomega.Eventually(func() string { return cmp.Diff(want, observe()) }, eventuallyTimeout, eventuallyPoll).Should(gomega.BeEmpty())
+		gomega.Consistently(func() string { return cmp.Diff(want, observe()) }, "1.5s", eventuallyPoll).Should(gomega.BeEmpty())
+
+		ginkgo.By("admitting every engine and decoder instance on both members")
+		for _, member := range []cluster{member1Cluster, member2Cluster} {
+			upsertPlannedComponentStatusOn(member, isvcNS, isvcName, v1beta1.EngineComponent, admittedEngineInstances(30))
+			upsertPlannedComponentStatusOn(member, isvcNS, isvcName, v1beta1.DecoderComponent, admittedEngineInstances(20))
+		}
+
+		ginkgo.By("asserting both homes report their full share admitted in primary units")
+		gomega.Eventually(func(g gomega.Gomega) {
+			ps := placementStatusOf(isvcNS, isvcName)
+			g.Expect(ps).NotTo(gomega.BeNil())
+			g.Expect(ps.Plan).NotTo(gomega.BeNil())
+			g.Expect(ps.Plan.RequestedReplicas).To(gomega.Equal(int64(60)))
+			phases, admitted := map[string]v1beta1.CandidatePlacementPhase{}, map[string]int32{}
+			for _, c := range ps.Candidates {
+				g.Expect(c.Allocation).NotTo(gomega.BeNil())
+				phases[c.Cluster], admitted[c.Cluster] = c.Phase, c.AdmittedReplicas
+			}
+			g.Expect(cmp.Diff(map[string]v1beta1.CandidatePlacementPhase{wc1Name: v1beta1.CandidatePhaseAdmitted, wc2Name: v1beta1.CandidatePhaseAdmitted}, phases)).To(gomega.BeEmpty())
+			g.Expect(cmp.Diff(map[string]int32{wc1Name: 30, wc2Name: 30}, admitted)).To(gomega.BeEmpty())
+		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
+	})
+
 	ginkgo.It("retains a pending share despite surplus admission on another home", func() {
 		mustCreate(controlCluster, splitSourceISVC(isvcNS, isvcName, requirement(),
 			&v1beta1.SplitSpec{Replicas: ptr.To[int32](3)}))

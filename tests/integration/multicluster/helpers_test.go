@@ -180,16 +180,31 @@ func uniqueName(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, nameCounter.Add(1))
 }
 
-// upsertPlannedEngineStatusOn uses the member projector to preserve ownership
-// and placement authority, then simulates admission on the bare member API.
+// upsertPlannedEngineStatusOn simulates engine admission on a bare member.
 func upsertPlannedEngineStatusOn(member cluster, namespace, name string, instances []v1beta1.OMENativeInstanceStatus) {
-	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
+	upsertPlannedComponentStatusOn(member, namespace, name, v1beta1.EngineComponent, instances)
+}
+
+// upsertPlannedComponentStatusOn uses the member projector to preserve ownership
+// and placement authority, then simulates admission on the bare member API.
+func upsertPlannedComponentStatusOn(member cluster, namespace, name string, component v1beta1.ComponentType, instances []v1beta1.OMENativeInstanceStatus) {
+	gomega.EventuallyWithOffset(2, func(g gomega.Gomega) {
 		derived := &v1beta1.InferenceService{}
 		g.Expect(member.client.Get(member.ctx, client.ObjectKey{Namespace: namespace, Name: name}, derived)).To(gomega.Succeed())
-		g.Expect(derived.Spec.Engine).NotTo(gomega.BeNil())
+		var ext *v1beta1.ComponentExtensionSpec
+		switch component {
+		case v1beta1.EngineComponent:
+			g.Expect(derived.Spec.Engine).NotTo(gomega.BeNil())
+			ext = &derived.Spec.Engine.ComponentExtensionSpec
+		case v1beta1.DecoderComponent:
+			g.Expect(derived.Spec.Decoder).NotTo(gomega.BeNil())
+			ext = &derived.Spec.Decoder.ComponentExtensionSpec
+		default:
+			g.Expect(component).To(gomega.BeElementOf(v1beta1.EngineComponent, v1beta1.DecoderComponent), "simulated admission covers the scaled components")
+		}
 		ir, err := irprojector.EnsureInferenceReplica(member.ctx, irprojector.Params{
-			Client: member.client, ISVC: derived, Component: v1beta1.EngineComponent,
-			ComponentExt: &derived.Spec.Engine.ComponentExtensionSpec,
+			Client: member.client, ISVC: derived, Component: component,
+			ComponentExt: ext,
 			ObjectMeta:   metav1.ObjectMeta{Labels: map[string]string{constants.InferenceServicePodLabelKey: name}},
 			PodSpec:      &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "example/model-server:test"}}},
 		})

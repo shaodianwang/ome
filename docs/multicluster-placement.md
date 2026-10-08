@@ -82,13 +82,28 @@ registration retains its desired share; spare quota elsewhere cannot absorb it.
 
 The fleet floor comes from `split.replicas`, or an explicitly positive
 `engine.minReplicas` when that override is absent. An unresolved floor holds the
-plan. One replica contains a complete Engine instance and, when declared, a
-complete Decoder instance. A multi-pod instance stays together on its member.
-Router retains its own per-home scaling policy.
+plan. One replica unit is a complete Engine instance; a multi-pod instance stays
+together on its member. Router retains its own per-home scaling policy.
 
-`split.maxReplicasPerCluster` is an optional local ceiling. A positive ceiling
-below any computed share rejects the entire new allocation. Zero is uncapped.
-Member autoscaling otherwise retains its local policy.
+A declared Decoder follows the Engine in the ratio of their minimums: each
+home's Decoder floor is its share of `decoder.minReplicas`, apportioned by
+largest remainder over the homes' Engine shares so the per-home Decoder floors
+sum to the declared minimum exactly; while a move holds more or fewer Engine
+replicas than the fleet floor, the Decoder total follows the Engine total in
+the same ratio, rounded up. When `split.replicas` sizes the fleet, the
+Decoder minimum scales with it in the declared ratio, rounded up; without an
+Engine minimum it is used as declared. A home with a positive Engine share always
+receives at least one Decoder when the Decoder minimum is positive; a Decoder
+minimum smaller than the number of homes with a positive share holds the plan
+with a message that says so. A zero Decoder minimum places no Decoder. An
+undeclared Decoder minimum pairs one Decoder with each Engine. The ratio is a
+floor, not a cap: within their bands the two components scale independently on
+the member, and placement does not react to live counts.
+
+`split.maxReplicasPerCluster` is an optional local ceiling in Engine replicas.
+A positive ceiling below any computed share rejects the entire new allocation.
+Zero is uncapped. A Decoder ceiling is the Engine ceiling scaled by the same
+ratio, rounded up. Member autoscaling otherwise retains its local policy.
 
 ## Moving replicas
 
@@ -166,10 +181,12 @@ grace before a fresh initial race can begin.
 `All` retains the complete source policy on each eligible member; `Single`
 applies it to nominated members and its retained winner. Placement
 resolves component minimums using source, runtime, then operator configuration
-precedence. It requires nonnegative resolved floors, with equal Engine and Decoder
-counts; Router has its own floor. An unresolved floor holds that home's
-allocation without changing local-service behavior. Operator defaults require
-the configured member operator namespace and an identified ConfigMap.
+precedence. It requires a nonnegative resolved floor for every component; Engine
+and Decoder floors may differ and the Engine count is the home's replica unit,
+with Router keeping its own floor. An unresolved floor holds that home's
+allocation without changing local-service behavior, and the `PlacementConverged`
+message names the home and the cause. Operator defaults require the configured
+member operator namespace and an identified ConfigMap.
 
 An unpaused zero-floor home retains its service and autoscaler through scale to
 zero. Single still needs actual admission to select a winner; an idle established
@@ -207,12 +224,14 @@ Report UID, version, flavor mapping, and registration UID must agree. An empty
 member can supply a complete sample; admission and running workloads are not
 prerequisites for computing nominal weights.
 
-One unit uses the combined Engine and Decoder demand, including all leader and
-worker pods. Each required resource/flavor pool contributes its whole-replica
-quotient of allocatable hardware divided by demand; the smallest quotient is the
-member's weight. Quota budgets, usage, routing weights, and high-water marks do
-not enter this calculation. Ambiguous flavors, stale reports, and unavailable
-members return no partial allocation or equal-share fallback.
+One unit is one Engine instance plus the Decoder demand that the ratio of their
+minimums attaches to it, including all leader and worker pods; equal minimums
+use one instance of each. Each required resource/flavor pool contributes its
+whole-unit quotient of allocatable hardware divided by that demand; the smallest
+quotient is the member's weight. Quota budgets, usage, routing weights, and
+high-water marks do not enter this calculation. Ambiguous flavors, stale
+reports, and unavailable members return no partial allocation or equal-share
+fallback.
 
 The adapter requires OMENative for every declared component because placement
 observes InferenceReplica execution and shared surge accounting. Local services
