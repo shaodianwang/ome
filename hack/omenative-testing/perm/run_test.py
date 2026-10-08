@@ -6986,6 +6986,19 @@ class StuckOperationTest(unittest.TestCase):
     ER_UP = "# p999: x mode=scaledown Ne=3 Nd=0 Nr=2 ceil_e=4 ceil_d=0 ceil_r=3 to_e=4 topo=engine"
     PD_DELETE = "# p999: x mode=recreate Ne=3 Nd=3 Nr=2 ceil_e=3 ceil_d=4 ceil_r=2 topo=pd"
 
+    MOVE_GANG = "# p999: x mode=migrate Ne=2 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine-mn mig=Auto inst=0"
+
+    def test_the_floor_slack_rides_the_crash_after_ready_on_a_move_alone(self):
+        # A pushed gang that crashes after Ready is promoted before the crash
+        # shows, so the slack may state its cost; the other breaks never
+        # promote, and a move with no stuck push has no fault to allow for.
+        self.assertEqual([], self._errs(self.MOVE_GANG + " stuck=held break=crash-load floor_slack=1"))
+        self.assertEqual([], self._errs(self.MOVE_GANG + " stuck=held break=crash-load"))
+        for header in (self.MOVE_GANG + " stuck=held break=crash-start floor_slack=1",
+                       self.MOVE_GANG + " stuck=held floor_slack=1" + self.IMG,
+                       self.MOVE_GANG + " floor_slack=1"):
+            self.assertTrue(any("floor_slack= widens the capacity floor" in e for e in self._errs(header)), header)
+
     def test_header_takes_a_break_kind_and_a_sibling_push(self):
         for kind in ("crash-start", "crash-load", "configkey", "stuck"):
             self.assertEqual([], self._errs(self.SCALE + f" stuck=held break={kind}"), kind)
@@ -13368,6 +13381,16 @@ class GangMemberVerdictTest(unittest.TestCase):
         v = run.min_ready_checks(ctx, ["engine"], "PASS", n, c)
         self.assertEqual("FAIL", v)
 
+    def test_a_stuck_push_s_deficit_is_counted_once_against_the_slack(self):
+        # Beside a stuck push the floor reads N minus the larger of what the
+        # request found down and what the header's slack allows, never minus both.
+        self.assertEqual(1, run._stuck_floor_allowance(2, 1))
+        self.assertEqual(0, run._stuck_floor_allowance(2, 2))
+        self.assertEqual(0, run._stuck_floor_allowance(2, 3))
+        self.assertEqual(0, run._stuck_floor_allowance(2, 1, slack=1))
+        self.assertEqual(0, run._stuck_floor_allowance(2, 2, slack=1))
+        self.assertEqual(1, run._stuck_floor_allowance(4, 2, slack=1))
+
 
 class CapacityHoldReadersTest(unittest.TestCase):
     def test_cordon_all_takes_schedulable_workers_only(self):
@@ -16776,17 +16799,20 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
             self.assertIn("waits on the quota with its row naming the wait", reason, name)
             self.assertIn("at its record deadline (the Instance ready timeout)", reason, name)
 
-    def test_the_crash_after_ready_stuck_rows_soak_the_pushed_instance(self):
+    def test_the_crash_after_ready_stuck_rows_soak_the_push_or_state_the_floor(self):
         # Under the surge strategy a pushed pod that crashes after Ready is
         # promoted and its source retired before the crash shows, so the strict
         # floor cannot hold; the single-pod rows pace the push with the
         # ops-held rows' readiness soak, past the crash window, so the roll
-        # never promotes the pod. The gang rows stay unsoaked: their crash
-        # cycle is paced by the kubelet's restart backoff, so under a soak the
-        # ladder's third wave falls past the held budget. The other breaks
-        # carry no soak.
+        # never promotes the pod. The gang rows run unsoaked (a soaked gang's
+        # crash cycle follows the kubelet's restart backoff, so its ladder never
+        # reaches held within budget) and state the floor one Instance below N
+        # instead, the one Instance each crash costs. The other breaks carry
+        # neither.
         outputs, fam = self._more_rows()
         soak = generate_cases.MOVE_STUCK_CRASH_LOAD_SOAK_S
+        slack = generate_cases.MOVE_STUCK_CRASH_LOAD_GANG_SLACK
+        self.assertEqual(1, slack, "one Instance rolls at a time under maxSurge 1 and maxUnavailable 0")
         self.assertEqual(generate_cases.OPS_HELD_CRASH_LOAD_SOAK_S, soak, "the ops-held rows' pacing, one knob")
         self.assertGreater(soak, generate_cases.CRASH_EXIT_AFTER_S)
         crash = [(n, kv, m) for n, kv, m in fam if kv.get("stuck") and kv.get("break") == "crash-load"]
@@ -16808,13 +16834,26 @@ class GeneratedFaultMoveFamilyTest(unittest.TestCase):
             self.assertIn(f"hold Ready for {soak}s", reason, name)
             self.assertIn(f"{generate_cases.CRASH_EXIT_AFTER_S}s crash window", reason, name)
             self.assertNotIn("instanceReadyTimeout", text, f"{name}: the readiness switch's bound is not the crash's")
+        for name, kv, _m in gang:
+            text = outputs[f"gen-fault-move/{name}.yaml"]
+            header, reason = text.splitlines()[:2]
+            self.assertEqual(slack, kv["floor_slack"], name)
+            self.assertIn(f" floor_slack={slack}", header, name)
+            self.assertIn(f"the floor the running Instances must hold is N minus {slack} (floor_slack={slack})", reason, name)
+            self.assertIn("each crash costs the fleet that one Instance", reason, name)
+            self.assertNotIn("minReadySeconds:", text, f"{name}: a soaked gang never reaches held within budget")
         soaked_names = {n for n, _kv, _m in soaked}
+        gang_names = {n for n, _kv, _m in gang}
         for name, kv, _m in fam:
+            text = outputs[f"gen-fault-move/{name}.yaml"]
             if name not in soaked_names:
-                text = outputs[f"gen-fault-move/{name}.yaml"]
                 self.assertNotIn("minReadySeconds:", text, f"{name}: the gang rows and the other breaks carry no soak")
                 self.assertNotIn(f"soak {soak}s", text.splitlines()[0], name)
                 self.assertNotIn("hold Ready for", text.splitlines()[1], name)
+            if name not in gang_names:
+                self.assertNotIn("floor_slack", kv, f"{name}: the single-pod rows and the other breaks hold the full floor")
+                self.assertNotIn("floor_slack=", text.splitlines()[0], name)
+                self.assertNotIn("floor_slack=", text.splitlines()[1], name)
 
     def test_every_new_cell_validates_and_lands_on_the_ledger_rows_it_names(self):
         outputs, fam = self._more_rows()

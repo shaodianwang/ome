@@ -1610,11 +1610,16 @@ rows' readiness soak as the pushed engine's `minReadySeconds`
 pushed pod that is Ready is promoted and its source retired before the
 crash shows, so the floor the verdict holds could not be met; the soak
 outlasts the crash window, so the roll never promotes the pod and the
-running Instances keep serving at the floor. The gang shapes are left
-unsoaked: a crash-looping gang replacement is one pod the kubelet restarts
-under its own growing backoff, so under the soak the ladder sees too few
-failed attempts to reach `held` inside the case's budget. The header and
-the reason line of the soaked cases say so.
+running Instances keep serving at the floor. The gang shapes run unsoaked
+(a crash-looping gang replacement is one pod the kubelet restarts under its
+own growing backoff, so under the soak the ladder sees too few failed
+attempts to reach `held` inside the case's budget) and carry `floor_slack=1`
+instead: with no soak the roll promotes a pushed gang as soon as it is
+Ready, so each crash costs the fleet that one Instance until the kubelet
+starts it again, and the floor the verdict holds is `N - 1`, what the
+product promises without a soak; the Instances the push held down at the
+request count once against that slack, not on top of it. The header and
+the reason line of each case say which it carries.
 
 ### A fault during a runtime edit (`mode=runtimerev` with a break, `expect=recover`)
 
@@ -3175,4 +3180,5 @@ once its KIND spec settles; until then it stays hand-tested.
   matrix. The ops-held crash-after-Ready gang rows and the fault-move
   crash-after-Ready single-pod stuck rows carry a fixed window as pacing
   (`OPS_HELD_CRASH_LOAD_SOAK_S`, `MOVE_STUCK_CRASH_LOAD_SOAK_S`), not as a
-  permuted axis.
+  permuted axis; the fault-move crash-after-Ready gang stuck rows carry no
+  window and state the floor one Instance below N (`floor_slack=1`).

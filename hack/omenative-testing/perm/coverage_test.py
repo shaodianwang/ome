@@ -926,6 +926,18 @@ class StuckBreakCellsTest(unittest.TestCase):
         self.assertEqual("held floor", move.timing)
         self.assertEqual(("SurgeThenDrain", "1"), (move.strategy, move.budget))
 
+    def test_a_move_requested_on_a_parked_push_keeps_its_row_under_a_floor_slack(self):
+        # The gang crash-after-Ready rows state the floor one Instance below N;
+        # the slack sizes the claim, it is not a fault, so the cell and the
+        # strategy do not move.
+        gang = engine(2, 1, life=gen_cases.lifecycle(strat="SurgeThenDrain", surge=1, unavail=0))
+        move = self.corpus.write(mode="migrate", mig="Auto", inst=0, stuck="held", topo="engine-mn", comps=gang,
+                                 floor_slack=1, **counts(2, ceil_e=4), **{"break": "crash-load"})
+        self.assertEqual(("migrate", "push"), (move.operation, move.second_operation))
+        self.assertEqual([("crash after Ready", "persistent", "new", "engine")], move.faults)
+        self.assertEqual("held floor", move.timing)
+        self.assertEqual(("SurgeThenDrain", "1"), (move.strategy, move.budget))
+
 
 class NodeHookCellsTest(unittest.TestCase):
     """fault=node:<hook> files under the operation in flight on the node row:

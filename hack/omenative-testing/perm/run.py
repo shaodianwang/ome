@@ -952,6 +952,13 @@ def _floor_allowance(ctx, comp):
     return int((ctx.get("floor_allowance") or {}).get(comp, 0))
 
 
+def _stuck_floor_allowance(n, pre_ready, slack=0):
+    """Instances of a Component a stuck push held down when the request was
+    filed, beyond the ones the header's floor_slack already allows for: the
+    floor reads N minus the larger of the two, never minus their sum."""
+    return max(0, n - pre_ready - slack)
+
+
 def fetch_status(case_id):
     r = kubectl("-n", NS, "get", "isvc", case_id, "-o", "json")
     if r.returncode != 0:
@@ -16383,7 +16390,8 @@ HDR_VALIDATORS = {
     "floor_hard": lambda v: v == 1,   # assert the instantaneous floor min (no debounce)
     "floor_soft": lambda v: v == 1,   # opt out of the (default-hard) capacity floor
     # floor_slack=<k> lowers the capacity floor by the k Instances a fault takes
-    # (the gang a podkill breaks), so the untouched capacity stays a hard claim.
+    # (the gang a podkill breaks, the gang a crash after Ready holds down on a
+    # stuck push beside a move), so the untouched capacity stays a hard claim.
     "floor_slack": lambda v: isinstance(v, int) and v >= 1,
     # repeat=<n> applies the fault again each time what it took has come
     # back, n times in all, then stops: the persistent form of a pod
@@ -17326,9 +17334,14 @@ def validate_case_file(path):
             errs.append(f"{path}:1: kill= names the gang member a kill or a podkill takes (needs mode=kill or fault=podkill:<phase>)")
         if not str(fields.get("topo", "")).endswith("-mn"):
             errs.append(f"{path}:1: kill={fields['kill']} names a gang member (needs a multi-node topo)")
-    if "floor_slack" in fields and (mode not in ("rollout", "scaledown", "runtimerev") or "fault" not in fields):
-        errs.append(f"{path}:1: floor_slack= widens the capacity floor by the Instances a fault takes (needs fault= on a rollout, "
-                    f"scale or runtime-edit case)")
+    if "floor_slack" in fields:
+        # Beside a move, the crash after Ready is the one break a stuck push promotes,
+        # so it is the one whose cost the slack may state.
+        on_fault = mode in ("rollout", "scaledown", "runtimerev") and "fault" in fields
+        on_crash_after_ready = mode == "migrate" and "stuck" in fields and str(fields.get("break")) == "crash-load"
+        if not (on_fault or on_crash_after_ready):
+            errs.append(f"{path}:1: floor_slack= widens the capacity floor by the Instances a fault takes (needs fault= on a rollout, "
+                        f"scale or runtime-edit case, or stuck= with break=crash-load on a move)")
     if mode == "canary":
         if "proto" in fields:
             if fields.get("Ne", 0) == 0 or fields.get("Nd", 0) == 0:
@@ -21467,8 +21480,9 @@ def _stuck_move(case_id, yaml_file, desc, hdr):
     control_uids = {c: {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("comp") == c and p.get("uid")}
                     for c in controls}
     # The floor is what served when the request was filed: the stuck push
-    # already holds its Instances down, and the move surges before it drains.
-    ctx["floor_allowance"] = {c: max(0, N[c] - pre_ready[c]) for c in configured}
+    # already holds its Instances down, and the move surges before it drains;
+    # the Instances the header's slack names are those, counted once.
+    ctx["floor_allowance"] = {c: _stuck_floor_allowance(N[c], pre_ready[c], _floor_slack(ctx)) for c in configured}
     ctx["track_comps"] = sorted(configured)
     mv = _window_move_request(ctx, hdr)
     if mv is None:

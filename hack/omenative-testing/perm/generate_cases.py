@@ -302,7 +302,8 @@ runners (run.py + the KIND CI lane) already implement:
                           break=, bump=decoder for the sibling's push; on the
                           single-pod shapes the crash after Ready is paced by
                           the ops-held rows' readiness soak, so the surge
-                          never promotes it)
+                          never promotes it; the gang shapes run it unsoaked
+                          and hold the floor one Instance below N, floor_slack=1)
     gen-packed-pool/ p8600+ a packed pool: fillers take every node's spare
                           CPU once the service has settled, so the only room
                           is what a broken pod vacates; a push whose revision
@@ -7325,6 +7326,10 @@ MOVE_STUCK_READY_TIMEOUT = READINESS_NEW_TIMEOUT
 # is promoted and its source retired before the crash shows, so the strict
 # floor cannot hold; the ops-held rows' readiness soak paces the single-pod rows.
 MOVE_STUCK_CRASH_LOAD_SOAK_S = OPS_HELD_CRASH_LOAD_SOAK_S
+# A soaked gang never reaches the held state within budget (its crash-looping
+# replacement is one pod under the kubelet's growing backoff), so the gang rows
+# run unsoaked and state the floor one Instance below N: one rolls at a time.
+MOVE_STUCK_CRASH_LOAD_GANG_SLACK = 1
 MOVE_CONFIG_SUFFIX = "-config"
 MOVE_STUCK_HOW = {"imagepull": "an image that cannot be pulled",
                   "crash-start": "a runner image with no shell, so its pods crash at every start",
@@ -7511,12 +7516,15 @@ def _move_preempt_reason(topo, w, nr):
     return out
 
 
-def _move_stuck_reason(kind, stuck, topo, w, nr, sibling, soak=None):
+def _move_stuck_reason(kind, stuck, topo, w, nr, sibling, soak=None, slack=None):
     pushed = f"the {sibling}" if sibling else "the engine"
     paced = (f"; the pushed Instance must hold Ready for {soak}s before the roll promotes it (a readiness soak past "
              f"the {CRASH_EXIT_AFTER_S}s crash window), so the crash shows before the roll retires its source and the "
              f"running Instances keep serving at the floor" if soak else "")
-    out = (f"{pushed} is pushed onto a revision whose runner carries {MOVE_STUCK_HOW[kind]}{paced}; the push is left until "
+    short = (f"; the roll has no readiness soak, so a pushed gang that passes readiness is promoted and its source "
+             f"retired before the crash shows: each crash costs the fleet that one Instance until the kubelet starts "
+             f"it again, and the floor the running Instances must hold is N minus {slack} (floor_slack={slack})" if slack else "")
+    out = (f"{pushed} is pushed onto a revision whose runner carries {MOVE_STUCK_HOW[kind]}{paced}{short}; the push is left until "
            f"{MOVE_STUCK_STATE[stuck]}; then {_move_request_words(topo, w, nr)}: the move finishes, or is abandoned "
            f"with a reason its record carries, within budget and is recorded once; the moved Instance ends whole, Ready "
            f"and serving on one pod set at the index the record names (the revision its replacement runs is reported, "
@@ -7644,16 +7652,19 @@ def _emit_fault_move_more(add):
                 else:
                     kv["break"] = kind
                 ready_timeout = MOVE_STUCK_READY_TIMEOUT if kind == "stuck" else None
-                # The gang rows stay unsoaked: a crash-looping gang replacement is one pod the
-                # kubelet restarts under its own growing backoff, so under a soak the ladder's
-                # third wave falls past the held budget.
-                soak = MOVE_STUCK_CRASH_LOAD_SOAK_S if kind == "crash-load" and not is_mn(topo) else None
+                # The crash after Ready: the single-pod rows pace the push with the soak,
+                # the gang rows carry the floor one Instance below N instead.
+                crash_gang = kind == "crash-load" and is_mn(topo)
+                soak = MOVE_STUCK_CRASH_LOAD_SOAK_S if kind == "crash-load" and not crash_gang else None
+                slack = MOVE_STUCK_CRASH_LOAD_GANG_SLACK if crash_gang else None
+                if slack:
+                    kv["floor_slack"] = slack
                 life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, ready_timeout=ready_timeout, min_ready=soak)
                 d_life = lib.lifecycle() if is_pd(topo) else None
                 meta = dict(strat=strat, verb=f"push:{stuck}:{kind}+move", rp="None", stuck=stuck, victim="engine", at="accept", who="moved")
                 desc = (f"{GEN_MARK} fault-move stuck {stuck} {kind} {tag} N={n} {strat} {budget_tag(strat, surge, unavail)}"
                         + (f" soak {soak}s" if soak else ""))
-                reason = _move_stuck_reason(kind, stuck, topo, w, nr, None, soak=soak)
+                reason = _move_stuck_reason(kind, stuck, topo, w, nr, None, soak=soak, slack=slack)
                 if kind == "configkey":
                     add("gen-fault-move", desc, kv, None, reason, meta,
                         cell=("fault-move-stuck", kind, stuck, topo, w, nr),
