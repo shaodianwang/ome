@@ -574,6 +574,264 @@ func TestPartitionCache_UpdateLeafNodeCache(t *testing.T) {
 	}
 }
 
+// TestPartitionCache_PodNamePropagatesToDescendants pins the pod name onto every
+// node of the tree, not just the root.
+//
+// plugins.TightestFitScorer resolves a candidate's tree by matching the assigned
+// partition's PodName against each root's PodName. Sub-cube slices are assigned
+// descendants, so a blank descendant PodName matches no root at all: the scorer
+// falls through to FitScore=math.MaxInt and DensityScore=0 for every sub-cube
+// candidate, which ties them all and hands the placement decision to enumeration
+// order. generators.countUniquePods and the pod label on the scheduling-outcome
+// metrics read the same field.
+func TestPartitionCache_PodNamePropagatesToDescendants(t *testing.T) {
+	ctx := context.Background()
+	pc := NewPartitionCache(true)
+
+	pc.UpdateTree(ctx, &partitiontreev1.PartitionTree{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "tree-pod-a",
+			Labels: map[string]string{TpuPodIDLabel: "pod-a"},
+		},
+		Status: partitiontreev1.PartitionTreeStatus{
+			Root: &partitiontreev1.PartitionInfo{
+				PartitionID: "root",
+				Topology:    "IRONWOOD_4x4x4",
+				State:       partitiontreev1.PartitionStateHealthy,
+				ChildPartitions: []partitiontreev1.PartitionInfo{
+					{
+						PartitionID: "mid",
+						Topology:    "IRONWOOD_2x2x2",
+						State:       partitiontreev1.PartitionStateHealthy,
+						ChildPartitions: []partitiontreev1.PartitionInfo{
+							{
+								PartitionID: "leaf",
+								Topology:    "IRONWOOD_2x2x1",
+								State:       partitiontreev1.PartitionStateHealthy,
+								NodeNames:   []string{"h1"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}, nil)
+
+	for _, id := range []string{"root", "mid", "leaf"} {
+		node, ok := pc.GetNode(id)
+		if !ok {
+			t.Fatalf("partition %q missing from node cache", id)
+		}
+		if node.PodName != "pod-a" {
+			t.Errorf("partition %q PodName = %q, want %q", id, node.PodName, "pod-a")
+		}
+	}
+}
+
+// threeLevelTree builds root -> mid -> leaf so that every pair of nodes in it
+// physically overlaps.
+func threeLevelTree(name string) *partitiontreev1.PartitionTree {
+	return &partitiontreev1.PartitionTree{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: partitiontreev1.PartitionTreeStatus{
+			Root: &partitiontreev1.PartitionInfo{
+				PartitionID: "root",
+				Topology:    "4x4x4",
+				ChildPartitions: []partitiontreev1.PartitionInfo{
+					{
+						PartitionID: "mid",
+						Topology:    "2x4x4",
+						ChildPartitions: []partitiontreev1.PartitionInfo{
+							{
+								PartitionID: "leaf",
+								Topology:    "2x2x4",
+								NodeNames:   []string{"node-1"},
+							},
+						},
+					},
+					{
+						PartitionID: "sibling",
+						Topology:    "2x4x4",
+						NodeNames:   []string{"node-2"},
+					},
+				},
+			},
+		},
+	}
+}
+
+// Two slices must never hold physically overlapping partitions. A partition
+// contains its descendants and is contained by its ancestors, so holding any
+// of them is the same conflict as holding the node itself.
+func TestPartitionCache_ReservePartition_RejectsOverlap(t *testing.T) {
+	tests := []struct {
+		name       string
+		heldBy     string
+		requested  string
+		wantOK     bool
+		wantHolder string
+	}{
+		{
+			name:       "descendant of a held ancestor",
+			heldBy:     "root",
+			requested:  "leaf",
+			wantOK:     false,
+			wantHolder: "slice-a",
+		},
+		{
+			name:       "ancestor of a held descendant",
+			heldBy:     "leaf",
+			requested:  "root",
+			wantOK:     false,
+			wantHolder: "slice-a",
+		},
+		{
+			name:       "parent of a held child",
+			heldBy:     "leaf",
+			requested:  "mid",
+			wantOK:     false,
+			wantHolder: "slice-a",
+		},
+		{
+			// Siblings occupy disjoint hardware, so this must still succeed.
+			name:      "disjoint sibling",
+			heldBy:    "mid",
+			requested: "sibling",
+			wantOK:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			cache := NewPartitionCache(false)
+			cache.UpdateTree(ctx, threeLevelTree("tree-1"), nil)
+
+			held := &interfaces.SliceInfo{Name: "slice-a", PartitionIds: []string{tc.heldBy}}
+			if ok, existing := cache.ReservePartition(ctx, held); !ok {
+				t.Fatalf("setup: reserving %q failed, held by %q", tc.heldBy, existing)
+			}
+
+			req := &interfaces.SliceInfo{Name: "slice-b", PartitionIds: []string{tc.requested}}
+			ok, existing := cache.ReservePartition(ctx, req)
+			if ok != tc.wantOK {
+				t.Fatalf("ReservePartition(%q) = %v, want %v", tc.requested, ok, tc.wantOK)
+			}
+			if !tc.wantOK && existing != tc.wantHolder {
+				t.Errorf("existingSlice = %q, want %q", existing, tc.wantHolder)
+			}
+
+			if !tc.wantOK {
+				// A refused reservation must leave no trace.
+				node, found := cache.GetNode(tc.requested)
+				if !found {
+					t.Fatalf("%q vanished from the cache", tc.requested)
+				}
+				if node.InUseBy != nil {
+					t.Errorf("%q was marked in use by %q despite the reservation failing", tc.requested, node.InUseBy.Name)
+				}
+			}
+		})
+	}
+}
+
+// The overlap check keys on the slice name, so a slice re-reserving what it
+// already holds -- which the watch-driven paths do on every resync -- must
+// still succeed.
+func TestPartitionCache_ReservePartition_SameSliceIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	cache := NewPartitionCache(false)
+	cache.UpdateTree(ctx, threeLevelTree("tree-1"), nil)
+
+	sInfo := &interfaces.SliceInfo{Name: "slice-a", PartitionIds: []string{"mid"}}
+	if ok, existing := cache.ReservePartition(ctx, sInfo); !ok {
+		t.Fatalf("first reservation failed, held by %q", existing)
+	}
+	if ok, existing := cache.ReservePartition(ctx, sInfo); !ok {
+		t.Errorf("re-reserving the same partition for the same slice failed, held by %q", existing)
+	}
+}
+
+// A multi-partition reservation that fails partway must roll back completely,
+// including when the failure comes from the overlap check rather than from a
+// direct conflict.
+func TestPartitionCache_ReservePartition_RollsBackOnOverlap(t *testing.T) {
+	ctx := context.Background()
+	cache := NewPartitionCache(false)
+	cache.UpdateTree(ctx, threeLevelTree("tree-1"), nil)
+
+	held := &interfaces.SliceInfo{Name: "slice-a", PartitionIds: []string{"leaf"}}
+	if ok, existing := cache.ReservePartition(ctx, held); !ok {
+		t.Fatalf("setup: reserving leaf failed, held by %q", existing)
+	}
+
+	// sibling is free and would be taken first; mid overlaps the held leaf.
+	req := &interfaces.SliceInfo{Name: "slice-b", PartitionIds: []string{"sibling", "mid"}}
+	if ok, _ := cache.ReservePartition(ctx, req); ok {
+		t.Fatal("reservation containing an overlapping partition succeeded")
+	}
+
+	node, found := cache.GetNode("sibling")
+	if !found {
+		t.Fatal("sibling vanished from the cache")
+	}
+	if node.InUseBy != nil {
+		t.Errorf("sibling stayed reserved by %q after the batch was refused", node.InUseBy.Name)
+	}
+}
+
+// A leaf is a partition with no children, so it may list any number of node
+// names -- including none. Deleting such a tree must not index NodeNames[0],
+// and must still evict the entries the insert side actually created.
+func TestPartitionCache_DeletePartitionTree_ChildlessPartitionNodeNameCounts(t *testing.T) {
+	tests := []struct {
+		name      string
+		nodeNames []string
+		// wantEvicted is the leafPartitionNodeCache key the insert side created
+		// for this partition, or "" if it created none.
+		wantEvicted string
+	}{
+		{"no node names", nil, ""},
+		{"empty node names", []string{}, ""},
+		{"single node name", []string{"h1"}, "h1"},
+		{"multiple node names", []string{"h1", "h2"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			pc := NewPartitionCache(false)
+			tree := &partitiontreev1.PartitionTree{
+				ObjectMeta: metav1.ObjectMeta{Name: "tree-1"},
+				Status: partitiontreev1.PartitionTreeStatus{
+					Root: &partitiontreev1.PartitionInfo{
+						PartitionID: "root",
+						Topology:    "TRILLIUM_4_4",
+						NodeNames:   tt.nodeNames,
+					},
+				},
+			}
+			pc.UpdateTree(ctx, tree, nil)
+
+			if tt.wantEvicted != "" {
+				if _, ok := pc.leafPartitionNodeCache[tt.wantEvicted]; !ok {
+					t.Fatalf("insert did not populate leafPartitionNodeCache[%q], test fixture is wrong", tt.wantEvicted)
+				}
+			}
+
+			// Panics here on NodeNames[0] if the delete path indexes instead of
+			// ranging.
+			pc.DeletePartitionTree(ctx, "tree-1")
+
+			if _, ok := pc.GetNode("root"); ok {
+				t.Error("root stayed in partitionNodeCache after its tree was deleted")
+			}
+			if len(pc.leafPartitionNodeCache) != 0 {
+				t.Errorf("leafPartitionNodeCache = %v, want empty after its tree was deleted", pc.leafPartitionNodeCache)
+			}
+		})
+	}
+}
+
 func TestPartitionCache_TracksCordonedNodes(t *testing.T) {
 	ctx := context.Background()
 	pc := NewPartitionCache(true)

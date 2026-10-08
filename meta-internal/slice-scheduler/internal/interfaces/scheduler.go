@@ -20,6 +20,11 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	goslices "slices"
+
+	corev1 "k8s.io/api/core/v1"
+	partitiontreev1 "tpu.google.com/slice-scheduler/apis/partition/v1beta1"
 )
 
 // --- Constants ---
@@ -42,6 +47,31 @@ const (
 
 	// Partition states (matches Cloud CRD PartitionStateType)
 	PartitionStateDegraded = "Degraded" // NOTE: title-case for Cloud CRD, NOT "DEGRADED"
+
+	// Taint keys written by the partition-tree controller itself, as opposed to
+	// node taints it copies onto leaf partitions.
+	TaintKeyPartitionState = "cloud.google.com/partition-state"
+	TaintKeyNodesNotFound  = "cloud.google.com/nodes-not-found"
+)
+
+var (
+	// BlockedTaints is the list of taint keys that block partition scheduling.
+	// The node.kubernetes.io keys reach the PartitionTree only when the
+	// partition-tree controller runs with node taint propagation enabled.
+	BlockedTaints = []string{
+		corev1.TaintNodeNotReady,
+		corev1.TaintNodeUnreachable,
+		corev1.TaintNodeUnschedulable,
+		TaintKeyPartitionState,
+		TaintKeyNodesNotFound,
+	}
+
+	// BlockedEffects is the list of taint effects that block partition scheduling.
+	// PreferNoSchedule is excluded: it is a soft preference, not a hard veto.
+	BlockedEffects = []partitiontreev1.TaintEffect{
+		partitiontreev1.TaintEffectNoSchedule,
+		partitiontreev1.TaintEffectNoExecute,
+	}
 )
 
 // --- Domain Models ---
@@ -93,12 +123,43 @@ type PartitionInfo struct {
 	IsAvailable      bool // True if the partition itself is available (e.g. HEALTHY/EMPTY)
 	IsOccupied       bool // True if the partition is physically occupied
 	IsBroken         bool // True if the partition or its nodes are unhealthy/broken
+	TestingNotReady  bool // True if the partition or its nodes are marked NotReady for testing
+	Taints           []*partitiontreev1.PartitionTaint
 	IsCordoned       bool // True if the partition is a leaf whose node is cordoned (spec.unschedulable)
 	InUseBy          *SliceInfo
 	PodName          string
 	State            string // Raw CRD state for domain fallback
 	Children         []*PartitionInfo
 	DegradationState *DegradationState
+}
+
+// HasBlockedTaint returns true if any taint on PartitionInfo matches both BlockedEffects and BlockedTaints.
+func (p *PartitionInfo) HasBlockedTaint() bool {
+	if p == nil {
+		return false
+	}
+	for _, t := range p.Taints {
+		if t != nil && goslices.Contains(BlockedEffects, t.Effect) && goslices.Contains(BlockedTaints, t.Key) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasNoExecuteBlockedTaint reports whether any taint on PartitionInfo is IsNoExecuteBlocked.
+func (p *PartitionInfo) HasNoExecuteBlockedTaint() bool {
+	if p == nil {
+		return false
+	}
+	return goslices.ContainsFunc(p.Taints, IsNoExecuteBlocked)
+}
+
+// IsNoExecuteBlocked reports whether a taint is one the scheduler evicts running work for:
+// NoExecute effect with a key in BlockedTaints. The key check keeps this a strict subset of
+// HasBlockedTaint, so the scheduler never evicts a slice off a partition that TaintFilter
+// would immediately place it back onto.
+func IsNoExecuteBlocked(t *partitiontreev1.PartitionTaint) bool {
+	return t != nil && t.Effect == partitiontreev1.TaintEffectNoExecute && goslices.Contains(BlockedTaints, t.Key)
 }
 
 // DeepCopy returns a deep copy of the PartitionInfo.
@@ -109,6 +170,18 @@ func (p *PartitionInfo) DeepCopy() *PartitionInfo {
 	out := new(PartitionInfo)
 	*out = *p
 	out.InUseBy = p.InUseBy.DeepCopy()
+	// *out = *p copies only the slice header, and its elements point into the watcher cache.
+	// Copy the taint values so a snapshot cannot observe a later cache mutation.
+	if p.Taints != nil {
+		out.Taints = make([]*partitiontreev1.PartitionTaint, len(p.Taints))
+		for i, t := range p.Taints {
+			if t == nil {
+				continue
+			}
+			taint := *t
+			out.Taints[i] = &taint
+		}
+	}
 	if p.Children != nil {
 		out.Children = make([]*PartitionInfo, len(p.Children))
 		for i, v := range p.Children {
@@ -117,13 +190,6 @@ func (p *PartitionInfo) DeepCopy() *PartitionInfo {
 	}
 	out.DegradationState = p.DegradationState.DeepCopy()
 	return out
-}
-
-// PreemptionCandidateSet represents a set of slices that could be preempted together.
-type PreemptionCandidateSet struct {
-	Slices                 []*SliceInfo
-	PodName                string
-	ToBeAssignedPartitions []string
 }
 
 // SliceRequirement encapsulates the needs of an individual slice within a group.

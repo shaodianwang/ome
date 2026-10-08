@@ -40,10 +40,13 @@ type SliceSpec struct {
 	Type Type `json:"type"`
 
 	// Topology represents the network topology of the slice.
-	// It defines the physical arrangement of TPU chips in a 2D or 3D mesg.
+	// It defines the physical arrangement of TPU chips in a 2D or 3D mesh.
 	// The topology must be specified in `<X>x<Y>` or `<X>x<Y>x<Z>` format.
+	// Each dimension is limited to four digits so that the scheduler can multiply
+	// the dimensions together without overflowing.
 	// +kubebuilder:validation:Immutable
-	// +kubebuilder:validation:Pattern=^\d+x\d+(x\d+)?$
+	// +kubebuilder:validation:MaxLength=14
+	// +kubebuilder:validation:Pattern=`^\d{1,4}x\d{1,4}(x\d{1,4})?$`
 	Topology string `json:"topology"`
 
 	// PartitionIds denotes the set of partitions to use to form a slice

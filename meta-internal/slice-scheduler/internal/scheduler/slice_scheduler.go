@@ -1,5 +1,5 @@
 /*
-Copyright 2025.
+Copyright 2026.
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -51,7 +51,7 @@ import (
 )
 
 const (
-	TpuPodNameLabel                = "cloud.google.com/tpu-pod-id"
+	TpuPodIDLabel                  = "cloud.google.com/tpu-pod-id"
 	GceTopologyBlockLabel          = "cloud.google.com/gce-topology-block"
 	SlicePriorityAnnotation        = "cloud.google.com/slice-priority"
 	NodeLabelPartitionID           = "cloud.google.com/gke-tpu-partition-"
@@ -253,9 +253,28 @@ func (r *SliceReconciler) Start(ctx context.Context) error {
 	if err := r.List(ctx, allSlices); err != nil {
 		return fmt.Errorf("listing slices for cache: %w", err)
 	}
+	var noExecuteAtStartup []*pq.Item
 	for _, s := range allSlices.Items {
 		r.cache.ReservePartition(ctx, sliceInfo(ctx, &s))
-		r.updateGroupCache(ctx, &s)
+		groupName := r.updateGroupCache(ctx, &s)
+		// The informer's replay of a slice already on a NoExecute partition only passes the
+		// For() predicate if the cache held its tree by then, and nothing orders the replay
+		// after the tree LIST above. The tree watch does not cover it either: it only sweeps
+		// trees that are created or gain a taint. So check here, against the LIST.
+		if r.isEvictionCandidate(&s) && r.isSliceOnNoExecutePartition(&s) {
+			noExecuteAtStartup = append(noExecuteAtStartup, &pq.Item{
+				GroupId:  groupName,
+				Topology: s.Spec.Topology,
+				Priority: r.queuePriority(ctx, groupName, &s),
+			})
+		}
+	}
+	// Same delay Reconcile applies to any reschedule. The queue is keyed by group, so
+	// several members of one gang collapse into one entry.
+	if r.requeueWithDelayFn != nil {
+		for _, item := range noExecuteAtStartup {
+			go r.requeueWithDelayFn(ctx, item, r.rescheduleUnhealthyDelay)
+		}
 	}
 
 	// Launch the scheduler worker goroutine now that the cache is initialized.
@@ -348,27 +367,16 @@ func (r *SliceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, nil
 	}
 
-	r.groupMutex.RLock()
-	group, ok := r.groups[sliceGroupName]
-	r.groupMutex.RUnlock()
-
-	priority := 0
-	if ok {
-		priority = int(group.Priority)
-	} else {
-		priority = getSlicePriority(ctx, slice)
-	}
-
 	item := &pq.Item{
 		GroupId:  sliceGroupName,
 		Topology: slice.Spec.Topology,
-		Priority: priority,
+		Priority: r.queuePriority(ctx, sliceGroupName, slice),
 	}
 
 	// If the rescheduling happens due to failed/unhealthy slice then wait some
 	// time before re-scheduling. This is to give enough time for the underlying
 	// infrastructure and scheduler cache to sync.
-	if r.policy.NeedsRescheduling(slice) {
+	if r.needsRescheduling(slice) {
 		// TODO(prod-readiness): This goroutine has no deduplication — rapid
 		// healthy/unhealthy flapping can spawn many delay goroutines for the
 		// same slice. Bounded by context cancellation + PQ dedup, but consider
@@ -462,8 +470,16 @@ func (r *SliceReconciler) processSchedulingQueue(ctx context.Context) {
 		r.updateQueueDepthMetric()
 		r.queueMutex.Unlock() // Unlock *before* processing the item
 
+		// Snapshot relevant group data under the lock to prevent future
+		// race conditions accessing group readiness info and metadata.
 		r.groupMutex.RLock()
 		group, ok := r.groups[item.GroupId]
+		var ready bool
+		var currentSize, expectedSize int
+		if ok {
+			ready = group.IsReady()
+			currentSize, expectedSize = len(group.Slices), group.ExpectedSize
+		}
 		r.groupMutex.RUnlock()
 
 		if !ok {
@@ -471,8 +487,8 @@ func (r *SliceReconciler) processSchedulingQueue(ctx context.Context) {
 			continue
 		}
 
-		if !group.IsReady() {
-			logf.Info("Group is not yet complete, skipping", "groupId", item.GroupId, "currentSize", len(group.Slices), "expectedSize", group.ExpectedSize)
+		if !ready {
+			logf.Info("Group is not yet complete, skipping", "groupId", item.GroupId, "currentSize", currentSize, "expectedSize", expectedSize)
 			continue
 		}
 
@@ -519,7 +535,23 @@ func (r *SliceReconciler) tryScheduleSliceGroup(ctx context.Context, groupId str
 		}
 	}
 	if anyBlocked {
+		// A member waiting to move off a NoExecute partition has no other way back into the
+		// queue: the blocking bind or eviction finishing doesn't requeue this group.
+		if r.anyMemberAwaitingNoExecuteEviction(sliceNames, groupSlices) {
+			logf.Info("Gang is blocked but a member is on a NoExecute partition, retrying")
+			return true, retryDelayBind
+		}
 		logf.Info("Skipping scheduling because some slices in gang are blocked (evicting or binding)")
+		return false, 0
+	}
+
+	// Cloud-specific: partitions only go N→0→M, so a slice can't be moved straight off a
+	// NoExecute partition. Mark it for eviction instead; the pod reconciler drains its pods
+	// and clears its partitions, and that Slice update requeues the group as a new slice.
+	if marked, err := r.evictMembersOnNoExecutePartitions(ctx, logf, sliceNames, groupSlices); err != nil {
+		logf.Error(err, "Failed to mark slice on a NoExecute partition for eviction")
+		return true, retryDelayBind
+	} else if marked {
 		return false, 0
 	}
 
@@ -613,6 +645,18 @@ func (r *SliceReconciler) tryScheduleSliceGroup(ctx context.Context, groupId str
 
 	// Step 8: Extract assigned slices and potential preempted victim slices from the result.
 	slicesToReserve, victims := r.buildSlicesToReserveAndVictims(req, result)
+
+	// Cloud-specific: assignPartitionsWithRetry only binds a slice with no partitions, so a
+	// bound slice placed somewhere new can't be bound there. Unbind it instead, without
+	// preempting anyone for a placement that can't be committed; once its partitions are
+	// cleared, that Slice update requeues the group and the slice is placed as a new one.
+	if moved := movedSlices(groupSlices, slicesToReserve); len(moved) > 0 {
+		if isRescheduling {
+			r.restoreReservations(ctx, groupSlices)
+		}
+		r.schedulingMutex.Unlock()
+		return r.evictMovedSlices(ctx, logf, groupSlices, moved)
+	}
 
 	// Step 9: Reserve the newly allocated partitions in the local PartitionCache.
 	requeue, delay, reserveErr := r.reserveInCache(ctx, slicesToReserve, victims)
@@ -833,6 +877,60 @@ func (r *SliceReconciler) buildSlicesToReserveAndVictims(req interfaces.GroupAll
 		})
 	}
 	return slicesToReserve, result.Candidate.Victims
+}
+
+// movedSlices returns the entries of slicesToReserve whose slice already holds partitions
+// other than the ones assigned to it.
+func movedSlices(groupSlices map[string]*slicev1beta1.Slice, slicesToReserve []*interfaces.SliceInfo) []*interfaces.SliceInfo {
+	var moved []*interfaces.SliceInfo
+	for _, sInfo := range slicesToReserve {
+		slice, ok := groupSlices[sInfo.Name]
+		if ok && len(slice.Spec.PartitionIds) > 0 && !partitionsMatch(slice.Spec.PartitionIds, sInfo.PartitionIds) {
+			moved = append(moved, sInfo)
+		}
+	}
+	return moved
+}
+
+// restoreReservations reserves the partitions every bound member of the group still holds,
+// undoing the release made for a rescheduling attempt that won't be bound. A slice being
+// unbound keeps its partitions until the pod reconciler clears them, and the Slice update
+// that follows releases them. Must be called with schedulingMutex held.
+func (r *SliceReconciler) restoreReservations(ctx context.Context, groupSlices map[string]*slicev1beta1.Slice) {
+	for _, slice := range groupSlices {
+		if len(slice.Spec.PartitionIds) == 0 {
+			continue
+		}
+		if err := r.watcher.Reserve(ctx, []*interfaces.SliceInfo{sliceInfo(ctx, slice)}); err != nil {
+			log.FromContext(ctx).Error(err, "Failed to restore reservation", "sliceName", slice.Name)
+		}
+	}
+}
+
+// evictMovedSlices marks each moved slice for eviction, provided it still holds the
+// partitions the attempt saw. It requeues the group if it marked none, since then the
+// slices changed under the attempt.
+func (r *SliceReconciler) evictMovedSlices(ctx context.Context, logf logr.Logger,
+	groupSlices map[string]*slicev1beta1.Slice, moved []*interfaces.SliceInfo) (bool, time.Duration) {
+	marked := false
+	for _, sInfo := range moved {
+		held := groupSlices[sInfo.Name].Spec.PartitionIds
+		assigned := sInfo.PartitionIds
+		logf.Info("Slice placed off its current partitions, unbinding it first",
+			"sliceName", sInfo.Name, "current", held, "assigned", assigned)
+		didMark, err := r.markSliceForEviction(ctx, logf, sInfo.Name,
+			func(s *slicev1beta1.Slice) bool { return partitionsMatch(s.Spec.PartitionIds, held) },
+			func(s *slicev1beta1.Slice) { r.recordMoveEvictionEvent(s, assigned) })
+		if err != nil {
+			logf.Error(err, "Failed to mark moved slice for eviction", "sliceName", sInfo.Name)
+			return true, retryDelayBind
+		}
+		marked = marked || didMark
+	}
+	if !marked {
+		return true, retryDelayBind
+	}
+	return false, 0
 }
 
 // reserveInCache reserves the assigned partitions for candidates in the PartitionCache
@@ -1089,6 +1187,20 @@ func deepCopySliceInfo(slices []*interfaces.SliceInfo) []*interfaces.SliceInfo {
 	return out
 }
 
+// queuePriority returns the priority to queue the slice's group at: the group's, or the
+// slice's own if the group isn't cached.
+func (r *SliceReconciler) queuePriority(ctx context.Context, groupName string, slice *slicev1beta1.Slice) int {
+	// Snapshot relevant group data under the lock to prevent future
+	// race conditions accessing group metadata.
+	r.groupMutex.RLock()
+	group, ok := r.groups[groupName]
+	r.groupMutex.RUnlock()
+	if !ok {
+		return getSlicePriority(ctx, slice)
+	}
+	return int(group.Priority)
+}
+
 func (r *SliceReconciler) hasExistingAllocations(groupSlices map[string]*slicev1beta1.Slice) bool {
 	for _, slice := range groupSlices {
 		if len(slice.Spec.PartitionIds) > 0 {
@@ -1098,6 +1210,12 @@ func (r *SliceReconciler) hasExistingAllocations(groupSlices map[string]*slicev1
 	return false
 }
 
+// shouldBackoffHealthy reports whether a reschedule should wait because the slice's current
+// partitions are all still usable. A blocked NoExecute taint makes a partition unusable even
+// though IsBroken stays false. tryScheduleSliceGroup marks such slices for eviction before
+// it gets here, so that check is only a guard. A NoSchedule taint does not make a partition
+// unusable: it keeps new work off the partition but leaves running work alone, so the
+// slice still gets the backoff.
 func (r *SliceReconciler) shouldBackoffHealthy(logf logr.Logger, isRescheduling bool, reschedulingPartitions []string) bool {
 	if !isRescheduling {
 		return false
@@ -1112,7 +1230,7 @@ func (r *SliceReconciler) shouldBackoffHealthy(logf logr.Logger, isRescheduling 
 		allHealthy = false
 	} else {
 		for _, info := range infos {
-			if info.IsBroken {
+			if info.IsBroken || info.HasNoExecuteBlockedTaint() {
 				allHealthy = false
 				break
 			}
@@ -1325,7 +1443,7 @@ func (r *SliceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				if !ok {
 					return false
 				}
-				return slice.Annotations[ManagedByAnnotation] == interfaces.SliceSchedulerName && r.needsScheduling(slice) && string(slice.Spec.Type) == r.tpuType
+				return r.ownsSlice(slice) && r.needsScheduling(slice)
 			},
 			UpdateFunc: func(e event.UpdateEvent) bool {
 				newSlice, ok := e.ObjectNew.(*slicev1beta1.Slice)
@@ -1333,7 +1451,7 @@ func (r *SliceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 					return false
 				}
 
-				return string(newSlice.Spec.Type) == r.tpuType && r.needsScheduling(newSlice) && newSlice.Annotations[ManagedByAnnotation] == interfaces.SliceSchedulerName
+				return r.ownsSlice(newSlice) && r.needsScheduling(newSlice)
 			},
 			DeleteFunc: func(e event.DeleteEvent) bool { return false },
 		})).
@@ -1352,10 +1470,10 @@ func (r *SliceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}).
 		Watches(&partitiontree.PartitionTree{}, handler.Funcs{
 			CreateFunc: func(ctx context.Context, e event.TypedCreateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-				r.handlePartitionTreeCreate(ctx, e)
+				r.handlePartitionTreeCreate(ctx, e, q)
 			},
 			UpdateFunc: func(ctx context.Context, e event.TypedUpdateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-				r.handlePartitionTreeUpdate(ctx, e)
+				r.handlePartitionTreeUpdate(ctx, e, q)
 			},
 			DeleteFunc: func(ctx context.Context, e event.TypedDeleteEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 				r.handlePartitionTreeDelete(ctx, e)
@@ -1400,7 +1518,9 @@ func (r *SliceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // nodeSchedulingChanged reports whether an update changes what the cache keeps
 // about a node: its readiness or whether it is cordoned.
 func nodeSchedulingChanged(oldNode, newNode *corev1.Node) bool {
-	return getNodeReadyStatus(oldNode) != getNodeReadyStatus(newNode) ||
+	oldTesting := oldNode.Labels != nil && oldNode.Labels[watcher.GkeSchedulerTestingLabel] == watcher.SchedulerTestingNotReady
+	newTesting := newNode.Labels != nil && newNode.Labels[watcher.GkeSchedulerTestingLabel] == watcher.SchedulerTestingNotReady
+	return getNodeReadyStatus(oldNode) != getNodeReadyStatus(newNode) || oldTesting != newTesting ||
 		oldNode.Spec.Unschedulable != newNode.Spec.Unschedulable
 }
 
@@ -1556,13 +1676,13 @@ func (r *SliceReconciler) handleSliceDelete(ctx context.Context, e event.TypedDe
 
 // handlePartitionTreeCreate is called when a PartitionTree is created.
 // Acquires schedulingMutex to prevent cache modifications during an in-flight schedule→reserve→bind cycle.
-func (r *SliceReconciler) handlePartitionTreeCreate(ctx context.Context, e event.TypedCreateEvent[client.Object]) {
+func (r *SliceReconciler) handlePartitionTreeCreate(ctx context.Context, e event.TypedCreateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	tree, ok := e.Object.(*partitiontree.PartitionTree)
 	if !ok || r.cache == nil || partitionTreeType(tree) != r.tpuType {
 		return
 	}
 
-	podName := tree.Labels[TpuPodNameLabel]
+	podName := tree.Labels[TpuPodIDLabel]
 	// Get nodes with matching GCE topology block label to build the tree
 	nodeList := &corev1.NodeList{}
 	if err := r.List(ctx, nodeList, client.MatchingLabels{GceTopologyBlockLabel: podName}); err != nil {
@@ -1575,11 +1695,14 @@ func (r *SliceReconciler) handlePartitionTreeCreate(ctx context.Context, e event
 
 	r.log.Info("Adding new partition tree to cache", "partitionTree", tree.Name)
 	r.cache.UpdateTree(ctx, tree, nodeList.Items)
+	// A tree can already be tainted when it first appears. Trees that exist at startup are
+	// swept by Start, since nothing orders the informer's initial replay against it.
+	r.requeueSlicesOnNoExecutePartitions(tree.Name, q, nil)
 }
 
 // handlePartitionTreeUpdate is called when a PartitionTree is updated.
 // Acquires schedulingMutex to prevent cache modifications during an in-flight schedule→reserve→bind cycle.
-func (r *SliceReconciler) handlePartitionTreeUpdate(ctx context.Context, e event.TypedUpdateEvent[client.Object]) {
+func (r *SliceReconciler) handlePartitionTreeUpdate(ctx context.Context, e event.TypedUpdateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	newTree, ok := e.ObjectNew.(*partitiontree.PartitionTree)
 	if !ok || r.cache == nil || partitionTreeType(newTree) != r.tpuType {
 		return
@@ -1589,7 +1712,20 @@ func (r *SliceReconciler) handlePartitionTreeUpdate(ctx context.Context, e event
 	defer r.schedulingMutex.Unlock()
 
 	r.log.Info("Updating partition tree in cache", "partitionTree", newTree.Name)
+	if !r.cache.TaintFilteringEnabled() {
+		r.cache.UpdateTree(ctx, newTree, nil)
+		return
+	}
+	// Sweep only slices on partitions that just gained a NoExecute taint. Each requeue ends
+	// in a requeueWithDelay goroutine, and the tree is rewritten often, so sweeping the whole
+	// tree would start one per tainted slice on every write. Slices tainted earlier were
+	// queued by the sweep that saw the taint. If another gang member blocked the group then,
+	// tryScheduleSliceGroup keeps retrying it until the slice is marked.
+	was := r.cache.NoExecutePartitions(newTree.Name)
 	r.cache.UpdateTree(ctx, newTree, nil)
+	if gained := gainedPartitions(was, r.cache.NoExecutePartitions(newTree.Name)); len(gained) > 0 {
+		r.requeueSlicesOnNoExecutePartitions(newTree.Name, q, gained)
+	}
 }
 
 // handlePartitionTreeDelete is called when a PartitionTree is deleted.
@@ -1606,11 +1742,17 @@ func (r *SliceReconciler) handlePartitionTreeDelete(ctx context.Context, e event
 	r.cache.DeletePartitionTree(ctx, tree.Name)
 }
 
-// A slice needs scheduling if it's new (no partitions) or if the policy says
-// it needs rescheduling (unhealthy/failed status).
+// A slice needs scheduling if it's new (no partitions), if the policy says
+// it needs rescheduling (unhealthy/failed status), or if it holds a partition
+// with a NoExecute taint.
 func (r *SliceReconciler) needsScheduling(slice *slicev1beta1.Slice) bool {
 	isNew := len(slice.Spec.PartitionIds) == 0
-	return slice.DeletionTimestamp.IsZero() && (isNew || r.policy.NeedsRescheduling(slice))
+	return slice.DeletionTimestamp.IsZero() && (isNew || r.needsRescheduling(slice))
+}
+
+// needsRescheduling reports whether a slice that already holds partitions must move.
+func (r *SliceReconciler) needsRescheduling(slice *slicev1beta1.Slice) bool {
+	return r.policy.NeedsRescheduling(slice) || r.isSliceOnNoExecutePartition(slice)
 }
 
 func (r *SliceReconciler) finalizeSchedulingSuccess(logf logr.Logger, task *BindingTask) {

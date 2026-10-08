@@ -30,6 +30,7 @@ const (
 	WorkerIdAnnotation           = "tpu.google.com/worker-id"
 	PodIndexLabel                = "apps.kubernetes.io/pod-index"
 	LWSWorkerIndexLabel          = "leaderworkerset.sigs.k8s.io/worker-index"
+	LWSSubgroupSizeAnnotation    = "leaderworkerset.sigs.k8s.io/subgroup-size"
 )
 
 // appendHostNamesRecursive recursively collects hostnames from a partition node and its children.
@@ -50,9 +51,15 @@ func appendHostNamesRecursive(node *watcher.PartitionNode, hostNames *[]string) 
 // Hierarchy resolution order:
 // 1. Explicit Job / JobSet index annotations (batch.kubernetes.io/job-completion-index)
 // 2. Explicit TPU worker annotations (tpu.google.com/worker-id)
-// 3. StatefulSet ordinal labels (apps.kubernetes.io/pod-index)
-// 4. LeaderWorkerSet worker index label (leaderworkerset.sigs.k8s.io/worker-index)
+// 3. LeaderWorkerSet worker index label (leaderworkerset.sigs.k8s.io/worker-index)
+// 4. StatefulSet ordinal labels (apps.kubernetes.io/pod-index)
 // 5. Fallback string derivation parsing trailing hyphenated numeric substring from pod.Name
+//
+// LWS is checked before the StatefulSet ordinal because LWS stamps both labels on
+// its pods, and only the worker-index carries the pod's rank within its own group.
+// The StatefulSet ordinal is group-relative and does not identify a host within a
+// slice, so preferring it silently mis-assigns every LWS workload past the first
+// group.
 func parsePodIndex(pod *corev1.Pod) (int, error) {
 	if pod.Annotations != nil {
 		if indexStr, ok := pod.Annotations[JobCompletionIndexAnnotation]; ok {
@@ -64,10 +71,26 @@ func parsePodIndex(pod *corev1.Pod) (int, error) {
 	}
 
 	if pod.Labels != nil {
-		if indexStr, ok := pod.Labels[PodIndexLabel]; ok {
-			return strconv.Atoi(indexStr)
-		}
 		if indexStr, ok := pod.Labels[LWSWorkerIndexLabel]; ok {
+			workerIndex, err := strconv.Atoi(indexStr)
+			if err != nil {
+				return 0, err
+			}
+			// When LWS partitions a group into subgroups, worker-index stays
+			// group-global while the slice only spans one subgroup, so fold it
+			// back into subgroup-local space. Worker 0 is the leader, hence the
+			// -1: workers 1..n map onto hosts 0..n-1.
+			if pod.Annotations != nil {
+				subgroupSizeStr := pod.Annotations[LWSSubgroupSizeAnnotation]
+				if subgroupSizeStr != "" {
+					if subgroupSize, err := strconv.Atoi(subgroupSizeStr); err == nil && subgroupSize > 0 {
+						return (workerIndex - 1) % subgroupSize, nil
+					}
+				}
+			}
+			return workerIndex, nil
+		}
+		if indexStr, ok := pod.Labels[PodIndexLabel]; ok {
 			return strconv.Atoi(indexStr)
 		}
 	}

@@ -397,3 +397,62 @@ func TestPrepareSolverItems_SwapCost(t *testing.T) {
 		}
 	}
 }
+
+// degradedCube builds a single-cube option in the named OCS degradation domain,
+// with no victims, so options differ only in their domain and ID.
+func degradedCube(id, domain string) *interfaces.PlacementOption {
+	return &interfaces.PlacementOption{
+		Partitions: []*interfaces.PartitionInfo{{
+			ID:       id,
+			Topology: "4x4x4",
+			DegradationState: &interfaces.DegradationState{
+				Mode:             interfaces.DegradationModeDegraded,
+				ToleratedOcsName: domain,
+			},
+		}},
+	}
+}
+
+func TestGetOptionCost_CountsSwaps(t *testing.T) {
+	currentIDSet := map[string]bool{"held": true}
+	opt := &interfaces.PlacementOption{
+		Partitions: []*interfaces.PartitionInfo{
+			{ID: "held", Topology: "4x4x4"},
+			{ID: "new", Topology: "4x4x4"},
+		},
+	}
+	if got := getOptionCost(opt, currentIDSet).SwapCost; got != 1 {
+		t.Errorf("SwapCost = %v, want 1 (only \"new\" is a relocation)", got)
+	}
+	if got := getOptionCost(opt, nil).SwapCost; got != 2 {
+		t.Errorf("SwapCost with no current partitions = %v, want 2", got)
+	}
+}
+
+// The winning option of each OCS domain is compared against the other domains'
+// winners by getOptionCost. Omitting SwapCost there left that comparison unable
+// to see relocations at all, so two domains that tie on preemption and
+// degradation were separated by nothing but the sorted domain order -- and a
+// reschedule that could have kept the slice where it already runs lost to an
+// alphabetically earlier domain.
+func TestFindDisjointPlacementOptions_SwapBreaksCrossDomainTie(t *testing.T) {
+	ctx := context.Background()
+	// domain-a sorts first and would win any tie on position alone; domain-b is
+	// the one the slice already occupies.
+	options := []*interfaces.PlacementOption{
+		degradedCube("cube-a", "domain-a"),
+		degradedCube("cube-b", "domain-b"),
+	}
+
+	got := findDisjointPlacementOptions(ctx, options, 1, 1, []string{"cube-b"})
+
+	if len(got) != 1 {
+		t.Fatalf("findDisjointPlacementOptions returned %d options, want 1", len(got))
+	}
+	if len(got[0].Partitions) != 1 {
+		t.Fatalf("option holds %d partitions, want 1", len(got[0].Partitions))
+	}
+	if id := got[0].Partitions[0].ID; id != "cube-b" {
+		t.Errorf("selected %q, want \"cube-b\": the two domains tie on preemption and degradation, so the option that relocates nothing must win", id)
+	}
+}

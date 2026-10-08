@@ -18,9 +18,13 @@ package plugins
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	corev1 "k8s.io/api/core/v1"
+	partitiontreev1 "tpu.google.com/slice-scheduler/apis/partition/v1beta1"
 	"tpu.google.com/slice-scheduler/internal/cost"
 	"tpu.google.com/slice-scheduler/internal/interfaces"
 )
@@ -210,6 +214,98 @@ func TestTightestFitScorer(t *testing.T) {
 	}
 }
 
+// Occupancy is a CRD field the partition controller sets on interior
+// partitions, not only on leaves. A 4x4 that is occupied as a unit, with
+// descendants that carry no flag of their own, must not be reported free --
+// otherwise the walk in Score widens largestFreeAncestor straight past it to
+// the root, and the pod's density is counted as untouched.
+func TestTightestFitScorer_InteriorOccupiedPartitionIsNotFree(t *testing.T) {
+	scorer := &TightestFitScorer{}
+	ctx := context.Background()
+	req := interfaces.GroupAllocationRequest{
+		Slices: []interfaces.SliceRequirement{{SliceName: "test"}},
+	}
+
+	root := &interfaces.PartitionInfo{
+		ID: "root", Topology: "16x16", PodName: "pod1",
+		Children: []*interfaces.PartitionInfo{
+			{
+				ID: "child1", Topology: "4x4", PodName: "pod1",
+				Children: []*interfaces.PartitionInfo{
+					{ID: "leaf1", Topology: "2x2", PodName: "pod1"},
+				},
+			},
+			{
+				// Occupied as a whole 4x4; its halves say nothing.
+				ID: "child2", Topology: "4x4", PodName: "pod1", IsOccupied: true,
+				Children: []*interfaces.PartitionInfo{
+					{ID: "leaf2a", Topology: "2x2", PodName: "pod1"},
+					{ID: "leaf2b", Topology: "2x2", PodName: "pod1"},
+				},
+			},
+		},
+	}
+	state := &mockState{trees: []*interfaces.PartitionInfo{root}}
+	candidate := &interfaces.PlacementCandidate{
+		Assignments: map[string][]*interfaces.PartitionInfo{
+			"test": {{ID: "leaf1", Topology: "2x2", PodName: "pod1"}},
+		},
+	}
+
+	got, ok := scorer.Score(ctx, req, candidate, state).(cost.TightestFitCost)
+	if !ok {
+		t.Fatalf("Score returned %T, want cost.TightestFitCost", got)
+	}
+
+	// child2 blocks the walk at child1, so the fit is child1's 16 chips rather
+	// than the root's 256.
+	if want := 16; got.FitScore != want {
+		t.Errorf("FitScore = %d, want %d", got.FitScore, want)
+	}
+	// child1's 16 free chips plus child2's two unflagged 2x2 halves. The pod has
+	// no free root, so the freeRoots term is 0. Counting child2 as free would
+	// give a free root and 256 chips: 10256.
+	if want := 24; got.DensityScore != want {
+		t.Errorf("DensityScore = %d, want %d", got.DensityScore, want)
+	}
+}
+
+func TestCountFreeChips_StopsAtInUseSubtree(t *testing.T) {
+	t.Run("held partition contributes nothing, descendants included", func(t *testing.T) {
+		// PartitionWatcher.GetState stamps InUseBy on every descendant of a held
+		// partition, so a production snapshot never has an unflagged child under a
+		// flagged parent. The flag is set on the parent alone here to isolate the
+		// early return: without it the walk descends and the two halves, which
+		// carry no flag of their own, report themselves completely free.
+		root := &interfaces.PartitionInfo{
+			ID: "root", Topology: "4x4", InUseBy: &interfaces.SliceInfo{Name: "holder"},
+			Children: []*interfaces.PartitionInfo{
+				{ID: "leafA", Topology: "2x2"},
+				{ID: "leafB", Topology: "2x2"},
+			},
+		}
+
+		if got := countFreeChips(root); got != 0 {
+			t.Errorf("countFreeChips(held root) = %d, want 0", got)
+		}
+	})
+
+	t.Run("free subtrees beside a held one still count", func(t *testing.T) {
+		// The early return must not swallow siblings of a held partition.
+		root := &interfaces.PartitionInfo{
+			ID: "root", Topology: "4x4",
+			Children: []*interfaces.PartitionInfo{
+				{ID: "held", Topology: "2x2", InUseBy: &interfaces.SliceInfo{Name: "holder"}},
+				{ID: "free", Topology: "2x2"},
+			},
+		}
+
+		if want, got := 4, countFreeChips(root); got != want {
+			t.Errorf("countFreeChips(root) = %d, want %d", got, want)
+		}
+	})
+}
+
 func TestDegradationSinkScorer(t *testing.T) {
 	scorer := &DegradationSinkScorer{}
 	ctx := context.Background()
@@ -335,6 +431,199 @@ func TestDegradationSinkScorer(t *testing.T) {
 	}
 }
 
+// degradedTree returns a 4x4x4 root over one 2x2x2 child, with the degradation
+// state attached to whichever level the caller names. Cloud's watcher only
+// populates DegradationState for State == Degraded, so a healthy level is nil
+// rather than Mode: NORMAL.
+func degradedTree(rootDegraded, childDegraded bool) *interfaces.PartitionInfo {
+	degraded := func(on bool) *interfaces.DegradationState {
+		if !on {
+			return nil
+		}
+		return &interfaces.DegradationState{Mode: interfaces.DegradationModeDegraded}
+	}
+	return &interfaces.PartitionInfo{
+		ID: "root", Topology: "4x4x4", DegradationState: degraded(rootDegraded),
+		Children: []*interfaces.PartitionInfo{
+			{ID: "child", Topology: "2x2x2", DegradationState: degraded(childDegraded)},
+		},
+	}
+}
+
+// degradationReq scores one tolerant tpu7x slice holding the partition named by
+// id, so the returned cost is 1 when that partition counts as normal and 0 when
+// it counts as degraded.
+func degradationReq(id string) (interfaces.GroupAllocationRequest, *interfaces.PlacementCandidate) {
+	req := interfaces.GroupAllocationRequest{
+		Slices: []interfaces.SliceRequirement{{
+			SliceName: "s", Type: "tpu7x", Topology: "4x4x4",
+			DegradationTolerance: interfaces.DegradationToleranceAll,
+		}},
+	}
+	cand := &interfaces.PlacementCandidate{
+		Assignments: map[string][]*interfaces.PartitionInfo{
+			"s": {{ID: id, Topology: "2x2x2"}},
+		},
+	}
+	return req, cand
+}
+
+// TestDegradationSinkScorer_ResolvesAgainstRootNotSelf pins the semantic the
+// index has to preserve: degradation is a property of the OCS domain, which is
+// the root cube, so a descendant is scored by its root and never by its own
+// State. The existing table above only ever builds single-node trees, so
+// nothing covered this before.
+func TestDegradationSinkScorer_ResolvesAgainstRootNotSelf(t *testing.T) {
+	ctx := context.Background()
+	req, cand := degradationReq("child")
+
+	tests := []struct {
+		name                        string
+		rootDegraded, childDegraded bool
+		want                        cost.DegradationCost
+	}{
+		{"degraded root, unmarked child → child is degraded", true, false, 0},
+		{"healthy root, degraded child → child is normal", false, true, 1},
+		{"healthy root and child → normal", false, false, 1},
+		{"degraded root and child → degraded", true, true, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scorer := &DegradationSinkScorer{}
+			state := &mockState{trees: []*interfaces.PartitionInfo{degradedTree(tt.rootDegraded, tt.childDegraded)}}
+			got, ok := scorer.Score(ctx, req, cand, state).(cost.DegradationCost)
+			if !ok {
+				t.Fatalf("Score returned %T, want cost.DegradationCost", got)
+			}
+			if got != tt.want {
+				t.Errorf("Score() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDegradationSinkScorer_IndexFollowsTheSnapshot guards the memoization
+// added for L1. The index is keyed on ClusterState identity, so a scorer reused
+// across scheduling cycles -- which is how cmd/main.go wires it, one instance
+// for the process -- must not answer the next cycle from the last one's trees.
+func TestDegradationSinkScorer_IndexFollowsTheSnapshot(t *testing.T) {
+	ctx := context.Background()
+	req, cand := degradationReq("child")
+	scorer := &DegradationSinkScorer{}
+
+	score := func(state interfaces.ClusterState) cost.DegradationCost {
+		t.Helper()
+		got, ok := scorer.Score(ctx, req, cand, state).(cost.DegradationCost)
+		if !ok {
+			t.Fatalf("Score returned %T, want cost.DegradationCost", got)
+		}
+		return got
+	}
+
+	degradedSnapshot := &mockState{trees: []*interfaces.PartitionInfo{degradedTree(true, false)}}
+	healthySnapshot := &mockState{trees: []*interfaces.PartitionInfo{degradedTree(false, false)}}
+
+	if got := score(degradedSnapshot); got != 0 {
+		t.Fatalf("first cycle (degraded root) = %d, want 0", got)
+	}
+	if got := score(healthySnapshot); got != 1 {
+		t.Errorf("second cycle (healthy root) = %d, want 1 -- stale index", got)
+	}
+	// Back to the first snapshot: a rebuild, not a resurrected entry.
+	if got := score(degradedSnapshot); got != 0 {
+		t.Errorf("third cycle (degraded root again) = %d, want 0", got)
+	}
+	// Repeat reads of one snapshot are served from the index and must agree.
+	if got := score(degradedSnapshot); got != 0 {
+		t.Errorf("cached read = %d, want 0", got)
+	}
+}
+
+// TestDegradationSinkScorer_ConcurrentScore covers the lock the index needs.
+// ScorePhase fans candidates out across goroutines against one scorer instance,
+// so both the build and the read race unless guarded. Meaningful under -race.
+func TestDegradationSinkScorer_ConcurrentScore(t *testing.T) {
+	ctx := context.Background()
+	req, cand := degradationReq("child")
+	scorer := &DegradationSinkScorer{}
+
+	snapshots := []interfaces.ClusterState{
+		&mockState{trees: []*interfaces.PartitionInfo{degradedTree(true, false)}},
+		&mockState{trees: []*interfaces.PartitionInfo{degradedTree(false, false)}},
+	}
+	want := []cost.DegradationCost{0, 1}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			idx := i % len(snapshots)
+			if got := scorer.Score(ctx, req, cand, snapshots[idx]); got != want[idx] {
+				t.Errorf("goroutine %d: Score() = %v, want %v", i, got, want[idx])
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+// benchDegradationCluster builds trees roots deep enough to exercise the walk
+// the index replaces: a 4x4x4 root over the 2x4x4 / 2x2x4 / 2x2x2 / 2x2x1
+// ladder, 31 partitions per tree.
+func benchDegradationCluster(roots int) *mockState {
+	var build func(id string, topos []string) *interfaces.PartitionInfo
+	build = func(id string, topos []string) *interfaces.PartitionInfo {
+		node := &interfaces.PartitionInfo{ID: id, Topology: topos[0]}
+		if len(topos) > 1 {
+			for i := 0; i < 2; i++ {
+				node.Children = append(node.Children, build(fmt.Sprintf("%s-%d", id, i), topos[1:]))
+			}
+		}
+		return node
+	}
+
+	ladder := []string{"4x4x4", "2x4x4", "2x2x4", "2x2x2", "2x2x1"}
+	trees := make([]*interfaces.PartitionInfo, roots)
+	for r := range trees {
+		root := build(fmt.Sprintf("cube%d", r), ladder)
+		if r%4 == 0 {
+			root.DegradationState = &interfaces.DegradationState{Mode: interfaces.DegradationModeDegraded}
+		}
+		trees[r] = root
+	}
+	return &mockState{trees: trees}
+}
+
+// BenchmarkDegradationSinkScorer_Score measures the per-candidate cost of the
+// root-degradation lookup over one snapshot, which is the shape of the real
+// workload: a snapshot is built per scheduling cycle and then scored against
+// every candidate the generator produced.
+func BenchmarkDegradationSinkScorer_Score(b *testing.B) {
+	ctx := context.Background()
+	state := benchDegradationCluster(128)
+
+	// A sub-cube slice assigned the deepest partition of the last cube, so the
+	// scan this replaces pays close to its worst case.
+	req := interfaces.GroupAllocationRequest{
+		Slices: []interfaces.SliceRequirement{{
+			SliceName: "s", Type: "tpu7x", Topology: "2x2x1",
+			DegradationTolerance: interfaces.DegradationToleranceAll,
+		}},
+	}
+	cand := &interfaces.PlacementCandidate{
+		Assignments: map[string][]*interfaces.PartitionInfo{
+			"s": {{ID: "cube127-1-1-1-1", Topology: "2x2x1"}},
+		},
+	}
+
+	scorer := &DegradationSinkScorer{}
+	b.ReportAllocs()
+	for b.Loop() {
+		scorer.Score(ctx, req, cand, state)
+	}
+}
+
 func TestMinimizeSwappedCubesScorer_Score(t *testing.T) {
 	testCases := []struct {
 		name      string
@@ -398,6 +687,67 @@ func TestMinimizeSwappedCubesScorer_Score(t *testing.T) {
 			},
 			want: cost.SwapCost(2),
 		},
+		{
+			// The case that separates per-slice scoring from scoring against the
+			// union of the group's current partitions. Both slices keep a
+			// partition the group already holds, but they trade: slice-1 takes
+			// slice-2's cube and vice versa. Under the union every assigned
+			// partition is "current" and this scores 0, which would make an
+			// unbindable shuffle the cheapest candidate in the request.
+			name: "Slices trading partitions within the group costs 1 swap each",
+			req: interfaces.GroupAllocationRequest{
+				Slices: []interfaces.SliceRequirement{
+					{SliceName: "slice-1", CurrentPartitionIDs: []string{"p1"}},
+					{SliceName: "slice-2", CurrentPartitionIDs: []string{"p2"}},
+				},
+			},
+			candidate: &interfaces.PlacementCandidate{
+				Assignments: map[string][]*interfaces.PartitionInfo{
+					"slice-1": {{ID: "p2"}},
+					"slice-2": {{ID: "p1"}},
+				},
+			},
+			want: cost.SwapCost(2),
+		},
+		{
+			// Same group, no trade: each slice is handed back exactly what it
+			// already had. Per-slice and union agree here, and must stay 0 so
+			// rescheduling in place remains free.
+			name: "Slices keeping their own partitions costs 0 swaps",
+			req: interfaces.GroupAllocationRequest{
+				Slices: []interfaces.SliceRequirement{
+					{SliceName: "slice-1", CurrentPartitionIDs: []string{"p1"}},
+					{SliceName: "slice-2", CurrentPartitionIDs: []string{"p2"}},
+				},
+			},
+			candidate: &interfaces.PlacementCandidate{
+				Assignments: map[string][]*interfaces.PartitionInfo{
+					"slice-1": {{ID: "p1"}},
+					"slice-2": {{ID: "p2"}},
+				},
+			},
+			want: cost.SwapCost(0),
+		},
+		{
+			// A new slice joining a group that already holds partitions must not
+			// inherit its siblings' partitions as "free". slice-2 has no current
+			// partitions so it is skipped entirely; slice-1 moving off p1 is the
+			// only cost.
+			name: "New sibling does not make a placed slice's move free",
+			req: interfaces.GroupAllocationRequest{
+				Slices: []interfaces.SliceRequirement{
+					{SliceName: "slice-1", CurrentPartitionIDs: []string{"p1"}},
+					{SliceName: "slice-2", CurrentPartitionIDs: nil},
+				},
+			},
+			candidate: &interfaces.PlacementCandidate{
+				Assignments: map[string][]*interfaces.PartitionInfo{
+					"slice-1": {{ID: "p3"}},
+					"slice-2": {{ID: "p1"}},
+				},
+			},
+			want: cost.SwapCost(1),
+		},
 	}
 
 	scorer := &MinimizeSwappedCubesScorer{}
@@ -409,6 +759,66 @@ func TestMinimizeSwappedCubesScorer_Score(t *testing.T) {
 			got := scorer.Score(context.Background(), tc.req, tc.candidate, nil)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("Score() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestIsCompletelyFree_BlockedTaint(t *testing.T) {
+	taint := func(key string, effect partitiontreev1.TaintEffect) []*partitiontreev1.PartitionTaint {
+		return []*partitiontreev1.PartitionTaint{{Key: key, Effect: effect}}
+	}
+
+	tests := []struct {
+		name string
+		node *interfaces.PartitionInfo
+		want bool
+	}{
+		{
+			name: "untainted and unoccupied is free",
+			node: &interfaces.PartitionInfo{ID: "p1", Topology: "4x4"},
+			want: true,
+		},
+		{
+			name: "blocked taint is not free",
+			node: &interfaces.PartitionInfo{
+				ID:       "p1",
+				Topology: "4x4",
+				Taints:   taint(corev1.TaintNodeUnschedulable, partitiontreev1.TaintEffectNoSchedule),
+			},
+			want: false,
+		},
+		{
+			name: "PreferNoSchedule is a soft preference, still free",
+			node: &interfaces.PartitionInfo{
+				ID:       "p1",
+				Topology: "4x4",
+				Taints:   taint(interfaces.TaintKeyPartitionState, partitiontreev1.TaintEffectPreferNoSchedule),
+			},
+			want: true,
+		},
+		{
+			name: "a tainted child makes the parent not free",
+			node: &interfaces.PartitionInfo{
+				ID:       "parent",
+				Topology: "4x8",
+				Children: []*interfaces.PartitionInfo{
+					{ID: "c1", Topology: "4x4"},
+					{
+						ID:       "c2",
+						Topology: "4x4",
+						Taints:   taint(corev1.TaintNodeNotReady, partitiontreev1.TaintEffectNoExecute),
+					},
+				},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isCompletelyFree(tt.node); got != tt.want {
+				t.Errorf("isCompletelyFree() = %v, want %v", got, tt.want)
 			}
 		})
 	}

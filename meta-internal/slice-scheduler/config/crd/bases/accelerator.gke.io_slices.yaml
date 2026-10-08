@@ -63,9 +63,12 @@ spec:
               topology:
                 description: |-
                   Topology represents the network topology of the slice.
-                  It defines the physical arrangement of TPU chips in a 2D or 3D mesg.
+                  It defines the physical arrangement of TPU chips in a 2D or 3D mesh.
                   The topology must be specified in `<X>x<Y>` or `<X>x<Y>x<Z>` format.
-                pattern: ^\d+x\d+(x\d+)?$
+                  Each dimension is limited to four digits so that the scheduler can multiply
+                  the dimensions together without overflowing.
+                maxLength: 14
+                pattern: ^\d{1,4}x\d{1,4}(x\d{1,4})?$
                 type: string
               type:
                 description: Type specifies the type of accelerator used in this slice,

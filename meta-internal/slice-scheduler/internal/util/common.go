@@ -28,6 +28,11 @@ import (
 // Workloads with ChipCount >= ChipsPerCube span full cubes (multi-cube).
 const ChipsPerCube = 64
 
+// MaxTopologyDimension is the largest value accepted for a single dimension of a
+// topology string. Used to prevent overflow errors when parsing incoming
+// topologies.
+const MaxTopologyDimension = 9999
+
 // ToTopology converts a partition topology string to a normalized form.
 // Cloud uses string-based topology (e.g., "16x16", "4x4x4") directly.
 func ToTopology(topology string) string {
@@ -80,6 +85,16 @@ func init() {
 	numOfCubesCache["2x4x4"] = 0
 }
 
+// parseDimension parses a single topology dimension. It rejects values that are
+// not numeric, not positive, or larger than MaxTopologyDimension.
+func parseDimension(part string) (int, bool) {
+	val, err := strconv.Atoi(part)
+	if err != nil || val <= 0 || val > MaxTopologyDimension {
+		return 0, false
+	}
+	return val, true
+}
+
 // Number of cubes in a topology for Ironwood
 func NumOfCubes(topology string) int {
 	if cubes, ok := numOfCubesCache[topology]; ok {
@@ -90,16 +105,16 @@ func NumOfCubes(topology string) int {
 	if len(parts) != 3 {
 		return -1
 	}
-	x, err := strconv.Atoi(parts[0])
-	if err != nil {
+	x, ok := parseDimension(parts[0])
+	if !ok {
 		return -1
 	}
-	y, err := strconv.Atoi(parts[1])
-	if err != nil {
+	y, ok := parseDimension(parts[1])
+	if !ok {
 		return -1
 	}
-	z, err := strconv.Atoi(parts[2])
-	if err != nil {
+	z, ok := parseDimension(parts[2])
+	if !ok {
 		return -1
 	}
 	return x * y * z / 64
@@ -109,7 +124,7 @@ func NumOfCubes(topology string) int {
 // It only applies to 3D topologies.
 func IsSingleCubeOrLess(topology string) bool {
 	numCubes := NumOfCubes(topology)
-	return numCubes <= 1
+	return numCubes >= 0 && numCubes <= 1
 }
 
 // ChipCount returns the total number of chips in a topology.
@@ -124,8 +139,8 @@ func ChipCount(topology string) int {
 	}
 	product := 1
 	for _, part := range parts {
-		val, err := strconv.Atoi(part)
-		if err != nil {
+		val, ok := parseDimension(part)
+		if !ok {
 			return 0
 		}
 		product *= val

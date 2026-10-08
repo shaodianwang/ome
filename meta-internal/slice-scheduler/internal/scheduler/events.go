@@ -44,6 +44,17 @@ func (r *SliceReconciler) recordEvictionEvent(slice *slicev1beta1.Slice) {
 	r.Recorder.Eventf(slice, corev1.EventTypeWarning, Evicted, "Slice evicted due to lack of available partitions for rescheduling")
 }
 
+// recordNoExecuteEvictionEvent records an event when a slice is evicted from a partition with a NoExecute taint.
+func (r *SliceReconciler) recordNoExecuteEvictionEvent(slice *slicev1beta1.Slice) {
+	r.Recorder.Eventf(slice, corev1.EventTypeWarning, Evicted, "Slice evicted from partitions %v, which have a NoExecute taint", slice.Spec.PartitionIds)
+}
+
+// recordMoveEvictionEvent records an event when a slice is evicted so it can be placed on
+// partitions other than the ones it holds.
+func (r *SliceReconciler) recordMoveEvictionEvent(slice *slicev1beta1.Slice, assigned []string) {
+	r.Recorder.Eventf(slice, corev1.EventTypeWarning, Evicted, "Slice evicted from partitions %v so it can be rescheduled onto %v", slice.Spec.PartitionIds, assigned)
+}
+
 // recordSchedulingFailure records an event when a slice fail to schedule due to lack of capacity.
 func (r *SliceReconciler) recordSchedulingFailure(slice *slicev1beta1.Slice) {
 	r.Recorder.Eventf(slice, corev1.EventTypeWarning, FailedToSchedule, "Slice failed to schedule due to lack of available partitions")

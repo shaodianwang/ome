@@ -76,16 +76,35 @@ func removeUsedCubes(remaining []*interfaces.PlacementOption, usedOpt *interface
 	return nextRemaining
 }
 
-func getOptionCost(opt *interfaces.PlacementOption) cost.DegradationPreemptionCost {
+// getOptionCost prices a whole multi-cube placement option so that options built
+// in different OCS degradation domains can be compared against each other.
+//
+// The three components must mirror the per-item costs assembled by
+// prepareSolverItems, otherwise generation and ranking disagree: the solver picks
+// cubes using one cost definition while this cross-domain comparison ranks the
+// resulting options using another. SwapCost is therefore the number of partitions
+// the option would relocate -- those not already held by the requesting slice
+// group -- which is the same quantity MinimizeSwappedCubesScorer computes over
+// the final assignment.
+//
+// currentIDSet is the set built by findDisjointPlacementOptions. When it is empty
+// every option of a given size scores the same swap count, so relative ordering
+// is unaffected.
+func getOptionCost(opt *interfaces.PlacementOption, currentIDSet map[string]bool) cost.DegradationPreemptionCost {
 	preemption := cost.NewPreemptionCost(opt.Victims)
 	normalCount := 0
+	swapCount := 0
 	for _, part := range opt.Partitions {
 		if isNormal(part) {
 			normalCount++
 		}
+		if !currentIDSet[part.ID] {
+			swapCount++
+		}
 	}
 	return cost.DegradationPreemptionCost{
 		PreemptionCost:  preemption,
+		SwapCost:        cost.SwapCost(swapCount),
 		DegradationCost: cost.DegradationCost(normalCount),
 	}
 }
@@ -157,7 +176,7 @@ func findDisjointPlacementOptions(ctx context.Context, singleCubeOptions []*inte
 				continue
 			}
 
-			optCost := getOptionCost(option)
+			optCost := getOptionCost(option, currentIDSet)
 			if !bestCostInitialized || optCost.Less(bestCost) {
 				bestOption = option
 				bestCost = optCost
@@ -169,7 +188,7 @@ func findDisjointPlacementOptions(ctx context.Context, singleCubeOptions []*inte
 			logf.V(4).Info("No more candidates found", "iteration", iteration)
 			break
 		}
-		logf.V(4).Info("Selected candidate", "iteration", iteration, "cubes", len(bestOption.Partitions), "victimsCount", len(bestOption.Victims), "cost", getOptionCost(bestOption))
+		logf.V(4).Info("Selected candidate", "iteration", iteration, "cubes", len(bestOption.Partitions), "victimsCount", len(bestOption.Victims), "cost", bestCost)
 
 		result = append(result, bestOption)
 		for _, v := range bestOption.Victims {

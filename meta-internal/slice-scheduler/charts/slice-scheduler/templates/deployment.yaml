@@ -50,6 +50,7 @@ spec:
             - "--zap-log-level={{ .Values.debug.level }}"
             {{- end }}
             - "--enable-node-readiness={{ .Values.enableNodeReadiness }}"
+            - "--enable-testing-filter={{ .Values.enableTestingFilter }}"
             - "--exclude-cordoned-nodes={{ .Values.excludeCordonedNodes }}"
             {{- if .Values.podReconciler.enabled }}
             - "--enable-pod-reconciler=true"

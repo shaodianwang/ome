@@ -63,7 +63,7 @@ func TestAsyncBinding_EndToEnd_Success(t *testing.T) {
 	pt := &partitiontreev1.PartitionTree{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "pt-e2e",
-			Labels: map[string]string{TpuPodNameLabel: "pt-e2e"},
+			Labels: map[string]string{TpuPodIDLabel: "pt-e2e"},
 		},
 		Status: partitiontreev1.PartitionTreeStatus{
 			AcceleratorType: "v6e",
@@ -425,7 +425,7 @@ func TestAsyncBinding_QueueFullFallback(t *testing.T) {
 	pt := &partitiontreev1.PartitionTree{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "pt-queue-full",
-			Labels: map[string]string{TpuPodNameLabel: "pt-queue-full"},
+			Labels: map[string]string{TpuPodIDLabel: "pt-queue-full"},
 		},
 		Status: partitiontreev1.PartitionTreeStatus{
 			AcceleratorType: "v6e",
@@ -498,7 +498,7 @@ func TestAsyncBinding_SyncFallback_NilQueue(t *testing.T) {
 	pt := &partitiontreev1.PartitionTree{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "pt-sync",
-			Labels: map[string]string{TpuPodNameLabel: "pt-sync"},
+			Labels: map[string]string{TpuPodIDLabel: "pt-sync"},
 		},
 		Status: partitiontreev1.PartitionTreeStatus{
 			AcceleratorType: "v6e",

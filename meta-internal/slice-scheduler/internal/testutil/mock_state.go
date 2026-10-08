@@ -17,20 +17,57 @@ limitations under the License.
 package testutil
 
 import (
+	"sort"
+	"sync"
+
 	"tpu.google.com/slice-scheduler/internal/interfaces"
 )
 
 // MockClusterState implements interfaces.ClusterState.
 type MockClusterState struct {
 	PartitionTrees []*interfaces.PartitionInfo
+
+	once    sync.Once
+	infoMap map[string]*interfaces.PartitionInfo
 }
 
 func (m *MockClusterState) GetPartitionTrees() []*interfaces.PartitionInfo {
 	return m.PartitionTrees
 }
 
+// GetPartitionInfo resolves ids against the very nodes GetPartitionTrees hands
+// out, so a caller that reaches a partition by either route sees one object
+// with one InUseBy. Returning nil here -- as this used to -- left every
+// GetPartitionInfo path in the scheduler untested.
+//
+// Unknown ids are skipped rather than reported, matching the production
+// watcher. PartitionTrees is indexed once on first use and must not be
+// reassigned afterwards; MockStateBuilder.Build populates it up front.
 func (m *MockClusterState) GetPartitionInfo(ids []string) []*interfaces.PartitionInfo {
-	return nil
+	m.once.Do(func() {
+		m.infoMap = make(map[string]*interfaces.PartitionInfo)
+		var index func(*interfaces.PartitionInfo)
+		index = func(node *interfaces.PartitionInfo) {
+			if node == nil {
+				return
+			}
+			m.infoMap[node.ID] = node
+			for _, child := range node.Children {
+				index(child)
+			}
+		}
+		for _, root := range m.PartitionTrees {
+			index(root)
+		}
+	})
+
+	result := make([]*interfaces.PartitionInfo, 0, len(ids))
+	for _, id := range ids {
+		if info, ok := m.infoMap[id]; ok {
+			result = append(result, info)
+		}
+	}
+	return result
 }
 
 // MockStateBuilder provides a fluent DSL for building complex TPU cluster states.
@@ -152,8 +189,16 @@ func (tc *TreeContext) Build() *MockClusterState {
 // Build constructs the MockClusterState and applies propagation rules.
 func (b *MockStateBuilder) Build() *MockClusterState {
 	var roots []*interfaces.PartitionInfo
-	for podName, builders := range b.pods {
-		for _, nb := range builders {
+	// Emit the roots in a fixed order. Ranging b.pods directly would hand a test
+	// a different tree order on every run, which makes this builder unable to
+	// reproduce -- let alone detect -- order sensitivity in the code under test.
+	podNames := make([]string, 0, len(b.pods))
+	for podName := range b.pods {
+		podNames = append(podNames, podName)
+	}
+	sort.Strings(podNames)
+	for _, podName := range podNames {
+		for _, nb := range b.pods[podName] {
 			root := b.buildRecursive(nb, podName, nil)
 			roots = append(roots, &root)
 		}

@@ -18,6 +18,8 @@ package interfaces
 
 import (
 	"testing"
+
+	partitiontreev1 "tpu.google.com/slice-scheduler/apis/partition/v1beta1"
 )
 
 func TestSliceInfo_DeepCopy(t *testing.T) {
@@ -257,4 +259,184 @@ func TestPlacementCandidate_DeepCopy(t *testing.T) {
 			t.Errorf("expected nil Victims, got %v", copied.Victims)
 		}
 	})
+}
+
+func taint(key string, effect partitiontreev1.TaintEffect) *partitiontreev1.PartitionTaint {
+	return &partitiontreev1.PartitionTaint{Key: key, Effect: effect}
+}
+
+func TestHasBlockedTaint(t *testing.T) {
+	tests := []struct {
+		description string
+		taints      []*partitiontreev1.PartitionTaint
+		want        bool
+	}{
+		{
+			description: "no taints",
+			want:        false,
+		},
+		{
+			description: "nil taint",
+			taints:      []*partitiontreev1.PartitionTaint{nil},
+			want:        false,
+		},
+		{
+			description: "cordoned node",
+			taints:      []*partitiontreev1.PartitionTaint{taint("node.kubernetes.io/unschedulable", partitiontreev1.TaintEffectNoSchedule)},
+			want:        true,
+		},
+		{
+			description: "incomplete partition",
+			taints:      []*partitiontreev1.PartitionTaint{taint(TaintKeyPartitionState, partitiontreev1.TaintEffectNoSchedule)},
+			want:        true,
+		},
+		{
+			description: "degraded partition is advisory",
+			taints:      []*partitiontreev1.PartitionTaint{taint(TaintKeyPartitionState, partitiontreev1.TaintEffectPreferNoSchedule)},
+			want:        false,
+		},
+		{
+			description: "unrecognised key",
+			taints:      []*partitiontreev1.PartitionTaint{taint("example.com/custom", partitiontreev1.TaintEffectNoSchedule)},
+			want:        false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.description, func(t *testing.T) {
+			info := &PartitionInfo{Taints: tc.taints}
+			if got := info.HasBlockedTaint(); got != tc.want {
+				t.Errorf("HasBlockedTaint() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	var nilInfo *PartitionInfo
+	if nilInfo.HasBlockedTaint() {
+		t.Error("HasBlockedTaint() on nil PartitionInfo = true, want false")
+	}
+}
+
+func TestIsNoExecuteBlocked(t *testing.T) {
+	tests := []struct {
+		description string
+		taint       *partitiontreev1.PartitionTaint
+		want        bool
+	}{
+		{
+			description: "nil taint",
+			taint:       nil,
+			want:        false,
+		},
+		{
+			description: "NoExecute with a recognised node key",
+			taint:       taint("node.kubernetes.io/unreachable", partitiontreev1.TaintEffectNoExecute),
+			want:        true,
+		},
+		{
+			description: "unhealthy partition",
+			taint:       taint(TaintKeyPartitionState, partitiontreev1.TaintEffectNoExecute),
+			want:        true,
+		},
+		{
+			description: "nodes not found",
+			taint:       taint(TaintKeyNodesNotFound, partitiontreev1.TaintEffectNoExecute),
+			want:        true,
+		},
+		{
+			description: "NoExecute with an unrecognised key is not the scheduler's business",
+			taint:       taint("example.com/custom", partitiontreev1.TaintEffectNoExecute),
+			want:        false,
+		},
+		{
+			description: "NoSchedule blocks placement but never evicts",
+			taint:       taint("node.kubernetes.io/unschedulable", partitiontreev1.TaintEffectNoSchedule),
+			want:        false,
+		},
+		{
+			description: "PreferNoSchedule is advisory",
+			taint:       taint("node.kubernetes.io/not-ready", partitiontreev1.TaintEffectPreferNoSchedule),
+			want:        false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.description, func(t *testing.T) {
+			if got := IsNoExecuteBlocked(tc.taint); got != tc.want {
+				t.Errorf("IsNoExecuteBlocked() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNoExecuteIsSubsetOfBlocked guards the invariant the eviction path depends on: every
+// taint that makes the scheduler move a slice must also be one TaintFilter refuses to place
+// it back onto. It walks the real BlockedTaints, crossed with every effect the API defines,
+// so adding a key to one check and not the other fails here.
+func TestNoExecuteIsSubsetOfBlocked(t *testing.T) {
+	keys := append([]string{"example.com/custom"}, BlockedTaints...)
+	effects := []partitiontreev1.TaintEffect{
+		partitiontreev1.TaintEffectNoSchedule,
+		partitiontreev1.TaintEffectNoExecute,
+		partitiontreev1.TaintEffectPreferNoSchedule,
+	}
+
+	for _, key := range keys {
+		for _, effect := range effects {
+			tt := taint(key, effect)
+			info := &PartitionInfo{Taints: []*partitiontreev1.PartitionTaint{tt}}
+			if IsNoExecuteBlocked(tt) && !info.HasBlockedTaint() {
+				t.Errorf("taint {key: %q, effect: %q} triggers eviction but is not blocked for placement", key, effect)
+			}
+		}
+	}
+}
+
+// TestPartitionInfoDeepCopyTaints checks that a copy shares no taint memory with the
+// original, including a nil element, which must stay a nil hole in the copy.
+func TestPartitionInfoDeepCopyTaints(t *testing.T) {
+	original := &PartitionInfo{
+		ID: "p1",
+		Taints: []*partitiontreev1.PartitionTaint{
+			taint("node.kubernetes.io/unreachable", partitiontreev1.TaintEffectNoExecute),
+			nil,
+		},
+		Children: []*PartitionInfo{{
+			ID: "p1-c0",
+			Taints: []*partitiontreev1.PartitionTaint{
+				taint("node.kubernetes.io/not-ready", partitiontreev1.TaintEffectNoExecute),
+			},
+		}},
+	}
+
+	copied := original.DeepCopy()
+
+	if len(copied.Taints) != len(original.Taints) {
+		t.Fatalf("copied %d taints, want %d", len(copied.Taints), len(original.Taints))
+	}
+	if copied.Taints[0] == original.Taints[0] {
+		t.Error("copy shares a taint pointer with the original")
+	}
+	if *copied.Taints[0] != *original.Taints[0] {
+		t.Errorf("copied taint %+v, want %+v", *copied.Taints[0], *original.Taints[0])
+	}
+	if copied.Taints[1] != nil {
+		t.Errorf("nil taint copied as %+v, want nil", copied.Taints[1])
+	}
+	if copied.Children[0].Taints[0] == original.Children[0].Taints[0] {
+		t.Error("copied child shares a taint pointer with the original child")
+	}
+
+	// The backing array must be distinct too.
+	original.Taints[0] = taint("node.kubernetes.io/memory-pressure", partitiontreev1.TaintEffectNoSchedule)
+	original.Taints[1] = taint("node.kubernetes.io/disk-pressure", partitiontreev1.TaintEffectNoSchedule)
+	if copied.Taints[0].Key != "node.kubernetes.io/unreachable" {
+		t.Errorf("copy observed a later write to the original: got %q", copied.Taints[0].Key)
+	}
+	if copied.Taints[1] != nil {
+		t.Errorf("copy observed a later write to the original's nil slot: got %+v", copied.Taints[1])
+	}
+	if !copied.HasBlockedTaint() {
+		t.Error("copy lost its blocked taint")
+	}
 }

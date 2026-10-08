@@ -107,7 +107,9 @@ func TestParsePodIndex(t *testing.T) {
 			want: 5,
 		},
 		{
-			name: "StatefulSet pod-index label takes precedence over LWS worker-index",
+			// LWS stamps both labels; only worker-index ranks the pod within its
+			// own group, so it must win. This inverts the previous precedence.
+			name: "LWS worker-index takes precedence over StatefulSet pod-index",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "lws-pod-0",
@@ -117,7 +119,7 @@ func TestParsePodIndex(t *testing.T) {
 					},
 				},
 			},
-			want: 2,
+			want: 7,
 		},
 		{
 			name: "LWS worker index label with non-numeric value",
@@ -130,6 +132,69 @@ func TestParsePodIndex(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			// Subgroup 1, worker 5 of subgroup size 4: (5-1)%4 = 0, the first
+			// host of its own subgroup.
+			name: "LWS subgroup size folds worker-index into subgroup-local space",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "lws-pod-5",
+					Labels:      map[string]string{LWSWorkerIndexLabel: "5"},
+					Annotations: map[string]string{LWSSubgroupSizeAnnotation: "4"},
+				},
+			},
+			want: 0,
+		},
+		{
+			name: "LWS subgroup size, mid-subgroup worker",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "lws-pod-7",
+					Labels:      map[string]string{LWSWorkerIndexLabel: "7"},
+					Annotations: map[string]string{LWSSubgroupSizeAnnotation: "4"},
+				},
+			},
+			want: 2,
+		},
+		{
+			name: "LWS subgroup size of zero is ignored, worker-index used as-is",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "lws-pod-6",
+					Labels:      map[string]string{LWSWorkerIndexLabel: "6"},
+					Annotations: map[string]string{LWSSubgroupSizeAnnotation: "0"},
+				},
+			},
+			want: 6,
+		},
+		{
+			name: "LWS non-numeric subgroup size is ignored, worker-index used as-is",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "lws-pod-6",
+					Labels:      map[string]string{LWSWorkerIndexLabel: "6"},
+					Annotations: map[string]string{LWSSubgroupSizeAnnotation: "xyz"},
+				},
+			},
+			want: 6,
+		},
+		{
+			// Documents a known defect rather than endorsing it. The LWS leader
+			// carries worker-index 0, so (0-1)%size is -1 in Go, which the caller
+			// rejects as out of bounds (pod_reconciler.go:246) and the slice never
+			// reconciles. Ported verbatim from Bloom, which has the same hole; it
+			// must be fixed in both repos together or the two diverge again.
+			// See the convergence doc, C16.
+			name: "KNOWN DEFECT: LWS leader with subgroup size yields a negative index",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "lws-leader-0",
+					Labels:      map[string]string{LWSWorkerIndexLabel: "0"},
+					Annotations: map[string]string{LWSSubgroupSizeAnnotation: "4"},
+				},
+			},
+			want: -1,
 		},
 	}
 

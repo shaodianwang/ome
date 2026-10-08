@@ -120,7 +120,7 @@ func generateIronwoodPods(numPods int) []client.Object {
 				ObjectMeta: ctrl.ObjectMeta{
 					Name:      fmt.Sprintf("partitiontree-%d-%d", i, j),
 					Namespace: "default",
-					Labels:    map[string]string{TpuPodNameLabel: podName},
+					Labels:    map[string]string{TpuPodIDLabel: podName},
 				},
 				Status: partitiontreev1.PartitionTreeStatus{
 					Root: &partitiontreev1.PartitionInfo{

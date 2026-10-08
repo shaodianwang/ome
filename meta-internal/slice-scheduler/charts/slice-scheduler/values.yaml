@@ -79,6 +79,7 @@ pdb:
   minAvailable: 1
 
 enableNodeReadiness: false
+enableTestingFilter: true
 
 # If true, new slices are not placed on partitions whose k8s nodes are cordoned.
 # Slices already on a cordoned node are left in place.

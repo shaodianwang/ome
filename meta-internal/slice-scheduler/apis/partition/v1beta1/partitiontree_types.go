@@ -39,9 +39,25 @@ const (
 )
 
 const (
-	ConditionTypeNodeReady = "NodeReady"
-	ConditionTypeSynced    = "Synced"
+	ConditionTypeNodeReady   = "NodeReady"
+	ConditionTypeSynced      = "Synced"
+	ConditionTypeTaintsValid = "TaintsValid"
 )
+
+// +kubebuilder:validation:Enum=NoSchedule;PreferNoSchedule;NoExecute
+type TaintEffect string
+
+const (
+	TaintEffectNoSchedule       TaintEffect = "NoSchedule"
+	TaintEffectPreferNoSchedule TaintEffect = "PreferNoSchedule"
+	TaintEffectNoExecute        TaintEffect = "NoExecute"
+)
+
+type PartitionTaint struct {
+	Key    string      `json:"key"`
+	Value  string      `json:"value,omitempty"`
+	Effect TaintEffect `json:"effect"`
+}
 
 // PartitionInfo is a node in the partition tree. Leaves carry NodeNames;
 // intermediate and root partitions carry ChildPartitions.
@@ -72,6 +88,10 @@ type PartitionInfo struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// Taints represents the taints applied to this partition via the external
+	// partitiontree.gke.io/taints annotation.
+	// +optional
+	Taints []PartitionTaint `json:"taints,omitempty"`
 }
 
 // PartitionTreeStatus is the status block for the PartitionTree CR. It
@@ -98,6 +118,7 @@ type PartitionTreeStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:storageversion
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:subresource:status
 

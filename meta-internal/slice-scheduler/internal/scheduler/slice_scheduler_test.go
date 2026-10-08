@@ -19,6 +19,7 @@ package scheduler
 import (
 	"context"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,13 +182,13 @@ func TestScheduler_Ironwood_Preemption(t *testing.T) {
 			},
 			partitionTrees: []*partitiontreev1.PartitionTree{
 				{
-					ObjectMeta: metav1.ObjectMeta{Name: "pt-pod-a1", Labels: map[string]string{TpuPodNameLabel: "pod-a"}},
+					ObjectMeta: metav1.ObjectMeta{Name: "pt-pod-a1", Labels: map[string]string{TpuPodIDLabel: "pod-a"}},
 					Status: partitiontreev1.PartitionTreeStatus{
 						Root: &partitiontreev1.PartitionInfo{PartitionID: "pod-a-p1", Topology: "4x4x4", State: partitiontreev1.PartitionStateHealthy},
 					},
 				},
 				{
-					ObjectMeta: metav1.ObjectMeta{Name: "pt-pod-a2", Labels: map[string]string{TpuPodNameLabel: "pod-a"}},
+					ObjectMeta: metav1.ObjectMeta{Name: "pt-pod-a2", Labels: map[string]string{TpuPodIDLabel: "pod-a"}},
 					Status: partitiontreev1.PartitionTreeStatus{
 						Root: &partitiontreev1.PartitionInfo{PartitionID: "pod-a-p2", Topology: "4x4x4", State: partitiontreev1.PartitionStateHealthy},
 					},
@@ -280,7 +281,7 @@ func TestReconcile_DirectSliceBinding(t *testing.T) {
 	pt := &partitiontreev1.PartitionTree{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   "pt1",
-			Labels: map[string]string{TpuPodNameLabel: "pt1"},
+			Labels: map[string]string{TpuPodIDLabel: "pt1"},
 		},
 		Status: partitiontreev1.PartitionTreeStatus{
 			AcceleratorType: "v6e",
@@ -958,22 +959,40 @@ func TestSliceReconciler_RescheduleKeepsHealthyPartitions(t *testing.T) {
 		groups:            make(map[string]*interfaces.SliceGroup),
 		sliceToGroup:      make(map[string]string),
 		watcher:           watcher,
+		tpuType:           TPU7x,
 		policy:            &reschedulingMockPolicy{},
 		failureTimestamps: make(map[string]time.Time),
 	}
 
+	recorder := record.NewFakeRecorder(10)
+	r.Recorder = recorder
 	r.updateGroupCache(context.Background(), slice)
 	_, _ = r.tryScheduleSliceGroup(context.Background(), "test-group")
 
-	if len(watcher.reserved) != 1 {
-		t.Fatalf("Expected 1 slice reserved, got %d", len(watcher.reserved))
+	// The new placement can't be bound while the slice holds c1 and c2, so the slice is
+	// marked for eviction and the event names where it is headed.
+	got := &slicev1beta1.Slice{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-slice"}, got); err != nil {
+		t.Fatalf("Get() error: %v", err)
 	}
-
-	gotIDs := append([]string{}, watcher.reserved[0].PartitionIds...)
+	if got.Annotations[interfaces.EvictPodsAnnotation] != interfaces.TrueStr {
+		t.Fatal("slice not marked for eviction")
+	}
+	var event string
+	select {
+	case event = <-recorder.Events:
+	default:
+		t.Fatal("no event recorded")
+	}
+	_, assigned, ok := strings.Cut(event, "rescheduled onto ")
+	if !ok {
+		t.Fatalf("event = %q, want a move eviction", event)
+	}
+	gotIDs := strings.Fields(strings.Trim(assigned, "[]"))
 	sort.Strings(gotIDs)
 	wantIDs := []string{"c1", "c3"}
 
 	if diff := cmp.Diff(wantIDs, gotIDs); diff != "" {
-		t.Errorf("Reserved partitions mismatch (-want +got):\n%s", diff)
+		t.Errorf("Assigned partitions mismatch (-want +got):\n%s", diff)
 	}
 }

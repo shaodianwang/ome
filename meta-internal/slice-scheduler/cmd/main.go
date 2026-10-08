@@ -45,6 +45,7 @@ import (
 	"tpu.google.com/slice-scheduler/internal/generators"
 	"tpu.google.com/slice-scheduler/internal/interfaces"
 	"tpu.google.com/slice-scheduler/internal/plugins"
+	"tpu.google.com/slice-scheduler/internal/plugins/taint"
 	"tpu.google.com/slice-scheduler/internal/pod_reconciler"
 	"tpu.google.com/slice-scheduler/internal/policy"
 	"tpu.google.com/slice-scheduler/internal/scheduler"
@@ -90,6 +91,11 @@ func trimPod(obj interface{}) (interface{}, error) {
 			SchedulerName: pod.Spec.SchedulerName,
 			NodeName:      pod.Spec.NodeName,
 		},
+		// Phase is required by PodReconciler.isNodeOccupied to ignore
+		// terminated pods that still hold spec.nodeName.
+		Status: corev1.PodStatus{
+			Phase: pod.Status.Phase,
+		},
 	}, nil
 }
 
@@ -102,6 +108,8 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var enableNodeReadiness bool
+	var enableTaintFiltering bool
+	var enableTestingFilter bool
 	var excludeCordonedNodes bool
 	var enablePodReconciler bool
 	var waitForSliceReady bool
@@ -125,6 +133,16 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.BoolVar(&enableNodeReadiness, "enable-node-readiness", false,
 		"If set, the scheduler takes the k8s node presence and readiness into account.")
+	flag.BoolVar(&enableTaintFiltering, "enable-taint-filtering", false,
+		"If set, the scheduler takes PartitionTree taints into account. Requires the "+
+			"partition-tree controller to be running with --enable-taints, which is what "+
+			"populates the taints, and --enable-pod-reconciler, which evicts slices from "+
+			"partitions with a NoExecute taint. Not for production use yet: a slice is "+
+			"evicted about --reschedule-unhealthy-delay after a node gets a not-ready or "+
+			"unreachable taint, with no longer grace period, so a brief heartbeat loss on one "+
+			"node evicts the whole multi-host slice.")
+	flag.BoolVar(&enableTestingFilter, "enable-testing-filter", true,
+		"If set, the scheduler will enable the testing filter to avoid nodes labeled cloud.google.com/gke-scheduler-testing=NotReady.")
 	flag.BoolVar(&excludeCordonedNodes, "exclude-cordoned-nodes", false,
 		"If set, new slices are not placed on partitions whose k8s nodes are cordoned. "+
 			"Slices already on a cordoned node are left in place.")
@@ -150,6 +168,10 @@ func main() {
 	klog.SetLogger(setupLog)
 
 	setupLog.Info("Starting manager", "version", semver, "buildCommit", buildCommit, "buildTimestamp", buildTimestamp)
+	if enableTaintFiltering && !enablePodReconciler {
+		setupLog.Info("WARNING: --enable-taint-filtering is set without --enable-pod-reconciler; " +
+			"slices on partitions with a NoExecute taint will be marked for eviction but never evicted")
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -192,17 +214,26 @@ func main() {
 		PprofBindAddress:       pprofAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "1342b0bb.tpu.google.com",
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
+		// Step down voluntarily instead of letting the lease expire, so the next
+		// leader can start placing slices immediately rather than waiting out
+		// LeaseDuration. Until then no replica schedules anything, which is why a
+		// rollout can report success on both replicas while nothing is being placed.
 		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
+		// The scaffold warns this is unsafe if the binary does work after the manager
+		// stops. It does not: mgr.Start is the last statement in main. The safety does
+		// not rest on that alone, though — SliceReconciler.Start returns as soon as it
+		// has spawned processSchedulingQueue and the processBindingQueue pool, so
+		// StopAndWait does not wait for those workers. What makes the release safe is
+		// that every API write they make is bound to the context the manager cancels
+		// when it stops the leader-election runnables, and that cancellation happens
+		// before the lease is released: an in-flight write cannot land after another
+		// replica has taken over. The only other goroutines in the binary are
+		// requeueWithDelay, which selects on ctx.Done and touches the in-memory queue
+		// only, and the scorer pool, which is joined by a WaitGroup inside ScorePhase.
+		//
+		// Anything added after mgr.Start, or any goroutine that writes to the API under
+		// a context the manager does not cancel, has to revisit this.
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -233,9 +264,13 @@ func main() {
 
 	filters := []interfaces.FilterPlugin{
 		&plugins.ExcludeDegradedFilter{},
+		&taint.TaintFilter{},
 		&plugins.HealthyFilter{},
 		&plugins.ManagedFilter{},
 		&plugins.PriorityFilter{},
+	}
+	if enableTestingFilter {
+		filters = append(filters, &plugins.TestingFilter{})
 	}
 	if excludeCordonedNodes {
 		filters = append(filters, &plugins.ExcludeCordonedFilter{})
@@ -250,7 +285,7 @@ func main() {
 
 	schedulerLib := schedulerlib.NewDefaultScheduler(gens, filters, scorers)
 
-	partitionCache := watcher.NewPartitionCache(enableNodeReadiness)
+	partitionCache := watcher.NewPartitionCache(enableNodeReadiness, watcher.WithTaintFiltering(enableTaintFiltering))
 
 	slicePolicy := policy.NewCloudPolicy()
 

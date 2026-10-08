@@ -23,6 +23,42 @@ import (
 	"tpu.google.com/slice-scheduler/internal/interfaces"
 )
 
+func TestTestingFilter(t *testing.T) {
+	filter := &TestingFilter{}
+	ctx := context.Background()
+	req := interfaces.GroupAllocationRequest{}
+
+	tests := []struct {
+		name     string
+		node     *interfaces.PartitionInfo
+		expected bool
+	}{
+		{
+			name:     "nil node -> false",
+			node:     nil,
+			expected: false,
+		},
+		{
+			name:     "Normal node (TestingNotReady: false) -> pass",
+			node:     &interfaces.PartitionInfo{TestingNotReady: false},
+			expected: true,
+		},
+		{
+			name:     "Testing NotReady node -> filter out",
+			node:     &interfaces.PartitionInfo{TestingNotReady: true},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := filter.Filter(ctx, req, tt.node); got != tt.expected {
+				t.Errorf("TestingFilter.Filter() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestHealthyFilter(t *testing.T) {
 	filter := &HealthyFilter{}
 	ctx := context.Background()

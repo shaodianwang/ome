@@ -19,7 +19,6 @@ package watcher
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -43,7 +42,7 @@ func generateScaleTree(treeName, podName string) *partitiontreev1.PartitionTree 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      treeName,
 			Namespace: "default",
-			Labels:    map[string]string{TpuPodNameLabel: podName},
+			Labels:    map[string]string{TpuPodIDLabel: podName},
 		},
 		Status: partitiontreev1.PartitionTreeStatus{
 			Root: &partitiontreev1.PartitionInfo{
@@ -157,7 +156,7 @@ func generateSimpleTree(treeName, podName, partID string) *partitiontreev1.Parti
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      treeName,
 			Namespace: "default",
-			Labels:    map[string]string{TpuPodNameLabel: podName},
+			Labels:    map[string]string{TpuPodIDLabel: podName},
 		},
 		Status: partitiontreev1.PartitionTreeStatus{
 			Root: &partitiontreev1.PartitionInfo{
@@ -211,20 +210,6 @@ func TestCacheScale_500Trees(t *testing.T) {
 		}
 	}
 
-	// Verify BuildPodAvailabilityMap works at scale
-	podMap := pc.BuildPodAvailabilityMap(ctx)
-	if len(podMap) != numPods {
-		t.Errorf("Expected %d pods in availability map, got %d", numPods, len(podMap))
-	}
-
-	// Each pod should have 100 cubes
-	for podName, partitions := range podMap {
-		expected := numTrees / numPods
-		if len(partitions) != expected {
-			t.Errorf("Pod %s: expected %d partitions, got %d", podName, expected, len(partitions))
-		}
-	}
-
 	// SLA: building 500 trees should take < 5 seconds
 	if buildTime > 5*time.Second {
 		t.Errorf("Cache build took %v, exceeds 5s SLA", buildTime)
@@ -262,22 +247,6 @@ func TestCacheScale_DeepTrees(t *testing.T) {
 		if len(root.Children) != 2 {
 			t.Errorf("Tree %s: root should have 2 children, got %d", treeName, len(root.Children))
 		}
-	}
-
-	// Verify availability map includes sub-partitions
-	avMap := pc.BuildAvailabilityMap(ctx)
-	t.Logf("Availability map topologies: %v", func() []string {
-		keys := make([]string, 0, len(avMap))
-		for k, v := range avMap {
-			keys = append(keys, fmt.Sprintf("%s(%d)", k, len(v)))
-		}
-		return keys
-	}())
-
-	// Root topology should have entries.
-	// Note: ToTopology returns the raw string, so the key is "IRONWOOD_4x4x4".
-	if _, ok := avMap["IRONWOOD_4x4x4"]; !ok {
-		t.Error("Expected IRONWOOD_4x4x4 topology in availability map")
 	}
 }
 
@@ -473,18 +442,20 @@ func TestCacheScale_ConsistencyAfterConcurrentUpdatesAndReserves(t *testing.T) {
 		}(i)
 	}
 
-	// Group 3: Concurrent BuildAvailabilityMap calls
+	// Group 3: Concurrent readers racing the writers above
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
-		go func() {
+		go func(idx int) {
 			defer func() {
 				if r := recover(); r != nil {
 					panics.Add(1)
 				}
 				wg.Done()
 			}()
-			pc.BuildAvailabilityMap(ctx)
-		}()
+			treeIdx := idx % numTrees
+			pc.GetRootNode(fmt.Sprintf("tree-%d", treeIdx))
+			pc.GetNode(fmt.Sprintf("pod-0-cube-%d", treeIdx))
+		}(i)
 	}
 
 	wg.Wait()
@@ -637,62 +608,6 @@ func TestCacheScale_UpdateTreePreservesReservations(t *testing.T) {
 }
 
 // =============================================================================
-// Test: Cache BuildPreemptionCandidates at Scale
-// =============================================================================
-
-func TestCacheScale_BuildPreemptionCandidates(t *testing.T) {
-	pc := NewPartitionCache(false)
-	ctx := context.Background()
-
-	numTrees := 100
-	for i := 0; i < numTrees; i++ {
-		treeName := fmt.Sprintf("tree-%d", i)
-		partID := fmt.Sprintf("pod-0-cube-%d", i)
-		tree := generateSimpleTree(treeName, "pod-0", partID)
-		pc.UpdateTree(ctx, tree, nil)
-	}
-
-	// Reserve half the partitions
-	for i := 0; i < numTrees/2; i++ {
-		partID := fmt.Sprintf("pod-0-cube-%d", i)
-		sInfo := &interfaces.SliceInfo{
-			Name:         fmt.Sprintf("victim-%d", i),
-			Priority:     10,
-			ManagedBy:    interfaces.SliceSchedulerName,
-			Topology:     "4x4x4",
-			PartitionIds: []string{partID},
-		}
-		pc.ReservePartition(ctx, sInfo)
-	}
-
-	// Note: ToTopology returns the raw string, so we use "IRONWOOD_4x4x4".
-	start := time.Now()
-	candidates := pc.BuildPreemptionCandidates(ctx, "IRONWOOD_4x4x4")
-	elapsed := time.Since(start)
-	t.Logf("BuildPreemptionCandidates for 100 trees (50 occupied): %v, found %d candidates", elapsed, len(candidates))
-
-	// Should find preemption candidates (the occupied ones).
-	// The root is "IRONWOOD_4x4x4" and is marked InUseBy. With no children,
-	// findValidPreemptionCandidateSet checks if the root is used and matches topology,
-	// then returns the candidate.
-	if len(candidates) == 0 {
-		t.Error("Expected preemption candidates for occupied partitions")
-	}
-
-	// Verify all candidates reference valid slices
-	for _, cand := range candidates {
-		for _, s := range cand.Slices {
-			if s == nil || s.Name == "" {
-				t.Error("Found preemption candidate with nil or empty slice")
-			}
-			if !strings.HasPrefix(s.Name, "victim-") {
-				t.Errorf("Unexpected preemption candidate slice: %s", s.Name)
-			}
-		}
-	}
-}
-
-// =============================================================================
 // Test: Cache Multi-Partition Reserve Rollback
 // =============================================================================
 
@@ -815,86 +730,6 @@ func BenchmarkCacheReserveRelease_100Ops(b *testing.B) {
 		}
 		pc.ReservePartition(ctx, sInfo)
 		pc.ReleasePartitions(ctx, []*interfaces.SliceInfo{sInfo})
-	}
-}
-
-// =============================================================================
-// Benchmark: BuildAvailabilityMap at 500 Trees
-// =============================================================================
-
-func BenchmarkCacheBuildAvailabilityMap_500Trees(b *testing.B) {
-	pc := NewPartitionCache(false)
-	ctx := context.Background()
-
-	for i := 0; i < 500; i++ {
-		treeName := fmt.Sprintf("tree-%d", i)
-		podName := fmt.Sprintf("pod-%d", i%5)
-		partID := fmt.Sprintf("%s-cube-%d", podName, i)
-		tree := generateSimpleTree(treeName, podName, partID)
-		pc.UpdateTree(ctx, tree, nil)
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		pc.BuildAvailabilityMap(ctx)
-	}
-}
-
-// =============================================================================
-// Benchmark: BuildPodAvailabilityMap at 500 Trees
-// =============================================================================
-
-func BenchmarkCacheBuildPodAvailabilityMap_500Trees(b *testing.B) {
-	pc := NewPartitionCache(false)
-	ctx := context.Background()
-
-	for i := 0; i < 500; i++ {
-		treeName := fmt.Sprintf("tree-%d", i)
-		podName := fmt.Sprintf("pod-%d", i%5)
-		partID := fmt.Sprintf("%s-cube-%d", podName, i)
-		tree := generateSimpleTree(treeName, podName, partID)
-		pc.UpdateTree(ctx, tree, nil)
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		pc.BuildPodAvailabilityMap(ctx)
-	}
-}
-
-// =============================================================================
-// Benchmark: BuildPreemptionCandidates at 500 Trees (half occupied)
-// =============================================================================
-
-func BenchmarkCacheBuildPreemptionCandidates_500Trees(b *testing.B) {
-	pc := NewPartitionCache(false)
-	ctx := context.Background()
-
-	for i := 0; i < 500; i++ {
-		treeName := fmt.Sprintf("tree-%d", i)
-		podName := fmt.Sprintf("pod-%d", i%5)
-		partID := fmt.Sprintf("%s-cube-%d", podName, i)
-		tree := generateSimpleTree(treeName, podName, partID)
-		pc.UpdateTree(ctx, tree, nil)
-	}
-
-	// Occupy half the partitions
-	for i := 0; i < 250; i++ {
-		podName := fmt.Sprintf("pod-%d", i%5)
-		partID := fmt.Sprintf("%s-cube-%d", podName, i)
-		sInfo := &interfaces.SliceInfo{
-			Name:         fmt.Sprintf("victim-%d", i),
-			Priority:     10,
-			ManagedBy:    interfaces.SliceSchedulerName,
-			Topology:     "4x4x4",
-			PartitionIds: []string{partID},
-		}
-		pc.ReservePartition(ctx, sInfo)
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		pc.BuildPreemptionCandidates(ctx, "4x4x4")
 	}
 }
 

@@ -18,7 +18,6 @@ package watcher
 
 import (
 	"context"
-	"sync"
 
 	partitiontreev1 "tpu.google.com/slice-scheduler/apis/partition/v1beta1"
 	"tpu.google.com/slice-scheduler/internal/interfaces"
@@ -43,9 +42,72 @@ func NewPartitionWatcher(cache *PartitionCache) *PartitionWatcher {
 }
 
 // GetState returns a read-only snapshot of the cluster state.
+//
+// The trees and the id index are built together under a single read lock, so
+// every accessor on the returned ClusterState describes the same instant and
+// hands out the same *PartitionInfo for a given partition. Converting lazily,
+// or per call, lets one scheduling cycle observe two different versions of the
+// cluster.
 func (pw *PartitionWatcher) GetState() interfaces.ClusterState {
+	pw.cache.mu.RLock()
+	defer pw.cache.mu.RUnlock()
+
+	trees := make([]*interfaces.PartitionInfo, 0, len(pw.cache.partitionTreeCache))
+	infoMap := make(map[string]*interfaces.PartitionInfo)
+
+	var convertAndMap func(node *PartitionNode, parentInUse *interfaces.SliceInfo) *interfaces.PartitionInfo
+	convertAndMap = func(node *PartitionNode, parentInUse *interfaces.SliceInfo) *interfaces.PartitionInfo {
+		currentInUse := node.InUseBy
+		if currentInUse == nil {
+			currentInUse = parentInUse
+		}
+
+		info := &interfaces.PartitionInfo{
+			ID:              node.Info.PartitionID,
+			Topology:        util.ToTopology(node.Info.Topology),
+			IsAvailable:     util.IsPartitionAvailable(node.Info),
+			IsOccupied:      util.IsPartitionOccupied(node.Info),
+			IsBroken:        node.isBroken(pw.cache.enableNodeReadiness),
+			TestingNotReady: node.isTestingNotReady(),
+			IsCordoned:      node.isCordoned(),
+			InUseBy:         currentInUse,
+			PodName:         node.PodName,
+			State:           string(node.Info.State),
+		}
+		if pw.cache.enableTaintFiltering && len(node.Taints) > 0 {
+			info.Taints = make([]*partitiontreev1.PartitionTaint, len(node.Taints))
+			for i := range node.Taints {
+				info.Taints[i] = &node.Taints[i]
+			}
+		}
+
+		// Adapter: Cloud's CRD uses State enum ("Degraded"), not a separate
+		// DegradationState struct. Translate to the scheduler's internal representation.
+		if node.Info.State == partitiontreev1.PartitionStateDegraded {
+			info.DegradationState = &interfaces.DegradationState{
+				Mode:             interfaces.DegradationModeDegraded,
+				ToleratedOcsName: defaultDegradationDomain,
+			}
+		}
+
+		infoMap[info.ID] = info
+
+		if len(node.Children) > 0 {
+			info.Children = make([]*interfaces.PartitionInfo, len(node.Children))
+			for i, child := range node.Children {
+				info.Children[i] = convertAndMap(child, currentInUse)
+			}
+		}
+		return info
+	}
+
+	for _, root := range pw.cache.partitionTreeCache {
+		trees = append(trees, convertAndMap(root, nil))
+	}
+
 	return &partitionState{
-		cache: pw.cache,
+		trees:   trees,
+		infoMap: infoMap,
 	}
 }
 
@@ -78,73 +140,25 @@ func (pw *PartitionWatcher) Unreserve(ctx context.Context, slices []*interfaces.
 
 // partitionState implements interfaces.ClusterState.
 type partitionState struct {
-	cache *PartitionCache
-
-	once        sync.Once
-	cachedTrees []*interfaces.PartitionInfo
+	trees   []*interfaces.PartitionInfo
+	infoMap map[string]*interfaces.PartitionInfo
 }
 
-// GetPartitionTrees returns the current partition trees from the cache.
+// GetPartitionTrees returns the partition trees captured in this snapshot.
 func (ps *partitionState) GetPartitionTrees() []*interfaces.PartitionInfo {
-	ps.once.Do(func() {
-		ps.cache.mu.RLock()
-		defer ps.cache.mu.RUnlock()
-
-		result := make([]*interfaces.PartitionInfo, 0, len(ps.cache.partitionTreeCache))
-		for _, root := range ps.cache.partitionTreeCache {
-			result = append(result, ps.toInterfacePartitionInfo(root, nil))
-		}
-		ps.cachedTrees = result
-	})
-	return ps.cachedTrees
+	return ps.trees
 }
 
+// GetPartitionInfo resolves ids against the snapshot taken in GetState. The
+// returned pointers are the same nodes reachable from GetPartitionTrees, so a
+// partition whose ancestor holds a reservation reports that ancestor's
+// InUseBy. Unknown ids are skipped.
 func (ps *partitionState) GetPartitionInfo(ids []string) []*interfaces.PartitionInfo {
-	ps.cache.mu.RLock()
-	defer ps.cache.mu.RUnlock()
 	result := make([]*interfaces.PartitionInfo, 0, len(ids))
 	for _, id := range ids {
-		node, ok := ps.cache.partitionNodeCache[id]
-		if !ok {
-			continue
+		if info, ok := ps.infoMap[id]; ok {
+			result = append(result, info)
 		}
-		result = append(result, ps.toInterfacePartitionInfo(node, nil))
 	}
 	return result
-}
-
-func (ps *partitionState) toInterfacePartitionInfo(node *PartitionNode, parentInUse *interfaces.SliceInfo) *interfaces.PartitionInfo {
-	currentInUse := node.InUseBy
-	if currentInUse == nil {
-		currentInUse = parentInUse
-	}
-
-	info := &interfaces.PartitionInfo{
-		ID:          node.Info.PartitionID,
-		Topology:    util.ToTopology(node.Info.Topology),
-		IsAvailable: util.IsPartitionAvailable(node.Info),
-		IsOccupied:  util.IsPartitionOccupied(node.Info),
-		IsBroken:    node.isBroken(ps.cache.enableNodeReadiness),
-		IsCordoned:  node.isCordoned(),
-		InUseBy:     currentInUse,
-		PodName:     node.PodName,
-		State:       string(node.Info.State),
-	}
-
-	// Adapter: Cloud's CRD uses State enum ("Degraded"), not a separate
-	// DegradationState struct. Translate to the scheduler's internal representation.
-	if node.Info.State == partitiontreev1.PartitionStateDegraded {
-		info.DegradationState = &interfaces.DegradationState{
-			Mode:             interfaces.DegradationModeDegraded,
-			ToleratedOcsName: defaultDegradationDomain,
-		}
-	}
-
-	if len(node.Children) > 0 {
-		info.Children = make([]*interfaces.PartitionInfo, len(node.Children))
-		for i, child := range node.Children {
-			info.Children[i] = ps.toInterfacePartitionInfo(child, currentInUse)
-		}
-	}
-	return info
 }

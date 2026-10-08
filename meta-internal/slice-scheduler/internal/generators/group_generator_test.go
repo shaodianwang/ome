@@ -18,7 +18,9 @@ package generators
 
 import (
 	"context"
+	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -717,6 +719,42 @@ func TestPruneGangs_SymmetryBreaking(t *testing.T) {
 	}
 }
 
+// TestPruneGangs_SurvivorIsOrderIndependent verifies that when a permutation
+// class is collapsed, which member survives does not depend on the order the
+// members were generated in.
+//
+// Deduplication runs before ranking, so the survivor is what reaches the
+// output. Both input orders below must yield the representative the total
+// tie-breaker ranks first, s1->pA.
+func TestPruneGangs_SurvivorIsOrderIndependent(t *testing.T) {
+	req := interfaces.GroupAllocationRequest{
+		Slices: []interfaces.SliceRequirement{{SliceName: "s1"}, {SliceName: "s2"}},
+	}
+	optA := makeOption("pod1", "pA")
+	optB := makeOption("pod2", "pB")
+
+	gang1 := NewPartialGang([]*interfaces.PlacementOption{optA, optB}, req) // s1->pA, s2->pB
+	gang2 := NewPartialGang([]*interfaces.PlacementOption{optB, optA}, req) // s1->pB, s2->pA
+
+	for _, tt := range []struct {
+		name  string
+		gangs []PartialGang
+	}{
+		{name: "ranked-first generated first", gangs: []PartialGang{gang1, gang2}},
+		{name: "ranked-first generated second", gangs: []PartialGang{gang2, gang1}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result := pruneGangs(tt.gangs, 10, req, logfFromCtx(context.Background()), 1)
+			if len(result) != 1 {
+				t.Fatalf("pruneGangs() should collapse the permutation class: got %d, want 1", len(result))
+			}
+			if got := joinIds(result[0].MergedCandidate.Assignments["s1"]); got != "pA" {
+				t.Errorf("survivor assigns s1=%q, want %q", got, "pA")
+			}
+		})
+	}
+}
+
 // TestPruneGangs_SortOrder verifies that pruneGangs returns gangs sorted by
 // ascending cost, so the cheapest (fewest victims) comes first.
 func TestPruneGangs_SortOrder(t *testing.T) {
@@ -1095,4 +1133,131 @@ func TestGroupGenerator_Generate_SkipsEmptyOptions(t *testing.T) {
 	// may still produce candidates (with victims or through preemption).
 	// The key check is no panic.
 	_ = got
+}
+
+// TestGroupGenerator_Generate_OutOfRangeTopology pins the behavior for topology
+// strings whose dimensions exceed util.MaxTopologyDimension.
+// Every one of these must now be rejected outright, yielding no placement.
+func TestGroupGenerator_Generate_OutOfRangeTopology(t *testing.T) {
+	topologies := []string{
+		"2097152x2097152x2097152",
+		"10000x10000x10000",
+	}
+
+	for _, topology := range topologies {
+		t.Run(topology, func(t *testing.T) {
+			g := NewGroupGenerator(GroupGeneratorConfig{BeamWidth: 10})
+			req := interfaces.GroupAllocationRequest{
+				Slices: []interfaces.SliceRequirement{{SliceName: "s1", Type: "tpu7x", Topology: topology}},
+			}
+			state := testutil.NewStateBuilder().Pod("pod1").
+				Tree("4x4x4", "c1").ParentPod().
+				Tree("4x4x4", "c2").ParentPod().
+				Tree("4x4x4", "c3").ParentPod().
+				Tree("4x4x4", "c4").Build()
+
+			got := g.Generate(context.Background(), req, state, getAllPartitionIDsFromState(state))
+			if len(got) != 0 {
+				t.Errorf("Generate(topology=%q) returned %d candidates, want 0", topology, len(got))
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Generate is independent of the order GetPartitionTrees returns roots
+// ---------------------------------------------------------------------------
+
+// candidateKeys renders a candidate list as an ordered, comparable summary.
+// Order is preserved deliberately: ScorePhase keeps the first candidate unless
+// a later one scores strictly better, so the sequence Generate emits -- not
+// just the set -- is what decides the placement.
+func candidateKeys(cands []*interfaces.PlacementCandidate, sliceNames []string) []string {
+	keys := make([]string, 0, len(cands))
+	for _, c := range cands {
+		var parts []string
+		for _, name := range sliceNames {
+			parts = append(parts, name+"="+joinIds(c.Assignments[name]))
+		}
+		keys = append(keys, strings.Join(parts, "|"))
+	}
+	return keys
+}
+
+// TestGroupGenerator_Generate_IndependentOfTreeOrder pins the contract that
+// ClusterState.GetPartitionTrees returns a set, not an ordering.
+//
+// The production implementation (watcher.partitionState.GetPartitionTrees)
+// builds its slice by ranging over a map, so a real cluster hands the same
+// roots over in a different order from one call to the next. Generate must
+// return the identical candidate sequence regardless.
+func TestGroupGenerator_Generate_IndependentOfTreeOrder(t *testing.T) {
+	// Two pods, two same-topology roots each: enough for both the pod ordering
+	// and the within-pod root ordering to matter.
+	newState := func() *testutil.MockClusterState {
+		return testutil.NewStateBuilder().
+			Pod("pod-a").
+			Tree("4x4", "a1").ParentPod().
+			Tree("4x4", "a2").ParentPod().
+			Pod("pod-b").
+			Tree("4x4", "b1").ParentPod().
+			Tree("4x4", "b2").
+			Build()
+	}
+
+	// Every rotation of the root slice describes the same cluster.
+	permute := func(roots []*interfaces.PartitionInfo, by int) []*interfaces.PartitionInfo {
+		out := make([]*interfaces.PartitionInfo, 0, len(roots))
+		for i := range roots {
+			out = append(out, roots[(i+by)%len(roots)])
+		}
+		return out
+	}
+
+	tests := []struct {
+		name string
+		req  interfaces.GroupAllocationRequest
+	}{
+		{
+			name: "single slice",
+			req: interfaces.GroupAllocationRequest{
+				Slices: []interfaces.SliceRequirement{{SliceName: "s1", Topology: "4x4"}},
+			},
+		},
+		{
+			name: "two slice gang",
+			req: interfaces.GroupAllocationRequest{
+				Slices: []interfaces.SliceRequirement{
+					{SliceName: "s1", Topology: "4x4"},
+					{SliceName: "s2", Topology: "4x4"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sliceNames := make([]string, len(tt.req.Slices))
+			for i, s := range tt.req.Slices {
+				sliceNames[i] = s.SliceName
+			}
+
+			g := NewGroupGenerator(GroupGeneratorConfig{BeamWidth: 10})
+			base := newState()
+			want := candidateKeys(g.Generate(context.Background(), tt.req, base, getAllPartitionIDsFromState(base)), sliceNames)
+			if len(want) == 0 {
+				t.Fatal("Generate returned no candidates; the fixture cannot detect order sensitivity")
+			}
+
+			for by := 1; by < len(base.PartitionTrees); by++ {
+				shuffled := newState()
+				shuffled.PartitionTrees = permute(shuffled.PartitionTrees, by)
+
+				got := candidateKeys(g.Generate(context.Background(), tt.req, shuffled, getAllPartitionIDsFromState(shuffled)), sliceNames)
+				if !reflect.DeepEqual(got, want) {
+					t.Errorf("root order rotated by %d changed the candidate sequence:\n got %v\nwant %v", by, got, want)
+				}
+			}
+		})
+	}
 }

@@ -746,6 +746,155 @@ func TestReconcile_Concurrency(t *testing.T) {
 			wantRequeue: true,
 		},
 		{
+			name: "Bind - node only has a Succeeded pod",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod-0",
+					Namespace: "default",
+					Labels: map[string]string{
+						SliceNameLabel: "test-slice",
+					},
+				},
+				Spec: corev1.PodSpec{
+					SchedulerName: "slice-scheduler",
+				},
+			},
+			slice: &slicev1beta1.Slice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-slice",
+				},
+				Spec: slicev1beta1.SliceSpec{
+					PartitionIds: []string{"part-1"},
+				},
+			},
+			existingPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "old-pod",
+					Namespace: "default",
+				},
+				Spec: corev1.PodSpec{
+					NodeName:      "node-1",
+					SchedulerName: "slice-scheduler",
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodSucceeded,
+				},
+			},
+			cacheSetup: func(pc *watcher.PartitionCache) {
+				tree := &partitiontreev1.PartitionTree{
+					ObjectMeta: metav1.ObjectMeta{Name: "tree-1"},
+					Status: partitiontreev1.PartitionTreeStatus{
+						Root: &partitiontreev1.PartitionInfo{
+							PartitionID: "part-1",
+							NodeNames:   []string{"node-1"},
+						},
+					},
+				}
+				pc.UpdateTree(ctx, tree, nil)
+			},
+			wantBinding: true,
+			targetNode:  "node-1",
+		},
+		{
+			name: "Bind - node only has a Failed pod",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod-0",
+					Namespace: "default",
+					Labels: map[string]string{
+						SliceNameLabel: "test-slice",
+					},
+				},
+				Spec: corev1.PodSpec{
+					SchedulerName: "slice-scheduler",
+				},
+			},
+			slice: &slicev1beta1.Slice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-slice",
+				},
+				Spec: slicev1beta1.SliceSpec{
+					PartitionIds: []string{"part-1"},
+				},
+			},
+			existingPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "old-pod",
+					Namespace: "default",
+				},
+				Spec: corev1.PodSpec{
+					NodeName:      "node-1",
+					SchedulerName: "slice-scheduler",
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodFailed,
+				},
+			},
+			cacheSetup: func(pc *watcher.PartitionCache) {
+				tree := &partitiontreev1.PartitionTree{
+					ObjectMeta: metav1.ObjectMeta{Name: "tree-1"},
+					Status: partitiontreev1.PartitionTreeStatus{
+						Root: &partitiontreev1.PartitionInfo{
+							PartitionID: "part-1",
+							NodeNames:   []string{"node-1"},
+						},
+					},
+				}
+				pc.UpdateTree(ctx, tree, nil)
+			},
+			wantBinding: true,
+			targetNode:  "node-1",
+		},
+		{
+			name: "Wait for termination - node occupied (Running pod)",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod-0",
+					Namespace: "default",
+					Labels: map[string]string{
+						SliceNameLabel: "test-slice",
+					},
+				},
+				Spec: corev1.PodSpec{
+					SchedulerName: "slice-scheduler",
+				},
+			},
+			slice: &slicev1beta1.Slice{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-slice",
+				},
+				Spec: slicev1beta1.SliceSpec{
+					PartitionIds: []string{"part-1"},
+				},
+			},
+			existingPod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "old-pod",
+					Namespace: "default",
+				},
+				Spec: corev1.PodSpec{
+					NodeName:      "node-1",
+					SchedulerName: "slice-scheduler",
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+				},
+			},
+			cacheSetup: func(pc *watcher.PartitionCache) {
+				tree := &partitiontreev1.PartitionTree{
+					ObjectMeta: metav1.ObjectMeta{Name: "tree-1"},
+					Status: partitiontreev1.PartitionTreeStatus{
+						Root: &partitiontreev1.PartitionInfo{
+							PartitionID: "part-1",
+							NodeNames:   []string{"node-1"},
+						},
+					},
+				}
+				pc.UpdateTree(ctx, tree, nil)
+			},
+			wantRequeue: true,
+		},
+		{
 			name: "Binding Error",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{

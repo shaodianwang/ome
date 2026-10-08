@@ -23,6 +23,19 @@ import (
 	"tpu.google.com/slice-scheduler/internal/util"
 )
 
+// TestingFilter prunes partitions that contain nodes marked with the
+// testing label cloud.google.com/gke-scheduler-testing=NotReady.
+type TestingFilter struct{}
+
+func (f *TestingFilter) Name() string { return "TestingFilter" }
+
+func (f *TestingFilter) Filter(ctx context.Context, req interfaces.GroupAllocationRequest, node *interfaces.PartitionInfo) bool {
+	if node == nil {
+		return false
+	}
+	return !node.TestingNotReady
+}
+
 // HealthyFilter prunes nodes that are marked as broken or unavailable.
 type HealthyFilter struct{}
 

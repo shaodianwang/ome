@@ -203,6 +203,27 @@ spec:
                     type: string
                   state:
                     type: string
+                  taints:
+                    description: |-
+                      Taints represents the taints applied to this partition via the external
+                      partitiontree.gke.io/taints annotation.
+                    items:
+                      properties:
+                        effect:
+                          enum:
+                          - NoSchedule
+                          - PreferNoSchedule
+                          - NoExecute
+                          type: string
+                        key:
+                          type: string
+                        value:
+                          type: string
+                      required:
+                      - effect
+                      - key
+                      type: object
+                    type: array
                   topology:
                     type: string
                 required:

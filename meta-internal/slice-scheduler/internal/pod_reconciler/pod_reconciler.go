@@ -322,9 +322,15 @@ func (r *PodReconciler) isNodeOccupied(ctx context.Context, nodeName string) (bo
 	// System DaemonSet pods (kube-system, gmp-system, etc.) are always
 	// present on every node and must be ignored.
 	for _, p := range podList.Items {
-		if p.Spec.SchedulerName == interfaces.SliceSchedulerName {
-			return true, nil
+		if p.Spec.SchedulerName != interfaces.SliceSchedulerName {
+			continue
 		}
+		// Succeeded/Failed pods keep spec.nodeName until garbage-collected
+		// (e.g. completed Job pods) but no longer hold node resources.
+		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		return true, nil
 	}
 	return false, nil
 }

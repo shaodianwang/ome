@@ -24,19 +24,119 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	partitiontreev1 "tpu.google.com/slice-scheduler/apis/partition/v1beta1"
 	"tpu.google.com/slice-scheduler/internal/interfaces"
-	"tpu.google.com/slice-scheduler/internal/util"
 )
 
 const (
-	TpuPodNameLabel = "cloud.google.com/tpu-pod-id"
+	TpuPodIDLabel            = "cloud.google.com/tpu-pod-id"
+	GkeSchedulerTestingLabel = "cloud.google.com/gke-scheduler-testing"
+	SchedulerTestingNotReady = "NotReady"
 )
 
-func NewPartitionCache(enableNodeReadiness bool) *PartitionCache {
-	return &PartitionCache{
+// CacheOption configures optional PartitionCache behavior.
+type CacheOption func(*PartitionCache)
+
+// WithTaintFiltering enables the taint-aware scheduling paths. It is off by default:
+// with it unset the cache records no taints, which makes every taint consumer in the
+// scheduler inert.
+func WithTaintFiltering(enabled bool) CacheOption {
+	return func(pc *PartitionCache) {
+		pc.enableTaintFiltering = enabled
+	}
+}
+
+func NewPartitionCache(enableNodeReadiness bool, opts ...CacheOption) *PartitionCache {
+	pc := &PartitionCache{
 		partitionTreeCache:     make(map[string]*PartitionNode),
 		partitionNodeCache:     make(map[string]*PartitionNode),
 		leafPartitionNodeCache: make(map[string]*PartitionNode),
 		enableNodeReadiness:    enableNodeReadiness,
+	}
+	for _, opt := range opts {
+		opt(pc)
+	}
+	return pc
+}
+
+// TaintFilteringEnabled reports whether the taint-aware paths are switched on, so callers
+// can skip work the flag makes pointless before doing it.
+func (pc *PartitionCache) TaintFilteringEnabled() bool {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	return pc.enableTaintFiltering
+}
+
+// HasNoExecuteTaint reports whether the partition, or any partition beneath it, carries a
+// taint the scheduler evicts running work for. Always false unless taint filtering is on.
+func (pc *PartitionCache) HasNoExecuteTaint(partitionID string) bool {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	if !pc.enableTaintFiltering {
+		return false
+	}
+	return nodeHasNoExecuteTaint(pc.partitionNodeCache[partitionID])
+}
+
+// NoExecutePartitions returns the IDs of every partition in the named tree that
+// HasNoExecuteTaint would report. Comparing the set across an UpdateTree is how callers
+// learn which partitions just gained such a taint; the controller does not propagate
+// taints, so diffing the PartitionTree objects themselves would miss an interior
+// partition whose leaf was tainted.
+func (pc *PartitionCache) NoExecutePartitions(treeName string) map[string]bool {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	out := make(map[string]bool)
+	if !pc.enableTaintFiltering {
+		return out
+	}
+	walkNodes(pc.partitionTreeCache[treeName], func(node *PartitionNode) {
+		if nodeHasNoExecuteTaint(node) {
+			out[node.Info.PartitionID] = true
+		}
+	})
+	return out
+}
+
+// SlicesOnNoExecutePartitions returns the reservation of every slice holding a partition
+// of the named tree that HasNoExecuteTaint would report. A slice holding several such
+// partitions appears once per partition. The returned pointers are shared with the cache;
+// InUseBy is replaced rather than written through, so callers may read them unlocked.
+func (pc *PartitionCache) SlicesOnNoExecutePartitions(treeName string) []*interfaces.SliceInfo {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	if !pc.enableTaintFiltering {
+		return nil
+	}
+	var found []*interfaces.SliceInfo
+	walkNodes(pc.partitionTreeCache[treeName], func(node *PartitionNode) {
+		if node.InUseBy != nil && nodeHasNoExecuteTaint(node) {
+			found = append(found, node.InUseBy)
+		}
+	})
+	return found
+}
+
+// nodeHasNoExecuteTaint applies interfaces.IsNoExecuteBlocked to a cached node's merged
+// taints. Must be called with the lock held.
+func nodeHasNoExecuteTaint(node *PartitionNode) bool {
+	if node == nil {
+		return false
+	}
+	for i := range node.Taints {
+		if interfaces.IsNoExecuteBlocked(&node.Taints[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// walkNodes calls fn on every node of the subtree, parents before children.
+func walkNodes(node *PartitionNode, fn func(*PartitionNode)) {
+	if node == nil {
+		return
+	}
+	fn(node)
+	for _, child := range node.Children {
+		walkNodes(child, fn)
 	}
 }
 
@@ -122,6 +222,18 @@ func (pc *PartitionCache) ReservePartition(ctx context.Context, sInfo *interface
 			isFailed = true
 			break
 		}
+		// A partition physically contains its descendants and is contained by its
+		// ancestors, so holding any of them is just as much a conflict as holding
+		// this node. The generators reason about the hierarchy already, but the
+		// rollback and watch-driven paths (safeReserve, handleSliceCreate,
+		// handleSliceUpdate, Start) reserve without consulting them.
+		if holder := overlappingHolder(node, sInfo.Name); holder != "" {
+			existingSlice = holder
+			logf.Info("Failed to reserve partition for slice; an overlapping partition is already in use",
+				"sliceName", sInfo.Name, "partitionId", partitionID, "existingSlice", holder)
+			isFailed = true
+			break
+		}
 		node.InUseBy = sInfo
 		reservedPartitions = append(reservedPartitions, partitionID)
 	}
@@ -139,6 +251,30 @@ func (pc *PartitionCache) ReservePartition(ctx context.Context, sInfo *interface
 	return true, ""
 }
 
+// overlappingHolder returns the name of a slice other than sliceName that holds a
+// partition physically overlapping node, i.e. one of its ancestors or descendants.
+// It returns "" when no such slice exists. Must be called with the lock held.
+func overlappingHolder(node *PartitionNode, sliceName string) string {
+	for anc := node.Parent; anc != nil; anc = anc.Parent {
+		if anc.InUseBy != nil && anc.InUseBy.Name != sliceName {
+			return anc.InUseBy.Name
+		}
+	}
+	var descendant func(*PartitionNode) string
+	descendant = func(n *PartitionNode) string {
+		for _, child := range n.Children {
+			if child.InUseBy != nil && child.InUseBy.Name != sliceName {
+				return child.InUseBy.Name
+			}
+			if name := descendant(child); name != "" {
+				return name
+			}
+		}
+		return ""
+	}
+	return descendant(node)
+}
+
 // ReleasePartitions frees a partition if it's held by the given slices.
 func (pc *PartitionCache) ReleasePartitions(ctx context.Context, slices []*interfaces.SliceInfo) {
 	logf := log.FromContext(ctx)
@@ -154,112 +290,18 @@ func (pc *PartitionCache) ReleasePartitions(ctx context.Context, slices []*inter
 	}
 }
 
-func (pc *PartitionCache) BuildPreemptionCandidates(ctx context.Context, topology string) []*PreemptionCandidateSet {
-	logf := log.FromContext(ctx)
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-
-	seenSlices := make(map[string]struct{})
-
-	all_candidates := []*PreemptionCandidateSet{}
-	for _, p := range pc.partitionTreeCache {
-		if candidateSet := p.findValidPreemptionCandidateSet(ctx, topology, p.PodName, pc.enableNodeReadiness); candidateSet != nil {
-			// If there is only one slice as the candidate then de-duplicate it by only
-			// adding it once to the PreemptionCandidateSet. This will be true for slices
-			// that take up muptiple (4x4x4) partitions.
-			if topology == "4x4x4" && len(candidateSet) == 1 && len(candidateSet[0].Slices) == 1 {
-				if _, ok := seenSlices[candidateSet[0].Slices[0].Name]; ok {
-					continue
-				} else {
-					seenSlices[candidateSet[0].Slices[0].Name] = struct{}{}
-				}
-			}
-			all_candidates = append(all_candidates, candidateSet...)
-		}
-	}
-	logf.V(1).Info("Built preemption candidates", "topology", topology, "numCandidates", len(all_candidates))
-	return all_candidates
-}
-
-// BuildAvailabilityMap creates a map of topology to a list of maximal available partitions from the in-memory cache.
-func (pc *PartitionCache) BuildAvailabilityMap(ctx context.Context) map[string][]*partitiontreev1.PartitionInfo {
-	logf := log.FromContext(ctx)
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-	availabilityMap := make(map[string][]*partitiontreev1.PartitionInfo)
-
-	var findMaximal func(p *PartitionNode)
-	findMaximal = func(p *PartitionNode) {
-		// Critical termination condition, should not traverse down the children if the
-		// partition node is entirely occupied by a slice.
-		if p.IsUsed() {
-			return
-		}
-		// Short-circuit: if root has SliceId set, this is a MultiMig tree —
-		// the entire MIG is claimed by a super-slice, no sub-partitions are
-		// available. Skip instead of traversing all Occupied children.
-		if p.Info.SliceId != "" {
-			return
-		}
-
-		if p.isPartitionNodeSchedulable(ctx, pc.enableNodeReadiness) {
-			logf.V(2).Info("Found schedulable partition node", "partitionID", p.Info.PartitionID, "topology", util.ToTopology(p.Info.Topology))
-			topology := util.ToTopology(p.Info.Topology)
-			availabilityMap[topology] = append(availabilityMap[topology], p.Info)
-			return
-		}
-
-		// Recurse down to find smaller available partitions.
-		for _, child := range p.Children {
-			findMaximal(child)
-		}
-	}
-
-	for _, rootNode := range pc.partitionTreeCache {
-		findMaximal(rootNode)
-	}
-
-	for topo, partitions := range availabilityMap {
-		logf.V(1).Info("Availability map entry", "topology", topo, "numPartitions", len(partitions))
-	}
-	return availabilityMap
-}
-
-// BuildPodAvailabilityMap creates a map of pod name to a list of available top
-// level partition names.
-func (pc *PartitionCache) BuildPodAvailabilityMap(ctx context.Context) map[string][]string {
-	logf := log.FromContext(ctx)
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-	podAvailabilityMap := make(map[string][]string)
-
-	for _, p := range pc.partitionTreeCache {
-		if podAvailabilityMap[p.PodName] == nil {
-			podAvailabilityMap[p.PodName] = []string{}
-		}
-		// Short-circuit MultiMig trees: SliceId on root means the entire
-		// MIG is claimed by a super-slice, no capacity available.
-		if p.Info.SliceId != "" {
-			logf.V(2).Info("Skipping MultiMig tree", "podName", p.PodName, "partitionID", p.Info.PartitionID, "sliceId", p.Info.SliceId)
-			continue
-		}
-		if p.isPartitionNodeSchedulable(ctx, pc.enableNodeReadiness) {
-			podAvailabilityMap[p.PodName] = append(podAvailabilityMap[p.PodName], p.Info.PartitionID)
-		}
-	}
-	for pod, partitions := range podAvailabilityMap {
-		logf.V(1).Info("Pod availability map entry", "podName", pod, "numPartitions", len(partitions))
-	}
-	return podAvailabilityMap
-}
-
 func (pc *PartitionCache) preserveKubeNodeState(node *PartitionNode, kNodeMap map[string]*KubeNode) {
 	if node == nil || kNodeMap == nil {
 		return
 	}
 	if node.isLeafPartitionNode() && node.KubeNode != nil {
 		if _, ok := kNodeMap[node.KubeNode.Name]; !ok {
-			kNodeMap[node.KubeNode.Name] = &KubeNode{Name: node.KubeNode.Name, Ready: node.KubeNode.Ready, Unschedulable: node.KubeNode.Unschedulable}
+			kNodeMap[node.KubeNode.Name] = &KubeNode{
+				Name:            node.KubeNode.Name,
+				Ready:           node.KubeNode.Ready,
+				TestingNotReady: node.KubeNode.TestingNotReady,
+				Unschedulable:   node.KubeNode.Unschedulable,
+			}
 		}
 	}
 	for _, child := range node.Children {
@@ -271,7 +313,14 @@ func (pc *PartitionCache) preserveKubeNodeState(node *PartitionNode, kNodeMap ma
 func (pc *PartitionCache) deleteNodesFromMapRecursive(node *PartitionNode) {
 	delete(pc.partitionNodeCache, node.Info.PartitionID)
 	if node.isLeafPartitionNode() {
-		delete(pc.leafPartitionNodeCache, node.Info.NodeNames[0])
+		// Range rather than index [0]. A leaf is now defined by having no
+		// children, so it may carry any number of node names, and NodeNames[0]
+		// would panic on a childless partition that lists none. The insert side
+		// only populates single-node leaves, so the extra iterations delete keys
+		// that were never present, which is a no-op.
+		for _, nodeName := range node.Info.NodeNames {
+			delete(pc.leafPartitionNodeCache, nodeName)
+		}
 	}
 	for _, child := range node.Children {
 		pc.deleteNodesFromMapRecursive(child)
@@ -312,13 +361,23 @@ func (pc *PartitionCache) buildNodeTree(info *partitiontreev1.PartitionInfo, par
 		Parent: parent,
 	}
 	pc.partitionNodeCache[info.PartitionID] = node
-	if podName != "" {
-		node.PodName = podName
-	}
+	// Every node in the tree belongs to the pod its root belongs to, so the pod
+	// name is propagated down the recursion rather than stamped only on the root.
+	// Sub-cube partitions are the ones that get scored for bin-packing, and
+	// plugins.TightestFitScorer locates a partition's tree by matching PodName; a
+	// blank name matches no root, so the scorer used to fall through to
+	// FitScore=math.MaxInt and DensityScore=0 for every sub-cube candidate, tie
+	// every candidate against every other, and leave placement to enumeration
+	// order. Two other readers -- generators.countUniquePods and the pod label on
+	// the scheduling-outcome metrics -- were blank for the same reason.
+	node.PodName = podName
 
 	node.Children = make([]*PartitionNode, len(info.ChildPartitions))
 	for i := range info.ChildPartitions {
-		node.Children[i] = pc.buildNodeTree(&info.ChildPartitions[i], node, "", kNodeMap, loggr)
+		node.Children[i] = pc.buildNodeTree(&info.ChildPartitions[i], node, podName, kNodeMap, loggr)
+	}
+	if pc.enableTaintFiltering {
+		node.Taints = unionTaints(info.Taints, node.Children)
 	}
 	// Populate the k8s node information to the leaf partition node
 	if len(info.ChildPartitions) == 0 && len(info.NodeNames) == 1 {
@@ -327,7 +386,7 @@ func (pc *PartitionCache) buildNodeTree(info *partitiontreev1.PartitionInfo, par
 
 		// Only set if the k8s node is found.
 		// We are using the condition node.KubeNode != nil to make the scheduling decision.
-		// Check details in isPartitionNodeSchedulable().
+		// Check details in isKubeNodeSchedulable().
 		// So DO NOT create kubeNode if the k8s node is not retrieved from the cache.
 		if kNode, ok := kNodeMap[info.NodeNames[0]]; ok {
 			node.KubeNode = kNode
@@ -335,6 +394,28 @@ func (pc *PartitionCache) buildNodeTree(info *partitiontreev1.PartitionInfo, par
 		}
 	}
 	return node
+}
+
+// unionTaints returns own followed by every child's taints not already present, in order,
+// so the result is deterministic for a given tree. Children are built first and already
+// carry their whole subtree, so one level is enough. The result never aliases own, which
+// points into the informer's copy of the PartitionTree.
+func unionTaints(own []partitiontreev1.PartitionTaint, children []*PartitionNode) []partitiontreev1.PartitionTaint {
+	var out []partitiontreev1.PartitionTaint
+	seen := make(map[partitiontreev1.PartitionTaint]bool)
+	add := func(taints []partitiontreev1.PartitionTaint) {
+		for _, t := range taints {
+			if !seen[t] {
+				seen[t] = true
+				out = append(out, t)
+			}
+		}
+	}
+	add(own)
+	for _, child := range children {
+		add(child.Taints)
+	}
+	return out
 }
 
 // UpdateTree atomically updates a partition tree in the cache.
@@ -349,9 +430,10 @@ func (pc *PartitionCache) UpdateTree(ctx context.Context, tree *partitiontreev1.
 	nodeMap := make(map[string]*KubeNode)
 	for _, node := range nodes {
 		nodeMap[node.Name] = &KubeNode{
-			Name:          node.Name,
-			Ready:         isNodeReady(&node),
-			Unschedulable: node.Spec.Unschedulable,
+			Name:            node.Name,
+			Ready:           isNodeReady(&node),
+			TestingNotReady: isTestingNotReady(&node),
+			Unschedulable:   node.Spec.Unschedulable,
 		}
 	}
 
@@ -366,7 +448,7 @@ func (pc *PartitionCache) UpdateTree(ctx context.Context, tree *partitiontreev1.
 
 	// Add new tree
 	if tree.Status.Root != nil {
-		newRoot := pc.buildNodeTree(tree.Status.Root, nil, tree.Labels[TpuPodNameLabel], nodeMap, logf)
+		newRoot := pc.buildNodeTree(tree.Status.Root, nil, tree.Labels[TpuPodIDLabel], nodeMap, logf)
 		pc.partitionTreeCache[tree.Name] = newRoot
 	}
 
@@ -383,9 +465,17 @@ func (pc *PartitionCache) UpdateLeafNodeCache(ctx context.Context, node *corev1.
 			kNode.KubeNode = &KubeNode{Name: node.Name}
 		}
 		kNode.KubeNode.Ready = isNodeReady(node)
+		kNode.KubeNode.TestingNotReady = isTestingNotReady(node)
 		kNode.KubeNode.Unschedulable = node.Spec.Unschedulable
-		logf.V(2).Info("Updating leaf node status in cache", "node name", node.Name, "status", kNode.KubeNode.Ready, "unschedulable", kNode.KubeNode.Unschedulable)
+		logf.V(2).Info("Updating leaf node status in cache", "node name", node.Name, "ready", kNode.KubeNode.Ready, "testingNotReady", kNode.KubeNode.TestingNotReady, "unschedulable", kNode.KubeNode.Unschedulable)
 	}
+}
+
+func isTestingNotReady(node *corev1.Node) bool {
+	if node == nil || node.Labels == nil {
+		return false
+	}
+	return node.Labels[GkeSchedulerTestingLabel] == SchedulerTestingNotReady
 }
 
 func isNodeReady(node *corev1.Node) bool {

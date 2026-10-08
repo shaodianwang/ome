@@ -24,8 +24,9 @@ import (
 )
 
 type KubeNode struct {
-	Name  string
-	Ready bool
+	Name            string
+	Ready           bool
+	TestingNotReady bool
 	// Unschedulable mirrors the node's spec.unschedulable: the node is
 	// cordoned and takes no new pods.
 	Unschedulable bool
@@ -39,6 +40,11 @@ type PartitionNode struct {
 	Parent   *PartitionNode
 	Children []*PartitionNode
 	KubeNode *KubeNode // KubeNode encapsulates the information from k8s node. This field is only set on the leaf node.
+	// Taints is the union of this partition's own taints and those of every descendant:
+	// a partition contains its descendants' hardware, so their taints apply to it too.
+	// The partition-tree controller records a taint only where it originates, so the cache
+	// does the union. Only set when taint filtering is enabled.
+	Taints []partitiontreev1.PartitionTaint
 }
 
 // PartitionCache holds the state of all partitions of a specific type (e.g., Trillium or Ironwood).
@@ -51,13 +57,5 @@ type PartitionCache struct {
 	leafPartitionNodeCache map[string]*PartitionNode
 	mu                     sync.RWMutex
 	enableNodeReadiness    bool // If true, the scheduler will consider the node presence and readiness for scheduling.
-}
-
-// PreemptionCandidateSet is a slice list candidates that could be preempted.
-// The SliceCandidate is used as a list of SliceInfo list to consolidate
-// both trillium and ironwood preemption scenarios.
-type PreemptionCandidateSet struct {
-	Slices                 []*interfaces.SliceInfo
-	PodName                string   // The name of the TPU pod
-	ToBeAssignedPartitions []string // Partitions that would be be free and can be used by the preemptor slice
+	enableTaintFiltering   bool // If true, the scheduler will consider PartitionTree taints for scheduling.
 }

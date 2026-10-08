@@ -128,6 +128,30 @@ func (g *GroupGenerator) Generate(ctx context.Context, req interfaces.GroupAlloc
 		}
 		podTrees[root.PodName] = append(podTrees[root.PodName], root)
 	}
+	sort.Strings(podNames)
+
+	// Canonicalize the enumeration order of the roots within each pod.
+	//
+	// interfaces.ClusterState.GetPartitionTrees() promises a set of roots, not an
+	// order. The production implementation (watcher.partitionState.GetPartitionTrees)
+	// builds its slice by ranging over a map, so the same cluster is handed over
+	// in a different order from one call to the next.
+	//
+	// That order is not cosmetic. It flows straight through
+	// findSinglePartitionOptions into the candidate list, and
+	// schedulerlib.DefaultScheduler.ScorePhase keeps the first candidate unless a
+	// later one scores strictly better. Equal-cost candidates are therefore
+	// resolved positionally, so an unordered input makes the placement decision
+	// non-deterministic: the identical cluster can place a slice on one cube on
+	// one run and its neighbour on the next.
+	//
+	// Sorting by partition ID makes the generator's output a pure function of the
+	// tree *set*. Partition IDs are unique cluster-wide, so this is a total order,
+	// and ascending lexicographic ID is already the tie-break convention used by
+	// tieBreakCandidates. The pod names above are sorted for the same reason.
+	for _, trees := range podTrees {
+		sort.Slice(trees, func(i, j int) bool { return trees[i].ID < trees[j].ID })
+	}
 
 	sliceNames := make([]string, len(req.Slices))
 	// Gather all currently assigned partitions across the request group so multi-cube generation
@@ -312,6 +336,30 @@ func mergeOptions(options []*interfaces.PlacementOption, req interfaces.GroupAll
 	return merged
 }
 
+// tieBreakCandidates orders two equal-cost placement candidates.
+//
+// It is a strict weak ordering whose equivalence classes contain exactly one
+// candidate each: two candidates compare equal in both directions if and only if
+// they name the same victims and assign the same partitions to the same slices.
+// For any two *distinct* candidates it returns a strict order. That totality is
+// what makes the ranking in pruneGangs reproducible; a comparator that left
+// distinct candidates unordered would hand the decision back to whatever order
+// they happened to be generated in.
+//
+// The tiers, in order:
+//
+//  1. Victim names, element-wise, then victim count. Victim lists are pre-sorted
+//     by name (see mergeOptions), so this compares sets, not orderings.
+//  2. Assigned partition IDs per requested slice, element-wise, then count.
+//     This is what separates permutations of an interchangeable gang.
+//  3. A canonical fingerprint over *every* assignment in the candidate. Tiers 1
+//     and 2 only see the slices in `slices`; this tier closes the gap when a
+//     candidate carries assignments the caller did not list, and is what makes
+//     totality hold by construction rather than by the caller's good behaviour.
+//
+// Tier 3 is unreachable for candidates produced by pruneGangs today, because
+// there the merged candidate's assignments are exactly the listed slices. It
+// exists so that a future caller cannot silently reintroduce ambiguity.
 func tieBreakCandidates(m1, m2 *interfaces.PlacementCandidate, slices []interfaces.SliceRequirement) bool {
 	vlen1, vlen2 := len(m1.Victims), len(m2.Victims)
 	for k := 0; k < vlen1 && k < vlen2; k++ {
@@ -335,14 +383,41 @@ func tieBreakCandidates(m1, m2 *interfaces.PlacementCandidate, slices []interfac
 			return len(a1) < len(a2)
 		}
 	}
+
+	if fp1, fp2 := candidateFingerprint(m1), candidateFingerprint(m2); fp1 != fp2 {
+		return fp1 < fp2
+	}
 	return false
+}
+
+// candidateFingerprint renders every assignment a candidate holds, ordered by
+// slice name, so two candidates remain comparable even when the caller's slice
+// list does not cover all of them.
+func candidateFingerprint(m *interfaces.PlacementCandidate) string {
+	if len(m.Assignments) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(m.Assignments))
+	for name := range m.Assignments {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var sb strings.Builder
+	for _, name := range names {
+		sb.WriteString(name)
+		sb.WriteByte('=')
+		sb.WriteString(joinIds(m.Assignments[name]))
+		sb.WriteByte(';')
+	}
+	return sb.String()
 }
 
 // pruneGangs filters out duplicate partial gang combinations and retains the top 'width' candidates based on the heuristic score.
 func pruneGangs(gangs []PartialGang, width int, req interfaces.GroupAllocationRequest, logf logr.Logger, level int) []PartialGang {
 	// Filter out identical partial gangs first
 	uniqueGangs := make([]PartialGang, 0)
-	seen := make(map[string]bool)
+	seenAt := make(map[string]int)
 
 	for _, g := range gangs {
 		m := g.MergedCandidate // Read directly from cache
@@ -361,9 +436,21 @@ func pruneGangs(gangs []PartialGang, width int, req interfaces.GroupAllocationRe
 		sort.Strings(keys)
 		key := strings.Join(keys, "|")
 
-		if !seen[key] {
-			seen[key] = true
+		idx, ok := seenAt[key]
+		if !ok {
+			seenAt[key] = len(uniqueGangs)
 			uniqueGangs = append(uniqueGangs, g)
+			continue
+		}
+		// Deduplication runs BEFORE ranking, so the member of a permutation class
+		// that survives it is the one that reaches the output -- keeping whichever
+		// arrived first would make the surviving representative a function of the
+		// generation order, which is the same defect the ranking below is careful
+		// to avoid. Keep the representative the total tie-breaker ranks first
+		// instead. Still exactly one survivor per key: the symmetry-breaking
+		// optimisation above is untouched, only the choice of survivor is pinned.
+		if tieBreakCandidates(g.MergedCandidate, uniqueGangs[idx].MergedCandidate, req.Slices[:len(g.Options)]) {
+			uniqueGangs[idx] = g
 		}
 	}
 
@@ -373,8 +460,14 @@ func pruneGangs(gangs []PartialGang, width int, req interfaces.GroupAllocationRe
 	// in whatever arbitrary order they were generated in memory, completely bypassing the heuristic
 	// cost function and degrading the beam search into an uninformed search.
 	//
+	// The sort is stable, and the tie-breaker below is a total order over distinct
+	// candidates. Either alone would very nearly do; both together mean the
+	// ranking is reproducible even if a future change makes the comparator
+	// indecisive for some pair, instead of silently handing that pair's order
+	// over to the sort's internal pivot choices.
+	//
 	// Zero-allocation sorting using cached fields
-	sort.Slice(uniqueGangs, func(i, j int) bool {
+	sort.SliceStable(uniqueGangs, func(i, j int) bool {
 		if !uniqueGangs[i].Cost.Less(uniqueGangs[j].Cost) && !uniqueGangs[j].Cost.Less(uniqueGangs[i].Cost) {
 			// Costs are equal, use tie-breaker
 			return tieBreakCandidates(uniqueGangs[i].MergedCandidate, uniqueGangs[j].MergedCandidate, req.Slices[:len(uniqueGangs[i].Options)])
