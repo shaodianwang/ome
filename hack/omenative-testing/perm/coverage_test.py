@@ -915,6 +915,17 @@ class StuckBreakCellsTest(unittest.TestCase):
         self.assertEqual(("delete", "engine+decoder+router gang"), (decoder.operation, decoder.shape_family))
         self.assertEqual([("sibling broken", "persistent", "new", "decoder")], decoder.faults)
 
+    def test_a_move_requested_on_a_parked_push_keeps_its_row_under_a_soak(self):
+        # The crash-after-Ready rows pace the push with minReadySeconds; the
+        # soak is pacing, not a fault, so the cell and the strategy do not move.
+        soaked = engine(4, life=gen_cases.lifecycle(min_ready=40))
+        move = self.corpus.write(mode="migrate", mig="Auto", inst=0, stuck="held", topo="engine", comps=soaked,
+                                 **counts(4, ceil_e=6), **{"break": "crash-load"})
+        self.assertEqual(("migrate", "push"), (move.operation, move.second_operation))
+        self.assertEqual([("crash after Ready", "persistent", "new", "engine")], move.faults)
+        self.assertEqual("held floor", move.timing)
+        self.assertEqual(("SurgeThenDrain", "1"), (move.strategy, move.budget))
+
 
 class NodeHookCellsTest(unittest.TestCase):
     """fault=node:<hook> files under the operation in flight on the node row:

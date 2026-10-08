@@ -1603,7 +1603,14 @@ the pod set the request found under a move rejected naming that revision
 its crashes is not judged); the
 Instances that served at the request keep serving; the Components neither
 pushed nor moved keep their pods; and the status keeps reporting the push
-that has not landed, the hold itself under `held`.
+that has not landed, the hold itself under `held`. The crash after Ready
+(`break=crash-load`) carries the ops-held rows' readiness soak as the
+pushed engine's `minReadySeconds` (`MOVE_STUCK_CRASH_LOAD_SOAK_S`, the same
+knob): under the surge strategy a pushed pod that is Ready is promoted and
+its source retired before the crash shows, on any fleet, so the floor the
+verdict holds could not be met; the soak outlasts the crash window, so the
+roll never promotes the pod and the running Instances keep serving at the
+floor. The header and the reason line of those cases say so.
 
 ### A fault during a runtime edit (`mode=runtimerev` with a break, `expect=recover`)
 
@@ -3161,5 +3168,7 @@ once its KIND spec settles; until then it stays hand-tested.
   single-pod SurgeThenDrain shape (`minreadyseconds_kind_test.go`);
   gang surge, RecreatePod, and in-place under a window, and the
   cluster-wide `deploy.minReadySeconds` default, are not yet in the
-  matrix. The ops-held crash-after-Ready gang rows carry a fixed window
-  as pacing (`OPS_HELD_CRASH_LOAD_SOAK_S`), not as a permuted axis.
+  matrix. The ops-held crash-after-Ready gang rows and the fault-move
+  crash-after-Ready stuck rows carry a fixed window as pacing
+  (`OPS_HELD_CRASH_LOAD_SOAK_S`, `MOVE_STUCK_CRASH_LOAD_SOAK_S`), not as a
+  permuted axis.

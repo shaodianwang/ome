@@ -299,7 +299,9 @@ runners (run.py + the KIND CI lane) already implement:
                           leaves the replacement nowhere to go (taint:all
                           lift=), and a move requested while a push is stuck
                           on a broken revision (stuck=held|failed with img= or
-                          break=, bump=decoder for the sibling's push)
+                          break=, bump=decoder for the sibling's push; the
+                          crash after Ready paced by the ops-held rows'
+                          readiness soak, so the surge never promotes it)
     gen-packed-pool/ p8600+ a packed pool: fillers take every node's spare
                           CPU once the service has settled, so the only room
                           is what a broken pod vacates; a push whose revision
@@ -7318,6 +7320,10 @@ MOVE_STUCK_BREAKS = [("imagepull", ["held", "failed"]), ("crash-start", ["held"]
                      ("configkey", ["held"]), ("stuck", ["held"])]
 MOVE_STUCK_STRAT = ("SurgeThenDrain", 1, 0)
 MOVE_STUCK_READY_TIMEOUT = READINESS_NEW_TIMEOUT
+# The crash after Ready under the surge strategy: a pushed pod that is Ready
+# is promoted and its source retired before the crash shows, on any fleet, so
+# the strict floor cannot hold; the ops-held rows' readiness soak paces it.
+MOVE_STUCK_CRASH_LOAD_SOAK_S = OPS_HELD_CRASH_LOAD_SOAK_S
 MOVE_CONFIG_SUFFIX = "-config"
 MOVE_STUCK_HOW = {"imagepull": "an image that cannot be pulled",
                   "crash-start": "a runner image with no shell, so its pods crash at every start",
@@ -7504,9 +7510,12 @@ def _move_preempt_reason(topo, w, nr):
     return out
 
 
-def _move_stuck_reason(kind, stuck, topo, w, nr, sibling):
+def _move_stuck_reason(kind, stuck, topo, w, nr, sibling, soak=None):
     pushed = f"the {sibling}" if sibling else "the engine"
-    out = (f"{pushed} is pushed onto a revision whose runner carries {MOVE_STUCK_HOW[kind]}; the push is left until "
+    paced = (f"; the pushed Instance must hold Ready for {soak}s before the roll promotes it (a readiness soak past "
+             f"the {CRASH_EXIT_AFTER_S}s crash window), so the crash shows before the roll retires its source and the "
+             f"running Instances keep serving at the floor" if soak else "")
+    out = (f"{pushed} is pushed onto a revision whose runner carries {MOVE_STUCK_HOW[kind]}{paced}; the push is left until "
            f"{MOVE_STUCK_STATE[stuck]}; then {_move_request_words(topo, w, nr)}: the move finishes, or is abandoned "
            f"with a reason its record carries, within budget and is recorded once; the moved Instance ends whole, Ready "
            f"and serving on one pod set at the index the record names (the revision its replacement runs is reported, "
@@ -7634,17 +7643,19 @@ def _emit_fault_move_more(add):
                 else:
                     kv["break"] = kind
                 ready_timeout = MOVE_STUCK_READY_TIMEOUT if kind == "stuck" else None
-                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, ready_timeout=ready_timeout)
+                soak = MOVE_STUCK_CRASH_LOAD_SOAK_S if kind == "crash-load" else None
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, ready_timeout=ready_timeout, min_ready=soak)
                 d_life = lib.lifecycle() if is_pd(topo) else None
                 meta = dict(strat=strat, verb=f"push:{stuck}:{kind}+move", rp="None", stuck=stuck, victim="engine", at="accept", who="moved")
-                desc = f"{GEN_MARK} fault-move stuck {stuck} {kind} {tag} N={n} {strat} {budget_tag(strat, surge, unavail)}"
+                desc = (f"{GEN_MARK} fault-move stuck {stuck} {kind} {tag} N={n} {strat} {budget_tag(strat, surge, unavail)}"
+                        + (f" soak {soak}s" if soak else ""))
+                reason = _move_stuck_reason(kind, stuck, topo, w, nr, None, soak=soak)
                 if kind == "configkey":
-                    add("gen-fault-move", desc, kv, None, _move_stuck_reason(kind, stuck, topo, w, nr, None), meta,
+                    add("gen-fault-move", desc, kv, None, reason, meta,
                         cell=("fault-move-stuck", kind, stuck, topo, w, nr),
                         body=lambda name, life=life, d_life=d_life: _move_configkey_body(name, topo, n, w, nr, life, d_life, "engine"))
                 else:
-                    add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=d_life, nr=nr),
-                        _move_stuck_reason(kind, stuck, topo, w, nr, None), meta,
+                    add("gen-fault-move", desc, kv, comps(topo, n, w, life, d_life=d_life, nr=nr), reason, meta,
                         cell=("fault-move-stuck", kind, stuck, topo, w, nr))
         if is_pd(topo):
             # The decoder's push stuck beside the engine's move.
