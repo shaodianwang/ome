@@ -6791,6 +6791,76 @@ class NodeFaultTest(unittest.TestCase):
         finally:
             run._FAULT_CLEANUPS[:] = saved
 
+    def _canary_at_the_hook(self, managers, budget_s):
+        """Drive run._canary against a scripted fleet whose ladder sits at
+        canary-serving@0, with the kubelet stop routed through the class's
+        node and docker fakes. Returns what reached _finish, the fault
+        record, the kubectl/docker calls and the wall time."""
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "topo": "engine",
+               "fault": "node:canary-serving@0", "lift": "after-settle", "canary": "auto", "floor_soft": 1}
+        pods = {"p999-engine-0-0": dict(_rec("engine", 0, "old"), node="kind-worker"),
+                "p999-engine-1-0": dict(_rec("engine", 1, "old"), node="kind-worker2")}
+        info = {"strat": {"engine": "SurgeThenDrain"}, "max_unavail": {"engine": 0}, "workers": {},
+                "members": ["engine"], "policy": None,
+                "canary_groups": [{"unit": "engine", "members": ["engine"], "order": [], "policy": "auto",
+                                   "steps": [{"capacity": "50%", "traffic": 10}, {"capacity": "100%", "traffic": 100}]}]}
+        ctx = _ctx_for(hdr, pods, info=info)
+        status = {"components": {"engine": {"rolloutPhase": "Paused",
+                                            "traffic": [{"revisionHash": "new", "latestRevision": True, "percent": 10}],
+                                            "canary": {"canaryRevisionHash": "new", "currentStep": 0}}}}
+        fleet = _FakeFleet(ctx)
+
+        def read(ctx_, timeout=1.0):
+            agg = fleet.read_one(ctx_, timeout)
+            run._fault_tick(ctx_)   # the phase-hook dispatcher the real _read_one runs
+            return agg
+
+        def bump(ctx_, bumped, **kw):
+            ctx_["trigger_ts"] = time.time()
+            return True
+        finished = {}
+
+        def finish(case_id, desc, hdr_, ctx_, state, verdict, notes, checks):
+            finished.update(state=state, verdict=verdict, notes=notes, checks=checks)
+            return 0
+        calls = []
+        kubectl, docker = self._fakes(calls, managers=managers)
+        patches = {"_setup_and_ready": lambda *a: (ctx, None), "_read_one": read, "_finish": finish,
+                   "_isvc_annotations": lambda *a, **kw: {}, "_isvc_events_since": lambda *a: [],
+                   "fetch_status": lambda c: status, "_wait_no_active_run": lambda c, b: 0.0, "_bump_rev": bump,
+                   "_node_fault_capability": lambda: None, "kubectl": kubectl, "_docker": docker,
+                   "STABILITY_S": 0.05, "LIFT_SETTLE_S": 0.2, "INV_TICK_S": 0.05,
+                   "ROTATE_BASE_S": 3, "ROTATE_PER_POD_S": 0, "MAX_BUDGET_S": budget_s}
+        saved, t0 = list(run._FAULT_CLEANUPS), time.time()
+        try:
+            with contextlib.ExitStack() as stack:
+                for name, value in patches.items():
+                    stack.enter_context(mock.patch.object(run, name, value))
+                run._canary("p999", Path("p999.yaml"), "desc", hdr)
+        finally:
+            run._FAULT_CLEANUPS[:] = saved
+        return finished, ctx["fault"], calls, time.time() - t0
+
+    def test_a_canary_whose_node_fault_cannot_be_injected_skips_at_the_hook(self):
+        # Every worker under the case hosts a manager pod, so no node may be stopped.
+        finished, f, calls, elapsed = self._canary_at_the_hook("kind-worker kind-worker2", budget_s=10)
+        self.assertEqual(("SKIP", "SKIP"), (finished["state"], finished["verdict"]), finished)
+        self.assertEqual([f["skip"]], finished["notes"])
+        self.assertIn("node fault unavailable here: no engine pod sits on a worker", f["skip"])
+        self.assertIn("(nodes under the case: kind-worker, kind-worker2)", f["skip"])
+        self.assertLess(elapsed, 3.0, "the case ends at the hook, not at the end of its budget")
+        self.assertFalse(any(c[0] == "docker" and c[1] == "exec" for c in calls), "no kubelet was stopped")
+
+    def test_a_canary_whose_node_fault_fires_waits_for_its_consequence(self):
+        # The manager sits on one worker: the other worker's pod is the victim and the watch goes on.
+        finished, f, calls, elapsed = self._canary_at_the_hook("kind-worker", budget_s=1.5)
+        self.assertNotIn("skip", f)
+        self.assertEqual(("p999-engine-1-0", "kind-worker2"), (f["crash_pod"], f["node"]))
+        self.assertIn(("docker", "exec", "kind-worker2", "systemctl", "stop", "kubelet"),
+                      [c[:6] for c in calls if c[0] == "docker"])
+        self.assertNotEqual("SKIP", finished["state"], finished)
+        self.assertGreaterEqual(elapsed, 1.5, "the driver watched the fault's consequence to its budget")
+
     def test_relocation_replaces_the_pods_the_node_held_on_other_nodes(self):
         pods = [("e1", {"ready": True, "serving": True, "uid": "n1", "node": "kind-worker"})]
         self.assertTrue(run._instance_relocated(pods, {"u1"}, "kind-worker2"))

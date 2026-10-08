@@ -25227,6 +25227,11 @@ def _canary(case_id, yaml_file, desc, hdr):
 
     while ctx["trigger_ts"] and time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
         _read_one(ctx)                                   # fold pod events → peaks / per-revision split
+        if fault and fault.get("skip"):
+            # The hook fired a fault this cluster cannot host (no pod of the
+            # case sits on a node the harness may stop): the case is skipped
+            # with that reason instead of waiting for a bite that never comes.
+            return _finish(case_id, desc, hdr, ctx, "SKIP", "SKIP", [fault["skip"]], [])
         now = time.time()
         if now - last_poll < 2.0:
             continue
