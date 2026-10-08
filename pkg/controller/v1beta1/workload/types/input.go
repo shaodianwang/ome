@@ -217,6 +217,14 @@ type ReconcileInput struct {
 	// Nil is treated as always-allowed.
 	UpdateGate func(strategy UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (allowed bool, gate RolloutHoldGate, denyReason string)
 
+	// PlanGate, when non-nil, is asked before every fresh Update start, the
+	// starts that skip UpdateGate included: it is the adapter's precondition
+	// that the roll executes a pinned plan, which no outage of the Instance
+	// being replaced can waive. allowed=false denies the start with the hold
+	// it names, ahead of the budget and the capacity gates. Nil is treated
+	// as always-allowed.
+	PlanGate func() (allowed bool, gate RolloutHoldGate, denyReason string)
+
 	// DrainGate, when non-nil, is asked by a surge update right before it
 	// takes its source out of rotation, with the replacement already
 	// serving. It is the drain-time half of a cross-Component gate that

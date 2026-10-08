@@ -162,8 +162,10 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 	return ctrl.Result{}, false, nil
 }
 
-// updateAdmission paces the fresh update starts of one pass. The two
-// layers a start answers to are consulted in order, against the same
+// updateAdmission paces the fresh update starts of one pass. The pin is
+// asked first and for every start: a roll executes a pinned plan, and no
+// outage of the Instance being replaced waives that. The two capacity
+// layers a start then answers to are consulted in order, against the same
 // numbers repairAdmission uses: the per-Component budget on the arm the
 // strategy uses (surge or unavailability), then the cross-Component
 // coordination gate. Starts already in flight from a prior wake-up are
@@ -176,6 +178,11 @@ type updateAdmission struct {
 	selection *UpdateSelection
 	target    *appsv1.ControllerRevision
 	gate      func(strategy types.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, types.RolloutHoldGate, string)
+	// planGate is the adapter's plan precondition; planAsked and planHold
+	// keep its one verdict per pass, since the pin does not move within one.
+	planGate  func() (bool, types.RolloutHoldGate, string)
+	planAsked bool
+	planHold  *types.RolloutHold
 
 	// inFlightSurge and inFlightUnavail are the fresh starts this pass
 	// charged to the per-Component budget, one per strategy arm.
@@ -196,7 +203,7 @@ type updateAdmission struct {
 }
 
 func newUpdateAdmission(input types.ReconcileInput, selection *UpdateSelection, target *appsv1.ControllerRevision) *updateAdmission {
-	return &updateAdmission{selection: selection, target: target, gate: input.UpdateGate}
+	return &updateAdmission{selection: selection, target: target, gate: input.UpdateGate, planGate: input.PlanGate}
 }
 
 func (a *updateAdmission) surge() bool {
@@ -210,6 +217,12 @@ func (a *updateAdmission) surge() bool {
 // Both layers project (prior + this pass + 1) against their budget, the
 // way the coordination group budget is projected.
 func (a *updateAdmission) admit(ctx context.Context, plan types.ComponentPlan, item UpdateItem) (bool, *types.RolloutHold) {
+	// The pin is asked for every start, the ones that skip the capacity
+	// consult included: a start that takes nothing further out of serving
+	// still rolls on the plan, and an unpinned plan admits no roll.
+	if hold := a.pinHold(); hold != nil {
+		return false, hold
+	}
 	rolled := int32(len(a.selection.RolledNotServing))
 	if a.surge() {
 		// An extra pod still listed holds a slot: a Terminating one inside
@@ -230,9 +243,9 @@ func (a *updateAdmission) admit(ctx context.Context, plan types.ComponentPlan, i
 			Target: a.target.Name,
 		}
 	}
-	// A CoordGateExempt start skips the consult: the gate already counts
-	// its outage in its serving-based unavailability, so gating its own
-	// recreate would double count and starve the recovery.
+	// A CoordGateExempt start skips the capacity consult: the gate already
+	// counts its outage in its serving-based unavailability, so gating its
+	// own recreate would double count and starve the recovery.
 	if a.gate != nil && !item.CoordGateExempt {
 		mechanism := a.mechanism(item)
 		if allowed, gate, reason := a.gate(mechanism, a.inFlightSurge, a.gateUnavail); !allowed {
@@ -244,6 +257,21 @@ func (a *updateAdmission) admit(ctx context.Context, plan types.ComponentPlan, i
 		}
 	}
 	return true, nil
+}
+
+// pinHold is the plan seam's verdict for the pass: nil while a run pins the
+// plan or no seam is wired, else the hold every fresh start stands behind.
+func (a *updateAdmission) pinHold() *types.RolloutHold {
+	if a.planGate == nil {
+		return nil
+	}
+	if !a.planAsked {
+		a.planAsked = true
+		if allowed, gate, reason := a.planGate(); !allowed {
+			a.planHold = &types.RolloutHold{Gate: gate, Reason: reason, Target: a.target.Name}
+		}
+	}
+	return a.planHold
 }
 
 // mechanism is the strategy arm item's start runs on, which is what the

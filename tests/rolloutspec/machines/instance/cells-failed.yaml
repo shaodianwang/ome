@@ -500,11 +500,11 @@ cells:
     event: gate.deny
     variants: [Plan, Pairing, Ratio, Sequential, Budget]
     outcome: defer
-    note: a fresh start records the hold and re-evaluates on the requeue; a Failed row continuing a preserved Update is neither budget-charged again nor gated, and a zero-serving Failed row on a non-surge strategy skips the coordination consult so its own outage cannot deny its recovery. An attempt parked after its disposition holds no slot of the budget, so its own fresh start is admitted against the peers alone, and a denial is named on its Operation.Waiting
+    note: a fresh start records the hold and re-evaluates on the requeue; a Failed row continuing a preserved Update is neither budget-charged again nor gated, and a zero-serving Failed row on a non-surge strategy skips the capacity consults so its own outage cannot deny its recovery, while the plan gate holds it like every fresh start, since no Instance rolls on an unpinned plan. An attempt parked after its disposition holds no slot of the budget, so its own fresh start is admitted against the peers alone, and a denial is named on its Operation.Waiting
     placement: unit
     coverage:
       perm: []
-      unit: [TestPlan_Update_StartingFresh_FailedByOperationType, TestReconcile_FailedUpdateHoldsMaxUnavailableBudget, TestReconcile_FailedRestart_RecreateBypassesCoordGate, TestCurrentUnavailableInFlight_ParkedAttemptHoldsNoSlot, TestFollowParkedAttempts_WaitFollowsTheLadder]
+      unit: [TestPlan_Update_StartingFresh_FailedByOperationType, TestReconcile_FailedUpdateHoldsMaxUnavailableBudget, TestReconcile_FailedRestart_RecreateBypassesCoordGate, TestReconcile_FailedRestart_RecreateAnswersThePlanGate, TestCurrentUnavailableInFlight_ParkedAttemptHoldsNoSlot, TestFollowParkedAttempts_WaitFollowsTheLadder]
       kind: []
     status: decided
   - state: Failed

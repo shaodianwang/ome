@@ -1674,6 +1674,32 @@ func TestWireCoordinationGates_SequentialReleasesActiveComponent(t *testing.T) {
 		"engine is the active Sequential Component once decoder converged; it must be allowed")
 }
 
+// TestWireCoordinationGates_WiresPlanGate pins that the IR path wires the
+// plan seam beside the update gate: it holds every start of a grouped
+// Component while the parent pins no run and admits once one is pinned,
+// so a start the workload admits without the capacity consult still
+// answers the pin.
+func TestWireCoordinationGates_WiresPlanGate(t *testing.T) {
+	g := gomega.NewWithT(t)
+	engineIR := mkIR(v1beta1.EngineComponent, 1)
+	r, _ := newReconciler(t, engineIR)
+	parent := mkSequentialParent()
+	parent.Status.Rollout = nil
+
+	input := r.buildReconcileInput(context.Background(), engineIR, engineIR.Spec.Runners, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
+	r.wireCoordinationGates(context.Background(), &input, engineIR, parent, coordination.GroupDefaults{}, specTargetRevision(engineIR))
+	g.Expect(input.PlanGate).NotTo(gomega.BeNil(), "the plan seam must be wired beside the update gate")
+
+	allowed, gate, reason := input.PlanGate()
+	g.Expect(allowed).To(gomega.BeFalse(), "no run pinned: every start of a grouped Component is held")
+	g.Expect(gate).To(gomega.Equal(workloadtypes.RolloutHoldGate(v1beta1.RolloutHoldGatePlan)))
+	g.Expect(reason).To(gomega.ContainSubstring("not pinned"))
+
+	pinRun(parent)
+	allowed, _, _ = input.PlanGate()
+	g.Expect(allowed).To(gomega.BeTrue(), "a pinned run admits the start to the capacity gates")
+}
+
 // TestWireCoordinationGates_NilParentLeavesGateNil pins that without a
 // resolvable parent there is no RolloutCoordination block to enforce, so
 // the gate stays nil and the dispatcher's "always allowed" fallback
@@ -1687,6 +1713,8 @@ func TestWireCoordinationGates_NilParentLeavesGateNil(t *testing.T) {
 	r.wireCoordinationGates(context.Background(), &input, engineIR, nil, coordination.GroupDefaults{}, specTargetRevision(engineIR))
 	g.Expect(input.UpdateGate).To(gomega.BeNil(),
 		"no parent ⇒ no coordination to enforce ⇒ gate stays nil")
+	g.Expect(input.PlanGate).To(gomega.BeNil(),
+		"no parent ⇒ no plan to pin ⇒ the plan seam stays nil")
 }
 
 // TestBuildReconcileInput_WiresMigrationWhenParentSet pins the migration

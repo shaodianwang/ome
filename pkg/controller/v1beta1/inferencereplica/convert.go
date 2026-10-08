@@ -253,6 +253,13 @@ func (r *Reconciler) wireCoordinationGates(ctx context.Context, input *workloadt
 			allowed, gate, reason := coordination.EvaluateUpdateGate(ctx, r.liveReader(), parent, ir.Spec.Component, target, r.Recorder, coordDefaults, strategy, inFlightSurge, inFlightUnavail)
 			return allowed, workloadtypes.RolloutHoldGate(gate), reason
 		}
+		// The pin alone, for the starts the workload admits without the
+		// capacity consult: an Instance that serves nothing still rolls on
+		// the plan.
+		input.PlanGate = func() (bool, workloadtypes.RolloutHoldGate, string) {
+			allowed, gate, reason := coordination.EvaluatePlanGate(parent, ir.Spec.Component)
+			return allowed, workloadtypes.RolloutHoldGate(gate), reason
+		}
 		// The drain-time half of the pair floor: a surge update asks it with
 		// the replacement already serving, over live pod state.
 		input.DrainGate = func(sourcePods []string) (bool, workloadtypes.RolloutHoldGate, string) {

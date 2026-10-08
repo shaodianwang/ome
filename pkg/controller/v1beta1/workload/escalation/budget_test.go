@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -683,6 +684,93 @@ func TestReconcile_FailedRestart_RecreateBypassesCoordGate(t *testing.T) {
 		if d != 0 {
 			t.Errorf("gate consult saw in-flight unavail delta %d, want 0 (exempt start must not be charged); deltas=%v", d, gateDeltas)
 		}
+	}
+}
+
+// TestReconcile_FailedRestart_RecreateAnswersThePlanGate pins the other
+// half of the exemption: a zero-serving Instance's recreate skips the
+// capacity consult, whose count already carries its outage, but not the
+// plan. With the plan seam holding (no run pinned for the group) neither
+// the dead Instance's recreate nor the serving peer's start opens, the
+// capacity gate is never asked, the pass records the Plan hold and
+// requeues at the gate cadence.
+//
+// Cells: instance/Failed/gate.deny[Plan]/before, instance/Ready/gate.deny[Plan]/before
+func TestReconcile_FailedRestart_RecreateAnswersThePlanGate(t *testing.T) {
+	scheme := makeScheme(t)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	deps := types.Deps{Client: c}
+
+	in := minimalInput(t)
+	in.DesiredSpec.Replicas = 2
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+		{
+			Index: 0, Incarnation: 2,
+			Phase: types.InstancePhaseFailed, RunningRevision: "prior-rev",
+			Operation: &types.InstanceOperation{
+				Type: types.InstanceOperationRestart, Step: "Drain",
+			},
+		},
+		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev",
+			PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1},
+	}
+	mutatedIndices := map[int32]int{}
+	in.MutateInstance = func(_ context.Context, idx int32, fn func(*types.InstanceStatus) bool) error {
+		mutatedIndices[idx]++
+		for i := range in.ObservedState.InstanceStatuses {
+			if in.ObservedState.InstanceStatuses[i].Index == idx {
+				_ = fn(&in.ObservedState.InstanceStatuses[i])
+				break
+			}
+		}
+		return nil
+	}
+	gateConsults, planConsults := 0, 0
+	in.UpdateGate = func(types.UpdateStrategyType, int32, int32) (bool, types.RolloutHoldGate, string) {
+		gateConsults++
+		return true, "", ""
+	}
+	in.PlanGate = func() (bool, types.RolloutHoldGate, string) {
+		planConsults++
+		return false, types.RolloutHoldGate(v1beta1.RolloutHoldGatePlan), "rollout plan not pinned: no active run for this rollout group"
+	}
+	var hold *types.RolloutHold
+	in.RecordRolloutHold = func(h *types.RolloutHold) { hold = h }
+
+	plan := types.ComponentPlan{
+		Component: types.ComponentEngine,
+		Replicas:  2,
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 2, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+		UpdateStrategy: types.UpdateStrategy{
+			Type:          types.UpdateStrategyRecreatePod,
+			RollingUpdate: &types.RollingUpdate{MaxUnavailable: intOrStringInt(1)},
+		},
+	}
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+	}
+
+	res, err := workload.Reconcile(context.Background(), deps, in, plan, target)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(mutatedIndices) != 0 {
+		t.Errorf("rows written while the plan was unpinned: %v; the zero-serving Instance's recreate answers the plan gate like every fresh start", mutatedIndices)
+	}
+	if planConsults == 0 {
+		t.Errorf("the plan seam was never asked")
+	}
+	if gateConsults != 0 {
+		t.Errorf("capacity gate consults = %d, want 0: a held plan is decided before any capacity question", gateConsults)
+	}
+	if hold == nil || hold.Gate != types.RolloutHoldGate(v1beta1.RolloutHoldGatePlan) {
+		t.Errorf("recorded hold = %+v, want the plan gate's hold", hold)
+	}
+	if res.RequeueAfter <= 0 {
+		t.Errorf("result = %+v, want a requeue at the gate cadence", res)
 	}
 }
 

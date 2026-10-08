@@ -1397,6 +1397,16 @@ func planHoldGate(consults *int) func(workloadtypes.UpdateStrategyType, int32, i
 	}
 }
 
+// unpinnedPlanGate stands in for the plan seam of a rollout group with no
+// run pinned: every fresh start is held on the pin. consults counts the
+// calls.
+func unpinnedPlanGate(consults *int) func() (bool, workloadtypes.RolloutHoldGate, string) {
+	return func() (bool, workloadtypes.RolloutHoldGate, string) {
+		*consults++
+		return false, workloadtypes.RolloutHoldGate(v1beta1.RolloutHoldGatePlan), "rollout plan not pinned: no active run for this rollout group"
+	}
+}
+
 // gangPod renames an engine pod fixture as the named runner of a
 // leader+worker gang.
 func gangPod(pod *corev1.Pod, runner string) *corev1.Pod {

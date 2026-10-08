@@ -112,7 +112,7 @@ type UpdateItem struct {
 	// (types.RecreateOfDarkRow, a Ready row whose pod set is provably out
 	// of service — evidence.PodSetServesNothing — or one the count already
 	// excludes on a parked member — evidence.PodSetUnavailableOnParkedMember);
-	// the per-Component budget still applies.
+	// the plan gate and the per-Component budget still apply.
 	CoordGateExempt bool
 	// ReplacesDarkPodSet: the fresh start replaces an Instance that serves
 	// nothing by the graced reading the budgets and the gate share

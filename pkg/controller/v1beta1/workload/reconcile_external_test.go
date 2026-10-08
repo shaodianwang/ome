@@ -1287,6 +1287,9 @@ type recoveryHarness struct {
 	// gate, when set, is the coordination UpdateGate the passes consult
 	// before a fresh start opens.
 	gate func(strategy workloadtypes.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workloadtypes.RolloutHoldGate, string)
+	// planGate, when set, is the adapter's plan precondition the passes ask
+	// before any fresh start, the starts exempt from gate included.
+	planGate func() (bool, workloadtypes.RolloutHoldGate, string)
 	// gangs, when set, is the PodGroup reading the passes see, as the
 	// PodGroup pass would have recorded it ahead of the reconcile.
 	gangs *workloadtypes.GangObservations
@@ -2877,6 +2880,7 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		MigrationAudit:     h.migrationAudit,
 		RemoveInstance:     h.removeInstance(),
 		UpdateGate:         h.gate,
+		PlanGate:           h.planGate,
 		Gangs:              h.gangs,
 		UpdateRetryPolicy:  h.retryPolicy,
 		StuckPodGrace:      h.stuckGrace,
@@ -12058,6 +12062,70 @@ func TestReconcile_UnreadyVictimPastTheWindow_DrainFirstRollTakesItFirst(t *test
 				}
 
 				h.clk.Step(h.stuckGrace)
+				requireDarkInstanceRollsFirst(t, h, victim, []int32{0, 1, 2}, nil, sc.strategy, sc.surge, sc.unavail,
+					func() bool { return h.settledOn(h.revFixed, replicas) })
+				if n := h.servingInstances(); n != replicas {
+					h.dumpState("after the roll")
+					t.Fatalf("%d Instances serve after the roll, want %d: the roll replaced the unready pod", n, replicas)
+				}
+			})
+		}
+	}
+}
+
+// TestReconcile_UnpinnedPlanHoldsTheDarkInstanceToo: four Instances serve
+// v1 under a drain-first strategy with maxUnavailable 1, listed in a
+// rollout group whose run is not pinned, and the highest Instance's pod
+// has been unready past the stuck-pod grace while its row stays Ready. A
+// push moves nothing while the plan is unpinned, the dark Instance
+// included: its outage waives the capacity consults, whose count already
+// carries it, not the pin, and the hold reads Plan. Once a run pins the
+// plan the dark Instance rolls first at no cost in capacity and the peers
+// follow within the budget; no repair opens under either restart policy.
+// RecreatePod and InPlaceIfPossible, under None and
+// RecreateInstanceOnPodRestart.
+//
+// Cells: instance/Ready/gate.deny[Plan]/before, instance/Ready/pod.runningNotReady[source]/boundary@T-ready-recreate, instance/Ready/pod.runningNotReady[source]/boundary@T-ready-inplace
+func TestReconcile_UnpinnedPlanHoldsTheDarkInstanceToo(t *testing.T) {
+	const replicas = 4
+	for _, policy := range unreadyRollPolicies {
+		for _, sc := range offTargetStrategies[1:3] {
+			t.Run(string(policy)+"/"+string(sc.strategy), func(t *testing.T) {
+				h, victim := unreadyVictimHarness(t, policy, sc.strategy, sc.surge, sc.unavail, replicas)
+				h.clk.Step(h.stuckGrace)
+				gateConsults, pinConsults := 0, 0
+				// The group's gate holds every start it is asked about on the
+				// plan, as it does while no run is open; the plan seam says the
+				// same for the starts that never reach the gate.
+				h.gate = planHoldGate(&gateConsults)
+				h.planGate = unpinnedPlanGate(&pinConsults)
+				h.events = nil
+				h.setTarget(h.revFixed, fixedImage)
+
+				for i := 0; i < 3; i++ {
+					h.step()
+					for idx := int32(0); idx < replicas; idx++ {
+						if !h.untouchedOn(idx, h.revV1) {
+							h.dumpState("unpinned")
+							t.Fatalf("instance %d moved while the plan was unpinned", idx)
+						}
+					}
+					if h.livePodOnImage(fixedImage) {
+						h.dumpState("unpinned")
+						t.Fatal("a pod of the pushed revision exists while the plan is unpinned")
+					}
+				}
+				if pinConsults == 0 {
+					t.Fatal("the plan seam was never asked while the plan was unpinned")
+				}
+				if h.verdict == nil || h.verdict.Gate != workloadtypes.RolloutHoldGate(v1beta1.RolloutHoldGatePlan) {
+					t.Fatalf("hold while unpinned = %+v, want the plan gate's hold", h.verdict)
+				}
+
+				// A run pins the plan: the gate answers on capacity again and the
+				// plan seam admits.
+				h.planGate = nil
+				h.gate = coordinationUnavailabilityGate(h, replicas, sc.unavail, &gateConsults)
 				requireDarkInstanceRollsFirst(t, h, victim, []int32{0, 1, 2}, nil, sc.strategy, sc.surge, sc.unavail,
 					func() bool { return h.settledOn(h.revFixed, replicas) })
 				if n := h.servingInstances(); n != replicas {
