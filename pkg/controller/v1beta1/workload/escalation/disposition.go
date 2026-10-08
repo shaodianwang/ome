@@ -77,8 +77,9 @@ const (
 //     block.
 //  2. RELOCATABLE — no workload-caused reason, MigrationMode=Auto,
 //     relocation budget (operator config) not exhausted, the target
-//     revision has served on some Instance (revisionHasServed), and the
-//     attempt's OWN pods occupy exactly ONE resolvable node (single-pod
+//     revision has served on some Instance (revisionHasServed) and is
+//     not Held by the retry ladder (revisionHeld), and the attempt's OWN
+//     pods occupy exactly ONE resolvable node (single-pod
 //     instances and single-host gangs; multi-node attempts fall
 //     through). A live pod of another revision in the same bucket — the
 //     serving source of a single-pod surge — is not the attempt's and
@@ -214,12 +215,16 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 	// pod on a revision nobody has served is the revision's own failure
 	// until proven otherwise: it takes the ladder below with no node
 	// blame, so a bad push leaves no exclusion behind for its fix to
-	// inherit.
+	// inherit. A revision the ladder has Held is no longer known to work
+	// either: the hold is the ladder's verdict that the revision itself
+	// fails, so a further attempt at it blames no node and records no
+	// exclusion — a directive would steer a rebuild the hold never runs.
 	relocationNode := ""
 	targetRev := attemptTargetRevision(input, inst)
 	if causePod == nil &&
 		migrationModeAllowsRelocation(dd.MigrationMode) && dd.AutoMigrateMaxAttempts > 0 &&
-		revisionHasServed(input.ObservedState.InstanceStatuses, inst, targetRev) {
+		revisionHasServed(input.ObservedState.InstanceStatuses, inst, targetRev) &&
+		!revisionHeld(input, targetRev) {
 		relocationNode = evidence.AttemptSuspectNode(pods, targetRev)
 	}
 
@@ -452,6 +457,14 @@ func revisionHasServed(rows []types.InstanceStatus, own types.InstanceStatus, re
 		}
 	}
 	return false
+}
+
+// revisionHeld reports whether the retry ladder has Held rev: the
+// ladder's verdict that the revision itself is the failure, which no
+// node is blamed for.
+func revisionHeld(input types.ReconcileInput, rev string) bool {
+	block := types.FindRetryBlock(input.ObservedState.RetryBlocks, rev)
+	return block != nil && block.State == types.RetryBlockHeld
 }
 
 // attemptTargetRevision resolves the revision an attempt is converging

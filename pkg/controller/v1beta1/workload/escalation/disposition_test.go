@@ -2165,3 +2165,110 @@ func TestDispose_AttemptReopenedSinceObservedIsNotParked(t *testing.T) {
 		})
 	}
 }
+
+// TestDispose_HeldRevisionBlamesNoNode: the crash loop of a revision that
+// served, once the ladder has Held that revision, is the revision's own
+// failure. No directive is recorded and no node excluded, the Held block
+// is left as it is, and the attempt ends as a terminal wave does — a
+// surge or a Create cleared at Failed, a recreate parked behind the hold
+// with its live pod — under either face of the loop.
+//
+// Cells: instance/Update/Surge/timer.operationDeadline/before, instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before, instance/Update/Drain/timer.operationDeadline/before, instance/Update/Drain/pod.waiting[CrashLoopBackOff]/before, instance/Create/CreatePods/timer.operationDeadline/before, instance/Create/CreatePods/pod.waiting[CrashLoopBackOff]/before
+func TestDispose_HeldRevisionBlamesNoNode(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	for _, shape := range []struct {
+		name     string
+		rows     []types.InstanceStatus
+		failed   int
+		parked   bool
+		deadline string
+	}{
+		{
+			name: "a surge beside a sibling that serves the revision",
+			rows: []types.InstanceStatus{servingRowOn(0, "rev-x"), {
+				Index: 1, Phase: types.InstancePhaseUpdating, RunningRevision: "rev-old",
+				Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurge, TargetRevision: "rev-x"},
+			}},
+			failed:   1,
+			deadline: "DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout",
+		},
+		{
+			name: "a recreate beside a sibling that serves the revision",
+			rows: []types.InstanceStatus{servingRowOn(0, "rev-x"), {
+				Index: 1, Phase: types.InstancePhaseUpdating, RunningRevision: "rev-old",
+				Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain, TargetRevision: "rev-x"},
+			}},
+			failed:   1,
+			parked:   true,
+			deadline: "DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout",
+		},
+		{
+			name: "a Create on the Instance that ran the revision before",
+			rows: []types.InstanceStatus{{
+				Index: 0, Phase: types.InstancePhaseCreating, RunningRevision: "rev-x",
+				Operation: &types.InstanceOperation{Type: types.InstanceOperationCreate, TargetRevision: "rev-x"},
+			}},
+			deadline: "DeadlineExceeded: Create/CreatePods exceeded InstanceReadyTimeout",
+		},
+	} {
+		for _, face := range []struct {
+			name   string
+			pod    func(name string) *corev1.Pod
+			reason string
+		}{
+			{"parked in CrashLoopBackOff", func(name string) *corev1.Pod {
+				return waitingPod(name, "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
+			}, "CrashLoopBackOff"},
+			{"running between two crashes", func(name string) *corev1.Pod {
+				return crashingBetweenRestarts(name, "node-a", t0)
+			}, shape.deadline},
+		} {
+			t.Run(shape.name+", "+face.name, func(t *testing.T) {
+				fc := clocktesting.NewFakeClock(t0)
+				c := fakeLedgerClient(t)
+				insts := append([]types.InstanceStatus(nil), shape.rows...)
+				policy := ladderPolicy()
+				input, rec := dispositionFixtureInput(fc, &insts, "rev-x", policy, ledgerOwnerCM())
+				held := types.RetryBlock{TargetRevision: "rev-x", State: types.RetryBlockHeld, AttemptsStarted: policy.MaxAttempts, Reason: "Error"}
+				blocks, _, warns := storeRetryBlocks(&input, rec, []types.RetryBlock{held})
+				input.ObservedState.RetryBlocks = []types.RetryBlock{held}
+				mirrored := 0
+				input.AppendMigration = func(context.Context, types.MigrationRecord) error { mirrored++; return nil }
+				dd := types.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: types.MigrationModeAuto}
+				row := insts[shape.failed]
+				pod := face.pod(fmt.Sprintf("engine-%d-default-0", row.Index))
+
+				outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{Client: c, Clock: fc}, input, dd, row, []*corev1.Pod{pod}, face.reason)
+				if err != nil {
+					t.Fatalf("DisposeExpiredAttempt: %v", err)
+				}
+				if outcome != escalation.DispositionTerminal {
+					t.Fatalf("outcome: got %v want DispositionTerminal (the ladder Held the revision, so the revision is the suspect, not the node)", outcome)
+				}
+				if got := len(loadLedger(t, c).Entries); got != 0 {
+					t.Errorf("ledger entries: got %d want none (no node blame for a revision the ladder Held)", got)
+				}
+				if mirrored != 0 {
+					t.Errorf("AppendMigration calls: got %d want 0", mirrored)
+				}
+				if len(*blocks) != 1 || (*blocks)[0] != held {
+					t.Errorf("block: got %+v want the Held block left as it was", *blocks)
+				}
+				if len(*warns) != 0 {
+					t.Errorf("RetryHeld warnings: got %v want none (the revision was already Held)", *warns)
+				}
+				if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed {
+					t.Fatalf("commit: got %+v want a single commit ending the attempt at Failed", rec.commits)
+				}
+				after := rec.commits[0].after
+				if shape.parked {
+					if !types.OperationParked(after.Operation) || after.Operation.Waiting != string(types.RolloutHoldGateHeld) {
+						t.Fatalf("operation: got %+v want the recreate parked behind the hold (its pod is alive)", after.Operation)
+					}
+				} else if after.Operation != nil {
+					t.Fatalf("operation: got %+v want the attempt cleared", after.Operation)
+				}
+			})
+		}
+	}
+}
