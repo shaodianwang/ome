@@ -67,6 +67,31 @@ func StampFailedEndingAttempt(ctx context.Context, input types.ReconcileInput, i
 	})
 }
 
+// StampRejected records a permanent apiserver rejection as the row's
+// failure: Phase=Failed, the operation cleared unless keepOperation, and
+// LastFailure the rejection, naming the pod the refused write was for
+// when it made one. A row already Failed on this same rejection of the
+// same pod is left as it is, so a repeated disposition writes nothing.
+func StampRejected(ctx context.Context, input types.ReconcileInput, idx int32, termination *types.InstanceTermination, keepOperation bool) (bool, error) {
+	return ApplyStamp(ctx, input, idx, func(s *types.InstanceStatus) bool {
+		if s.Phase == "" {
+			return false
+		}
+		same := s.LastFailure != nil && s.LastFailure.PodName == termination.PodName &&
+			s.LastFailure.Reason == termination.Reason && s.LastFailure.Message == termination.Message
+		if s.Phase == types.InstancePhaseFailed && same && (keepOperation || s.Operation == nil) {
+			return false
+		}
+		s.Phase = types.InstancePhaseFailed
+		if !keepOperation {
+			s.Operation = nil
+		}
+		captured := *termination
+		s.LastFailure = &captured
+		return true
+	})
+}
+
 // AttemptStanding is how the fresh row relates to an attempt a pass
 // observed: still carrying it, re-opened under another attempt, or
 // concluded with no attempt left (an appended slot reads as concluded).

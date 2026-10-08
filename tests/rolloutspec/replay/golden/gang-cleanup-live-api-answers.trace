@@ -35,15 +35,15 @@ tick=4 pod create name=svc-a-engine-1-leader-0 revision=367ef4b7 incarnation=1 o
 tick=4 pod create name=svc-a-engine-1-worker-0 revision=367ef4b7 incarnation=1 ordinal=0
 tick=4 hold cleared
 tick=4 pass result=after:5s
-tick=5 note the template changes again while the replacement is still incomplete, so the marker is claimed as a cleanup; the apiserver rejects the retirement's first delete as invalid, which leaves the pass through its error path
+tick=5 note the template changes again while the replacement is still incomplete, so the marker is claimed as a cleanup; the apiserver sheds the retirement's first delete, and the refusal propagates verbatim
 tick=5 apply spec.revision image=registry.example.com/runtime:v3 generation=2 now=t+0s
-tick=5 apply api.invalid verb=delete resource=pods count=1 now=t+0s
+tick=5 apply api.throttled[TooManyRequests] verb=delete resource=pods count=1 retryAfter=30s now=t+0s
 tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=5 row=1 write no-op precondition=no-change
 tick=5 row=1 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-367ef4b7 readySince=nil op=op#3{type=Update step=GangSurgeTargetCleanup target=svc-a-engine-367ef4b7 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
-tick=5 pod delete-rejected name=svc-a-engine-1-leader-0 rejection=api.invalid
-tick=5 pass result=none err:workload.Reconcile: update instance 0: delete failed surge pod ns-a/svc-a-engine-1-leader-0: Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0
-tick=6 note the apiserver sheds the retried delete; the refusal propagates verbatim and the retirement resumes on a later pass
+tick=5 pod delete-rejected name=svc-a-engine-1-leader-0 rejection=api.throttled[TooManyRequests]
+tick=5 pass result=none err:workload.Reconcile: update instance 0: delete failed surge pod ns-a/svc-a-engine-1-leader-0: the server is shedding load
+tick=6 note the apiserver sheds the retried delete again; the retirement resumes on a later pass
 tick=6 apply api.throttled[TooManyRequests] verb=delete resource=pods count=1 retryAfter=30s now=t+0s
 tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=6 row=1 write no-op precondition=no-change

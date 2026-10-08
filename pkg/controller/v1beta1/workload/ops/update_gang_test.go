@@ -3,6 +3,7 @@ package ops
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -3505,5 +3507,239 @@ func TestGangSurgeUpdate_TerminatingReplacementMemberHoldsTheHandoff(t *testing.
 	pass("worker ready")
 	if present, serving, _ := gangPods(0); serving != 0 {
 		t.Errorf("source still serving after the whole gang cleared the bar (present=%d serving=%d)", present, serving)
+	}
+}
+
+// gangCleanupRejectionFixture is a gang surge superseded by a newer
+// revision: the source still pins the replacement index, the marker is a
+// surge target whose members exist, and the Component's revision in force
+// has moved past the surge's target.
+func gangCleanupRejectionFixture(t *testing.T) (workload.ReconcileInput, *terminalMutationStore, client.Client, int32, string) {
+	t.Helper()
+	legacyResetExpectations(t)
+	const isvcName, namespace = "gang-cleanup", "test-ns"
+	const surgeIndex, retired, currentRev = int32(2), "gang-cleanup-engine-retired", "gang-cleanup-engine-inforce"
+	source := workload.InstanceStatus{
+		Index:           0,
+		Incarnation:     3,
+		Phase:           workload.InstancePhaseUpdating,
+		RunningRevision: "gang-cleanup-engine-running",
+		TargetRevision:  retired,
+		Operation: &workload.InstanceOperation{
+			ID:             "gang-update-0",
+			Type:           workload.InstanceOperationUpdate,
+			Step:           workload.UpdateStepSurge,
+			TargetRevision: retired,
+			SurgeIndex:     ptr.To(surgeIndex),
+		},
+	}
+	marker := workload.InstanceStatus{
+		Index:          surgeIndex,
+		Incarnation:    1,
+		Phase:          workload.InstancePhaseCreating,
+		TargetRevision: retired,
+		Operation: &workload.InstanceOperation{
+			ID:             "gang-update-target-2",
+			Type:           workload.InstanceOperationUpdate,
+			Step:           workload.UpdateStepGangSurgeTarget,
+			TargetRevision: retired,
+		},
+	}
+	store := &terminalMutationStore{
+		ownerUID: "owner-a",
+		statuses: map[int32]workload.InstanceStatus{
+			source.Index: cloneTerminalStatus(source),
+			surgeIndex:   cloneTerminalStatus(marker),
+		},
+	}
+	leader := gangSurgePod(isvcName, namespace, surgeIndex, "leader", query.RevisionHashFromControllerRevisionName(retired))
+	worker := gangSurgePod(isvcName, namespace, surgeIndex, "worker", query.RevisionHashFromControllerRevisionName(retired))
+	c := legacyNewFakeClient(t, leader, worker)
+	input := workload.ReconcileInput{
+		OwnerObject: &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{UID: "owner-a"}},
+		Key: workload.Key{
+			Namespace: namespace,
+			OwnerName: isvcName,
+			Component: workload.ComponentEngine,
+			SelectorLabels: map[string]string{
+				constants.InferenceServicePodLabelKey: isvcName,
+				constants.OMEComponentLabel:           string(workload.ComponentEngine),
+				query.LabelManagedBy:                  query.ManagedByOMENative,
+			},
+		},
+		ObservedState: workload.WorkloadObservedState{
+			UpdateRevision:   currentRev,
+			InstanceStatuses: []workload.InstanceStatus{cloneTerminalStatus(source), cloneTerminalStatus(marker)},
+		},
+		FinalizeInstanceResources:            func(context.Context, int32) (bool, error) { return true, nil },
+		ApplyInstanceMutationsWithRetryBlock: store.apply,
+	}
+	input.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+		return store.apply(ctx, []workload.InstanceMutation{{Index: idx, Mutate: mutate}}, "", nil)
+	}
+	return input, store, c, surgeIndex, currentRev
+}
+
+// rejectPodDeletesCounting wraps c so every pod delete is refused with err,
+// counting the attempts.
+func rejectPodDeletesCounting(t *testing.T, c client.Client, err error, attempts *int) client.Client {
+	t.Helper()
+	base, ok := c.(client.WithWatch)
+	if !ok {
+		t.Fatalf("fixture client %T does not implement client.WithWatch", c)
+	}
+	return interceptor.NewClient(base, interceptor.Funcs{
+		Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, isPod := obj.(*corev1.Pod); isPod {
+				*attempts++
+				return err
+			}
+			return cl.Delete(ctx, obj, opts...)
+		},
+	})
+}
+
+// gangCleanupRejectionPass drives one retirement pass of the fixture's
+// superseded surge, re-reading the rows and the ladder from the test's
+// stores as the engine would from the owner.
+func gangCleanupRejectionPass(t *testing.T, input *workload.ReconcileInput, store *terminalMutationStore, deps workload.Deps, blocks map[string]workload.RetryBlock, surgeIndex int32) func() (bool, error) {
+	t.Helper()
+	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+	return func() (bool, error) {
+		t.Helper()
+		input.ObservedState.InstanceStatuses = nil
+		for _, row := range store.statuses {
+			input.ObservedState.InstanceStatuses = append(input.ObservedState.InstanceStatuses, cloneTerminalStatus(row))
+		}
+		sort.Slice(input.ObservedState.InstanceStatuses, func(i, j int) bool {
+			return input.ObservedState.InstanceStatuses[i].Index < input.ObservedState.InstanceStatuses[j].Index
+		})
+		input.ObservedState.RetryBlocks = nil
+		for _, b := range blocks {
+			input.ObservedState.RetryBlocks = append(input.ObservedState.RetryBlocks, b)
+		}
+		input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+			b, found := blocks[rev]
+			if !found {
+				b = workload.RetryBlock{TargetRevision: rev}
+			}
+			switch mutate(&b) {
+			case workload.RetryBlockPersist:
+				blocks[rev] = b
+			case workload.RetryBlockRemove:
+				delete(blocks, rev)
+			}
+			return nil
+		}
+		source := input.ObservedState.Instance(0)
+		return abandonFailedGangSurge(context.Background(), deps, *input, plan, 0, surgeIndex,
+			source.RunningRevision, source.Operation.TargetRevision, "gang surge abandoned after a corrective edit", workload.CauseUnattributed)
+	}
+}
+
+// TestAbandonFailedGangSurge_RejectedDeleteParksRetirementOnce: the
+// retirement of a superseded gang surge deletes the replacement's members
+// under the marker's index. A permanent rejection of that delete ends the
+// marker as a rejected create would: Failed with the rejection on
+// LastFailure, the revision in force held, one Warning; the marker keeps
+// the cleanup operation that pins it to its source, and the next pass
+// issues nothing while the ladder denies.
+//
+// Cells: instance/Update/GangSurgeTargetCleanup/api.invalid/before
+func TestAbandonFailedGangSurge_RejectedDeleteParksRetirementOnce(t *testing.T) {
+	input, store, base, surgeIndex, currentRev := gangCleanupRejectionFixture(t)
+	attempts := 0
+	c := rejectPodDeletesCounting(t, base, siteInvalidError(), &attempts)
+	recorder := record.NewFakeRecorder(16)
+	deps := workload.Deps{Client: c, Recorder: recorder}
+	blocks := map[string]workload.RetryBlock{}
+	pass := gangCleanupRejectionPass(t, &input, store, deps, blocks, surgeIndex)
+
+	if _, err := pass(); err != nil {
+		t.Fatalf("abandonFailedGangSurge: %v (a permanent rejection is disposed, not returned)", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("rejected deletes: got %d want 1", attempts)
+	}
+	marker := store.statuses[surgeIndex]
+	if marker.Phase != workload.InstancePhaseFailed {
+		t.Fatalf("marker Phase: got %q want Failed", marker.Phase)
+	}
+	if marker.Operation == nil || marker.Operation.Step != workload.UpdateStepGangSurgeTargetCleanup {
+		t.Fatalf("marker Operation: got %+v want the cleanup operation kept (it pins the marker to its source)", marker.Operation)
+	}
+	if marker.LastFailure == nil || marker.LastFailure.Reason != workload.RejectionReasonInvalidPodSpec {
+		t.Fatalf("marker LastFailure: got %+v want reason %s", marker.LastFailure, workload.RejectionReasonInvalidPodSpec)
+	}
+	if b, held := blocks[currentRev]; !held || b.State != workload.RetryBlockHeld {
+		t.Fatalf("RetryBlock for %s: got %+v want Held (the revision in force is blamed)", currentRev, blocks)
+	}
+	if n := countEventsWithReason(drainRecorderEvents(recorder), workload.EventReasonInstanceRejected); n != 1 {
+		t.Fatalf("InstanceRejected events after the rejection: got %d want 1", n)
+	}
+
+	if done, err := pass(); err != nil || done {
+		t.Fatalf("pass on the parked retirement: done=%v err=%v want done=false err=nil", done, err)
+	}
+	if attempts != 1 {
+		t.Fatalf("the rejected delete was issued again: %d attempts", attempts)
+	}
+	if n := countEventsWithReason(drainRecorderEvents(recorder), workload.EventReasonInstanceRejected); n != 0 {
+		t.Fatalf("InstanceRejected events on the pass after: got %d want 0", n)
+	}
+	if _, found := store.statuses[surgeIndex]; !found {
+		t.Fatalf("the marker was removed while its members still exist")
+	}
+}
+
+// TestAbandonFailedGangSurge_ParkedRetirementCompletesOnceMembersAreGone:
+// the park guards only the writes the apiserver refused, the unroute and
+// the delete over the retired members. Once no member stands there is
+// nothing left to refuse, so the retirement finalizes the marker and
+// resets the source as any abandon does, while the ladder still denies.
+//
+// Cells: instance/Update/GangSurgeTargetCleanup/api.invalid/before
+func TestAbandonFailedGangSurge_ParkedRetirementCompletesOnceMembersAreGone(t *testing.T) {
+	input, store, base, surgeIndex, currentRev := gangCleanupRejectionFixture(t)
+	attempts := 0
+	c := rejectPodDeletesCounting(t, base, siteInvalidError(), &attempts)
+	recorder := record.NewFakeRecorder(16)
+	deps := workload.Deps{Client: c, Recorder: recorder}
+	blocks := map[string]workload.RetryBlock{}
+	pass := gangCleanupRejectionPass(t, &input, store, deps, blocks, surgeIndex)
+
+	if _, err := pass(); err != nil {
+		t.Fatalf("abandonFailedGangSurge: %v (a permanent rejection is disposed, not returned)", err)
+	}
+	if marker := store.statuses[surgeIndex]; marker.Phase != workload.InstancePhaseFailed {
+		t.Fatalf("marker after the rejection: got %q want Failed", marker.Phase)
+	}
+	if b, held := blocks[currentRev]; !held || b.State != workload.RetryBlockHeld {
+		t.Fatalf("RetryBlock for %s: got %+v want Held", currentRev, blocks)
+	}
+
+	// The retired members leave on their own while the ladder still denies.
+	if err := base.DeleteAllOf(context.Background(), &corev1.Pod{}, client.InNamespace(input.Key.Namespace)); err != nil {
+		t.Fatalf("remove the retired members: %v", err)
+	}
+
+	if done, err := pass(); err != nil || done {
+		t.Fatalf("pass with no member standing: done=%v err=%v want done=false err=nil (an abandon always requeues)", done, err)
+	}
+	if attempts != 1 {
+		t.Fatalf("deletes issued with no member standing: %d attempts want the one refused", attempts)
+	}
+	if marker, found := store.statuses[surgeIndex]; found {
+		t.Fatalf("the marker was kept with no member standing: %+v", marker)
+	}
+	source := store.statuses[0]
+	if source.Phase != workload.InstancePhaseReady || source.Operation != nil || source.TargetRevision != "" {
+		t.Fatalf("source after the retirement: got %+v want Ready on its running revision with the surge cleared", source)
+	}
+	if source.RunningRevision != "gang-cleanup-engine-running" {
+		t.Fatalf("source RunningRevision: got %q want gang-cleanup-engine-running (unchanged)", source.RunningRevision)
+	}
+	if b, held := blocks[currentRev]; !held || b.State != workload.RetryBlockHeld {
+		t.Fatalf("RetryBlock for %s after the completion: got %+v want still Held (finishing the retirement re-arms nothing)", currentRev, blocks)
 	}
 }

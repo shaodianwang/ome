@@ -1,11 +1,13 @@
 # A gang surge pair fails on its deadline and the apiserver rejects the
-# abandon's deletes as invalid, once while the source still drives the
-# retirement from its Failed Surge step and once more after the cleanup
-# claim has landed on the marker. Neither refusal is classified: the
-# rejection classifier is reached only from a pod create or an in-place
-# patch, so a rejected delete leaves the pass through its error path and
-# the retirement resumes on the next pass, bounded by nothing but the
-# requeue cadence.
+# abandon's first delete as invalid, after the cleanup claim has landed on
+# the marker. A 422 is permanent, so the refusal is disposed on the
+# marker: Failed with the rejection on LastFailure and the cleanup
+# operation kept, the revision in force held, one Warning. The retirement
+# issues nothing for the members still standing while the ladder denies,
+# so a second refusal staged for the next pass is never consumed; once
+# the members are gone on their own there is nothing left to refuse, and
+# the retirement finalizes the marker and resets the source as any
+# abandon does.
 scenario: gang-failed-invalid-delete-retried
 arrows:
   - T-empty-gang-surge-target
@@ -48,15 +50,15 @@ timeline:
     events:
       - timer.operationDeadline: {slack: 1s}
   - tick: 6
-    note: the abandon claims the cleanup marker and the apiserver rejects its first delete as invalid; the refusal is not classified, so the pass leaves through its error path with the claim committed
+    note: the abandon claims the cleanup marker and the apiserver rejects its first delete as invalid; the marker is disposed Failed with the rejection and keeps the claim, the revision in force is held and one Warning names the pod
     events:
       - api.invalid: {verb: delete}
   - tick: 7
-    note: the retried pass finds the cleanup claim in place and the apiserver rejects the delete again; the retirement is held another pass and nothing is stamped
+    note: the next pass leaves the marker as the rejection left it and issues no delete, so the refusal staged for it is never consumed
     events:
       - api.invalid: {verb: delete}
   - tick: 8
-    note: the deletes land on the next pass
+    note: a further pass still issues nothing while the ladder denies
   - tick: 9
     note: the retired replacement's members are gone, so the marker row is removed and the source is reset Ready on its running revision with the failed revision's wave recorded
     events:

@@ -281,7 +281,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 			}
 			// A replacement in rotation leaves it a pass ahead of its
 			// deletion, like every routed pod the rollout removes.
-			if unrouted, err := unrouteServingPods(ctx, deps, inst.Index, surgePods); err != nil {
+			if unrouted, err := unrouteServingPods(ctx, deps, inst.Index, surgePods, nil); err != nil {
 				return false, fmt.Errorf("unroute abandoned surge pod (instance=%d): %w", inst.Index, err)
 			} else if unrouted {
 				return false, nil
@@ -528,7 +528,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		// The flip reads the pass's pod list, which the stuck-pod sweep
 		// ran ahead of: a source it force-deleted is out of rotation
 		// already and is skipped like any pod that has gone.
-		if _, err := unroutePodsUnder(ctx, deps, oldPods, podreadiness.WriterUpdateSurgeDrain, surgeDrainKey(inst.Index, newOrdinal)); err != nil {
+		if _, err := unroutePodsUnder(ctx, deps, oldPods, podreadiness.WriterUpdateSurgeDrain, surgeDrainKey(inst.Index, newOrdinal), nil); err != nil {
 			return false, fmt.Errorf("mark old not serving (instance=%d): %w", inst.Index, err)
 		}
 		// Live drain check via per-revision routed Service — the

@@ -589,14 +589,14 @@ cells:
     coverage: {perm: [], unit: [], kind: [], replay: [delete-idle-pod-observations]}
     status: decided
 
-  # GAP: a 422 is permanent, but nothing on this path classifies it, so the
-  # pass retries the same rejected write forever with no operator signal.
   - state: Delete/Drain
     event: api.invalid
-    outcome: defer
-    note: "the rejection classifier is reached only from a pod create or an in-place pod patch, and the drain issues neither, so a 422 on the drain patch, the pod delete, the status batch or the audit ledger write returns as an opaque error into controller-runtime backoff and the next pass issues the same write again; the escalation pass that would fail the row skips Delete-owned rows. Today the refused write is retried forever with no operator signal, which is wrong because a 422 is permanent"
-    placement: sim
-    coverage: {perm: [], unit: [], kind: [], replay: [delete-refused-writes-retry]}
+    outcome: escalate
+    to: Failed
+    guard: "the rejected write is the wave's drain patch or pod delete for this row; the status batch and the force-delete audit ledger are Component-wide writes the rule does not attribute to a row, so a 422 on them stays an opaque error"
+    note: "a 422 is permanent, so the wave's drain patch and pod delete reach the rejection classifier as a pod create does and the victim gets the ending a rejected create gets: the Delete operation is released and the row reads Failed with InvalidPodSpec plus the apiserver's explanation on LastFailure, which also names the refused pod, a RetryBlock is recorded against the revision in force and one Warning names the pod. The next wave leaves alone a victim whose refused pod still stands while that revision's ladder denies a fresh start - so the write is not issued again and the pass is not held open behind it - and takes the row again once a corrected revision re-arms the ladder or that pod is gone; a row the create path failed names no standing pod and is taken as any extra. The escalation pass that would fail the row on a deadline still skips Delete-owned rows. A 422 on the status batch or the audit ledger write returns as an opaque error into controller-runtime backoff and the next pass issues the same write again (ops/delete_batch.go, ops/create_rejection.go)"
+    placement: unit
+    coverage: {perm: [], unit: [TestDeleteBatchRejectedWriteDisposesVictimOnce, TestDeleteBatchTakesACreateRefusedOrphan], kind: [], replay: [delete-refused-writes-retry, delete-drain-invalid-patch, delete-delete-invalid]}
     status: decided
 
   - state: Delete/Drain

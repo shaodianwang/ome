@@ -1,8 +1,12 @@
-# The apiserver refuses the wave's pod writes as invalid: first the drain
-# patch that takes the retired pod's serving gate down, then the pod
-# delete. Nothing on this path classifies a 422, so each refusal returns
-# as a plain error and the next pass issues the same write again until it
-# lands; the row stays Deleting throughout and completes on absence.
+# The apiserver refuses the wave's drain patch, the write that takes the
+# retired pod's serving gate down, as invalid. A 422 is permanent, so the
+# victim gets the ending a rejected create gets: the Delete operation is
+# released, the row reads Failed with the apiserver's reason, the revision
+# in force is held and one Warning names the pod. The next passes issue
+# nothing for the row - neither the patch again nor the delete - while
+# the ladder denies and the refused pod still stands; once the pod leaves
+# on its own there is nothing left to refuse, so the wave takes the row
+# again and it completes on absence.
 scenario: delete-refused-writes-retry
 arrows:
   - T-ready-scaledown
@@ -31,19 +35,21 @@ timeline:
     events:
       - spec.replicasDown: {to: 1}
   - tick: 2
-    note: the apiserver refuses the drain patch as invalid, so the pass ends on the error with the retired pod still serving
+    note: the apiserver refuses the drain patch as invalid; the row is disposed Failed with the reason, the revision in force is held and one Warning names the pod, with the retired pod still serving
     events:
       - api.invalid: {verb: patch}
   - tick: 3
-    note: the next pass issues the same patch again and it lands; the pod is still in rotation, so no delete follows yet
+    note: the next pass leaves the row as the rejection left it and issues no write; the ladder denies a fresh start
   - tick: 4
-    note: the pod leaves rotation and the apiserver refuses the wave's delete as invalid, so the expectation rolls back and the pass ends with the pod still there
+    note: the pod leaves rotation on its own; the row is out of the wave's selection, so no delete is issued and the staged refusal is never consumed
     events:
       - endpoint.rotationOut[source]: {pod: {index: 1}}
       - api.invalid: {verb: delete}
   - tick: 5
-    note: the next pass re-reads the set and issues the same delete again
+    note: a further pass still issues nothing
   - tick: 6
-    note: the pod is gone and the row leaves the owner's status
+    note: the pod is gone, so nothing of the refused write is left to refuse; the wave takes the row again and re-opens its Delete operation
     events:
       - pod.deleted[source]: {pod: {index: 1}}
+  - tick: 7
+    note: the next pass finds no pod behind the row and removes it from the owner's status

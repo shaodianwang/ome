@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
@@ -26,13 +27,22 @@ const (
 // neither the Instance's running one nor the current roll target.
 func alienFixture(t *testing.T, serving bool) (*v1beta1.InferenceService, client.Client, *corev1.Pod, *appsv1.ControllerRevision, *record.FakeRecorder) {
 	t.Helper()
+	return alienRowFixture(t, serving, v1beta1.OMENativeInstanceReady, nil)
+}
+
+// alienRowFixture is alienFixture with the row's phase and operation
+// chosen: a Ready row, a Failed row, or a parked attempt whose set sits on
+// a withdrawn revision.
+func alienRowFixture(t *testing.T, serving bool, phase v1beta1.OMENativeInstancePhase, op *v1beta1.InstanceOperation) (*v1beta1.InferenceService, client.Client, *corev1.Pod, *appsv1.ControllerRevision, *record.FakeRecorder) {
+	t.Helper()
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
 	ir := instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
 		Index:           0,
 		Incarnation:     1,
-		Phase:           v1beta1.OMENativeInstanceReady,
+		Phase:           phase,
 		RunningRevision: alienRunningRevision,
+		Operation:       op,
 	})
 	pod := podForInstance(isvc, 0, true /* ready */, serving)
 	pod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(alienPodRevision)
@@ -143,5 +153,124 @@ func TestCleanupWreckage_TerminatingAlienKeepsTheRowUntilItIsGone(t *testing.T) 
 	case event := <-events.Events:
 		t.Fatalf("no delete is issued for a pod already terminating; got event %q", event)
 	default:
+	}
+}
+
+// rejectPodDeletes wraps c so every pod delete is refused with err,
+// counting the attempts.
+func rejectPodDeletes(t *testing.T, c client.Client, err error, attempts *int) client.Client {
+	t.Helper()
+	base, ok := c.(client.WithWatch)
+	if !ok {
+		t.Fatalf("fixture client %T does not implement client.WithWatch", c)
+	}
+	return interceptor.NewClient(base, interceptor.Funcs{
+		Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if _, isPod := obj.(*corev1.Pod); isPod {
+				*attempts++
+				return err
+			}
+			return cl.Delete(ctx, obj, opts...)
+		},
+	})
+}
+
+// TestCleanupWreckage_RejectedWriteDisposesRowOnce: the wreckage sweep's
+// two pod writes, the unroute patch that takes a superseded-revision pod
+// out of rotation and the delete that follows, are issued for a Ready, a
+// Failed and a parked row with no attempt in flight. A permanent rejection
+// of either ends the row as a rejected create does: Failed, the operation
+// cleared, the rejection on LastFailure, the revision in force held, one
+// Warning. The next sweep issues nothing while the ladder denies.
+//
+// Cells: instance/Ready/api.invalid/before, instance/Failed/api.invalid/before, instance/Update/Parked/api.invalid/before
+func TestCleanupWreckage_RejectedWriteDisposesRowOnce(t *testing.T) {
+	parked := &v1beta1.InstanceOperation{ID: "update-0", Type: v1beta1.InstanceOperationUpdate, Step: workload.UpdateStepParked, TargetRevision: alienPodRevision}
+	for _, tc := range []struct {
+		name  string
+		phase v1beta1.OMENativeInstancePhase
+		op    *v1beta1.InstanceOperation
+		// A serving alien is unrouted first, so the patch is the rejected
+		// write; one out of rotation goes straight to the delete.
+		serving bool
+	}{
+		{name: "Ready row, unroute patch", phase: v1beta1.OMENativeInstanceReady, serving: true},
+		{name: "Ready row, delete", phase: v1beta1.OMENativeInstanceReady},
+		{name: "Failed row, delete", phase: v1beta1.OMENativeInstanceFailed},
+		{name: "parked attempt, delete", phase: v1beta1.OMENativeInstanceUpdating, op: parked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isvc, base, pod, target, events := alienRowFixture(t, tc.serving, tc.phase, tc.op)
+			attempts := 0
+			var c client.Client
+			if tc.serving {
+				c = rejectPodStatusPatches(t, base, invalidPodError(pod.Name), &attempts)
+			} else {
+				c = rejectPodDeletes(t, base, invalidPodError(pod.Name), &attempts)
+			}
+			plan := buildPlanSinglePodEngine(1)
+			blocks := map[string]workload.RetryBlock{}
+			sweep := func() (bool, error) {
+				t.Helper()
+				input := buildTestInput(isvc, c, workload.ComponentEngine)
+				input.ObservedState.UpdateRevision = target.Name
+				for _, b := range blocks {
+					input.ObservedState.RetryBlocks = append(input.ObservedState.RetryBlocks, b)
+				}
+				input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+					b, found := blocks[rev]
+					if !found {
+						b = workload.RetryBlock{TargetRevision: rev}
+					}
+					switch mutate(&b) {
+					case workload.RetryBlockPersist:
+						blocks[rev] = b
+					case workload.RetryBlockRemove:
+						delete(blocks, rev)
+					}
+					return nil
+				}
+				live := &corev1.Pod{}
+				if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), live); err != nil {
+					t.Fatalf("re-read alien: %v", err)
+				}
+				return ops.CleanupWreckage(context.Background(), workload.Deps{Client: c, Recorder: events},
+					input, plan, plan.Instances[0], target, []*corev1.Pod{live})
+			}
+
+			if _, err := sweep(); err != nil {
+				t.Fatalf("CleanupWreckage: %v (a permanent rejection is disposed, not returned)", err)
+			}
+			if attempts != 1 {
+				t.Fatalf("rejected writes: got %d want 1", attempts)
+			}
+			rows := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)
+			if len(rows) != 1 || rows[0].Phase != v1beta1.OMENativeInstanceFailed || rows[0].Operation != nil {
+				t.Fatalf("row after the rejection: got %+v want Failed with no operation", rows)
+			}
+			if rows[0].LastFailure == nil || rows[0].LastFailure.Reason != workload.RejectionReasonInvalidPodSpec {
+				t.Fatalf("LastFailure: got %+v want reason %s", rows[0].LastFailure, workload.RejectionReasonInvalidPodSpec)
+			}
+			if b, held := blocks[target.Name]; !held || b.State != workload.RetryBlockHeld {
+				t.Fatalf("RetryBlock for %s: got %+v want Held (the revision in force is blamed)", target.Name, blocks)
+			}
+			if n := countRejectionEvents(rejectionEvents(events), workload.EventReasonInstanceRejected); n != 1 {
+				t.Fatalf("InstanceRejected events after the rejection: got %d want 1", n)
+			}
+
+			done, err := sweep()
+			if err != nil {
+				t.Fatalf("CleanupWreckage on the disposed row: %v", err)
+			}
+			if !done {
+				t.Fatalf("a row the apiserver refused is left as it stands; got done=false")
+			}
+			if attempts != 1 {
+				t.Fatalf("the rejected write was issued again: %d attempts", attempts)
+			}
+			if n := countRejectionEvents(rejectionEvents(events), workload.EventReasonInstanceRejected); n != 0 {
+				t.Fatalf("InstanceRejected events on the sweep after: got %d want 0", n)
+			}
+		})
 	}
 }

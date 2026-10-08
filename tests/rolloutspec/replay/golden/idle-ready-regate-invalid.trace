@@ -1,0 +1,19 @@
+tick=1 note the pod is ContainersReady without the serving gate and the patch that restores it is rejected as invalid; the row is disposed Failed with the rejection as its reason and the revision in force is held
+tick=1 apply api.invalid verb=patch resource=pods count=1 now=t+0s
+tick=1 hold cleared
+tick=1 pod status-patch-rejected name=svc-a-engine-0-default-0 rejection=api.invalid
+tick=1 retryblock target=svc-a-engine-882059bb persist nil→{state=Held attempts=1 reason=InvalidPodSpec}
+tick=1 warn retryHeld target=svc-a-engine-882059bb attempts=1 reason=InvalidPodSpec
+tick=1 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=InvalidPodSpec message=Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0} precondition=ok
+tick=1 event Warning InstanceRejected OMENative component=engine instance=0: apiserver rejected pod svc-a-engine-0-default-0 (InvalidPodSpec: Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0); revision svc-a-engine-882059bb held for retry
+tick=1 pass result=after:5s
+tick=2 note a further pass leaves the row as the rejection left it and issues no write
+tick=2 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): InvalidPodSpec; Instance 0 on revision svc-a-engine-882059bb not serving
+tick=2 pass result=none
+tick=3 note a corrected revision re-arms the row and the roll opens a fresh recreate over it
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=3 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Drain target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=InvalidPodSpec message=Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0} precondition=ok
+tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 recreate (revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c, incarnation=2)
+tick=3 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=3 hold cleared
+tick=3 pass result=after:5s

@@ -909,10 +909,12 @@ cells:
     status: decided
   - state: Failed
     event: api.invalid
-    outcome: defer
-    note: the rejection classifier is reached only from a pod create or an in-place pod patch, and a Failed row issues neither - the create that re-materializes the index stamps Creating first and is classified there - so a 422 on an abandon or retry-block status write leaves the pass through the generic error path and controller-runtime backoff redelivers it unchanged
-    placement: sim
-    coverage: {perm: [], unit: [], kind: [], replay: [failed-idle-create-refusals-wait]}
+    outcome: escalate
+    to: Failed
+    guard: "the rejected write is the wreckage sweep's unroute patch or delete over a superseded-revision pod of the row; the create that re-materializes the index stamps Creating first and is classified there, and a 422 on an abandon or retry-block status write stays an opaque error"
+    note: "the wreckage sweep's unroute patch and delete over a superseded-revision pod of the row reach the rejection classifier as a pod create does, so the row keeps Failed and records the rejection - LastFailure reads InvalidPodSpec plus the apiserver's explanation, a RetryBlock is recorded against the revision in force and one Warning names the pod; the sweep then leaves the row alone while that revision's ladder denies a fresh start, so the write is not issued again, and a corrected revision re-arms it through the roll (ops/create_rejection.go). The create that re-materializes the index stamps Creating first and is classified there, and a 422 on an abandon or retry-block status write leaves the pass through the generic error path and controller-runtime backoff redelivers it unchanged"
+    placement: unit
+    coverage: {perm: [], unit: [TestCleanupWreckage_RejectedWriteDisposesRowOnce], kind: [], replay: [failed-idle-create-refusals-wait, failed-wreckage-invalid]}
     status: decided
   - state: Failed
     event: api.throttled

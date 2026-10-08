@@ -1,0 +1,57 @@
+# A gang surge's replacement is retired by a second revision move and the
+# apiserver rejects the retirement's delete as invalid. The marker ends as a
+# rejected create does: Failed with the rejection as its reason, keeping the
+# cleanup operation that pins it to its source, the revision in force held,
+# one Warning. The retirement issues nothing more until a corrected revision
+# re-arms it, and then completes.
+scenario: gang-cleanup-invalid-delete
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-done
+cells:
+  - instance/Update/GangSurgeTargetCleanup/api.invalid/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the template changes again while the replacement is still incomplete, so the marker is claimed as a cleanup; the apiserver rejects the retirement's first delete as invalid, and the marker is disposed Failed with the cleanup kept and the revision in force held
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - api.invalid: {verb: delete}
+  - tick: 6
+    note: a further pass leaves the marker as the rejection left it and issues no write; the source keeps its surge step and budget
+  - tick: 7
+    note: a corrected revision re-arms the retirement, which deletes both retired members
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v4}
+  - tick: 8
+    note: the retired members are gone, so the marker is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

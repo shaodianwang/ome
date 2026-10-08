@@ -1,0 +1,21 @@
+tick=1 note the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+tick=1 apply spec.replicasDown replicas=1 generation=1 now=t+0s
+tick=1 row=1 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 pass result=requeue
+tick=2 note the retired pod leaves rotation and the wave's delete is rejected as invalid; the victim is disposed Failed with the Delete operation released and the revision in force held
+tick=2 apply endpoint.rotationOut[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 apply api.invalid verb=delete resource=pods count=1 now=t+0s
+tick=2 row=1 write no-op precondition=no-change
+tick=2 pod status-patch name=svc-a-engine-1-default-0 serving=True→False
+tick=2 pod delete-rejected name=svc-a-engine-1-default-0 rejection=api.invalid
+tick=2 retryblock target=svc-a-engine-882059bb persist nil→{state=Held attempts=1 reason=InvalidPodSpec}
+tick=2 warn retryHeld target=svc-a-engine-882059bb attempts=1 reason=InvalidPodSpec
+tick=2 row=1 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil lastFailure={pod=svc-a-engine-1-default-0 reason=InvalidPodSpec message=Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0} precondition=ok
+tick=2 event Warning InstanceRejected OMENative component=engine instance=1: apiserver rejected pod svc-a-engine-1-default-0 (InvalidPodSpec: Pod "svc-a" is invalid: spec.containers[0].resources.limits: Invalid value: "-1": must be greater than or equal to 0); revision svc-a-engine-882059bb held for retry
+tick=2 hold cleared
+tick=2 row=0 write no-op precondition=no-change
+tick=2 pass result=none
+tick=3 note a further pass leaves the victim out of the wave and issues no write; the pass is not held open behind it
+tick=3 hold gate=Held target=svc-a-engine-882059bb reason=update to svc-a-engine-882059bb held after 1 failed attempt(s): InvalidPodSpec
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=none

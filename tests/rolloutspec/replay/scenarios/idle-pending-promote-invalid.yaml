@@ -1,0 +1,35 @@
+# A Pending Instance whose pod is ContainersReady owes one write: the
+# serving-gate patch that promotes it. The apiserver rejects it as invalid,
+# so the row ends as a rejected create does: Failed with the rejection as
+# its reason, the revision in force held, one Warning. Nothing issues the
+# patch again until a corrected revision re-arms the row.
+scenario: idle-pending-promote-invalid
+arrows:
+  - T-failed-corrective-recreate
+cells:
+  - instance/Pending/api.invalid/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, containersReady: true}
+timeline:
+  - tick: 1
+    note: the pod is ContainersReady and the promotion's serving-gate patch is rejected as invalid; the row is disposed Failed with the rejection as its reason and the revision in force is held
+    events:
+      - api.invalid: {verb: patch}
+  - tick: 2
+    note: a further pass leaves the row as the rejection left it and issues no write
+  - tick: 3
+    note: a corrected revision re-arms the row and the roll opens a fresh recreate over it
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}

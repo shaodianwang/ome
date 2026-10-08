@@ -287,6 +287,14 @@ func createFilteredBatched(
 		if !keep(inst.Index) {
 			continue
 		}
+		// A row the apiserver refused is left as the rejection left it
+		// until the revision in force admits a fresh attempt.
+		if parked, wait := rejectionParked(input, input.ObservedState.Instance(inst.Index)); parked {
+			if wait > 0 && (retryBlockWait == 0 || wait < retryBlockWait) {
+				retryBlockWait = wait
+			}
+			continue
+		}
 		existing := byInstance[inst.Index]
 		observed := input.ObservedState.Instance(inst.Index)
 		// A parked attempt whose set stands is the roll's: nothing of it is
@@ -618,12 +626,22 @@ func processReadyActions(ctx context.Context, deps workload.Deps, input workload
 			}
 			return true, err
 		}
+		rejected := false
 		for _, pod := range action.existing {
 			if podreadiness.IsServing(pod) {
 				continue
 			}
 			changed, err := podreadiness.MarkPodServingWithChange(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady)
 			if err != nil {
+				// A permanently refused gate patch disposes the row; its
+				// promotion is void and the neighbours go on.
+				if handled, derr := disposeRejectedRowWrite(ctx, deps, input, action.instance.Index, pod.Name, err); handled {
+					if derr != nil {
+						return true, fmt.Errorf("dispose rejected gate patch (instance=%d, pod=%s): %w", action.instance.Index, pod.Name, derr)
+					}
+					rejected = true
+					break
+				}
 				ownerPresent, commitErr := commitReadyActions(ctx, deps, input, completed)
 				if !ownerPresent {
 					return false, nil
@@ -642,7 +660,7 @@ func processReadyActions(ctx context.Context, deps workload.Deps, input workload
 		// Below the promote bar the gate write above is the whole action:
 		// there is no status mutation to commit until a later pass observes
 		// the set PodReady past its availability window.
-		if action.promote {
+		if action.promote && !rejected {
 			completed = append(completed, action)
 		}
 	}

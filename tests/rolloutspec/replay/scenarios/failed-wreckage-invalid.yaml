@@ -1,0 +1,29 @@
+# A Failed Instance with no attempt in flight still holds a pod of a
+# revision the Component withdrew. The wreckage sweep's delete is rejected
+# as invalid: the rejection becomes the row's recorded failure, the
+# revision in force is held, one Warning fires, and the delete is not
+# issued again until a corrected revision re-arms the row.
+scenario: failed-wreckage-invalid
+cells:
+  - instance/Failed/api.invalid/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Failed, runningRevision: current}
+  pods:
+    - {index: 0, previousImage: registry.example.com/runtime:v0}
+timeline:
+  - tick: 1
+    note: the superseded-revision pod is out of rotation, so the sweep deletes it at once; the delete is rejected as invalid and the row records the rejection as its failure with the revision in force held
+    events:
+      - api.invalid: {verb: delete}
+  - tick: 2
+    note: a further pass leaves the row as the rejection left it and issues no write

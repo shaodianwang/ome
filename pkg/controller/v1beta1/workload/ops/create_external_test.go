@@ -4714,3 +4714,114 @@ func TestCreate_TerminatingReadyPodIsNotPromoted(t *testing.T) {
 		t.Fatalf("the name was not re-created once the pod was gone: got %d pod(s)", len(pods.Items))
 	}
 }
+
+// rejectPodStatusPatches wraps c so every pod status patch is refused with
+// err, counting the attempts. The serving gate is the one status write the
+// engine issues against a pod.
+func rejectPodStatusPatches(t *testing.T, c client.Client, err error, attempts *int) client.Client {
+	t.Helper()
+	base, ok := c.(client.WithWatch)
+	if !ok {
+		t.Fatalf("fixture client %T does not implement client.WithWatch", c)
+	}
+	return interceptor.NewClient(base, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, cl client.Client, subResource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if _, isPod := obj.(*corev1.Pod); isPod && subResource == "status" {
+				*attempts++
+				return err
+			}
+			return cl.SubResource(subResource).Patch(ctx, obj, patch, opts...)
+		},
+	})
+}
+
+// TestCreate_GatePatchRejected_DisposesRowOnce: a Pending Instance whose
+// pod is ContainersReady owes one write, the serving-gate patch that
+// promotes it, and a Ready Instance whose pod lost the gate owes the same
+// patch. When the apiserver rejects it as invalid the row ends as a
+// rejected create does: Failed with the rejection on LastFailure, the
+// revision in force held, one Warning. The next pass issues nothing while
+// the ladder denies the revision.
+//
+// Cells: instance/Pending/api.invalid/before, instance/Ready/api.invalid/before
+func TestCreate_GatePatchRejected_DisposesRowOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase v1beta1.OMENativeInstancePhase
+	}{
+		{name: "Pending row promoting", phase: v1beta1.OMENativeInstancePending},
+		{name: "Ready row re-gating its pod", phase: v1beta1.OMENativeInstanceReady},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetExpectations(t)
+			isvc := minimalISVC("llama-70b", "prod", 1)
+			target := rejectionTargetCR()
+			ir := instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
+				Index: 0, Incarnation: 1, Phase: tc.phase, RunningRevision: target.Name,
+			})
+			pod := podForInstance(isvc, 0, true /* ContainersReady */, false /* serving */)
+			attempts := 0
+			c := rejectPodStatusPatches(t, newFakeClient(t, isvc, ir, pod, target), invalidPodError(pod.Name), &attempts)
+			recorder := record.NewFakeRecorder(16)
+			plan := buildPlanSinglePodEngine(1)
+			blocks := map[string]workload.RetryBlock{}
+			pass := func() error {
+				input := buildTestInput(isvc, c, workload.ComponentEngine)
+				input.ObservedState.UpdateRevision = target.Name
+				input.Pacing = &workload.APIPacing{}
+				for _, b := range blocks {
+					input.ObservedState.RetryBlocks = append(input.ObservedState.RetryBlocks, b)
+				}
+				input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+					b, found := blocks[rev]
+					if !found {
+						b = workload.RetryBlock{TargetRevision: rev}
+					}
+					switch mutate(&b) {
+					case workload.RetryBlockPersist:
+						blocks[rev] = b
+					case workload.RetryBlockRemove:
+						delete(blocks, rev)
+					}
+					return nil
+				}
+				_, err := ops.Create(context.Background(), workload.Deps{Client: c, Recorder: recorder}, input, plan, target)
+				return err
+			}
+
+			if err := pass(); err != nil {
+				t.Fatalf("Create: %v (a permanent rejection is disposed, not returned)", err)
+			}
+			if attempts != 1 {
+				t.Fatalf("gate patches: got %d want 1", attempts)
+			}
+			rows := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)
+			if len(rows) != 1 || rows[0].Phase != v1beta1.OMENativeInstanceFailed || rows[0].Operation != nil {
+				t.Fatalf("row after the rejection: got %+v want Failed with no operation", rows)
+			}
+			if rows[0].LastFailure == nil || rows[0].LastFailure.Reason != workload.RejectionReasonInvalidPodSpec {
+				t.Fatalf("LastFailure: got %+v want reason %s", rows[0].LastFailure, workload.RejectionReasonInvalidPodSpec)
+			}
+			if b, held := blocks[target.Name]; !held || b.State != workload.RetryBlockHeld {
+				t.Fatalf("RetryBlock for %s: got %+v want Held (the revision in force is blamed)", target.Name, blocks)
+			}
+			if n := countRejectionEvents(rejectionEvents(recorder), workload.EventReasonInstanceRejected); n != 1 {
+				t.Fatalf("InstanceRejected events after the rejection: got %d want 1", n)
+			}
+
+			if err := pass(); err != nil {
+				t.Fatalf("Create on the disposed row: %v", err)
+			}
+			if attempts != 1 {
+				t.Fatalf("the rejected gate patch was issued again: %d attempts", attempts)
+			}
+			if n := countRejectionEvents(rejectionEvents(recorder), workload.EventReasonInstanceRejected); n != 0 {
+				t.Fatalf("InstanceRejected events on the pass after: got %d want 0", n)
+			}
+			rows = instanceStatusesOnIR(c, isvc, workload.ComponentEngine)
+			if len(rows) != 1 || rows[0].Phase != v1beta1.OMENativeInstanceFailed {
+				t.Fatalf("row on the pass after: got %+v want still Failed", rows)
+			}
+		})
+	}
+}

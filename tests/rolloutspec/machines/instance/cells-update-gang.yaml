@@ -1583,13 +1583,14 @@ cells:
     placement: perm
     coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-member-already-terminating]}
     status: decided
-  # GAP: an unsatisfiable write is retried until the diagnostic stamp lands.
   - state: Update/GangSurgeTargetCleanup
     event: api.invalid
-    outcome: defer
-    note: the rejection classifier is reached only from a pod create or an in-place pod patch, and the retirement issues neither, so a rejected pod delete or status write returns an opaque error and is retried on controller-runtime backoff with no event and no bound other than the operation deadline
-    placement: sim
-    coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-live-api-answers]}
+    outcome: escalate
+    to: Failed/GangSurgeTargetCleanup
+    guard: the rejected write is the retirement's unroute patch or delete over a member of the retired replacement; a 422 on a status write stays an opaque error
+    note: the retirement's unroute patch and delete reach the rejection classifier as a pod create does, so the marker reads Failed with InvalidPodSpec plus the apiserver's explanation on LastFailure and keeps the cleanup operation that pins it to its source; a RetryBlock is recorded against the revision in force and one Warning names the pod. The retirement then issues nothing for the members still standing while that revision's ladder denies a fresh start - the source stays at its surge step holding the budget, as it does for any member still standing - and a corrected revision re-arms it; once no member stands there is nothing left to refuse, so the retirement finalizes the marker and resets the source as any abandon does (ops/update_gang.go, ops/create_rejection.go). A rejected status write returns an opaque error and is retried on controller-runtime backoff with no event and no bound other than the operation deadline
+    placement: unit
+    coverage: {perm: [], unit: [TestAbandonFailedGangSurge_RejectedDeleteParksRetirementOnce, TestAbandonFailedGangSurge_ParkedRetirementCompletesOnceMembersAreGone], kind: [], replay: [gang-cleanup-invalid-delete]}
     status: decided
   - state: Update/GangSurgeTargetCleanup
     event: api.throttled
@@ -1817,7 +1818,7 @@ cells:
   - {state: Failed/GangSurge, event: api.alreadyExists, outcome: ignore, note: "the abandon creates nothing", placement: sim, coverage: {perm: [], unit: [], kind: [], replay: [gang-failed-api-refusals]}, status: decided}
   - {state: Failed/GangSurge, event: api.notFound, outcome: ignore, note: "a missing replacement pod is the outcome the abandon waits for; a missing owner ends the pass through the owner-gone sentinel", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-failed-api-refusals]}, status: decided}
   - {state: Failed/GangSurge, event: api.quotaDenied, outcome: ignore, note: "the abandon creates nothing, so no refusal is recorded now; one the build recorded on the surge row stays there until a create completes without one", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-failed-api-refusals]}, status: decided}
-  - {state: Failed/GangSurge, event: api.invalid, outcome: defer, note: "a 422 on a status write or on the abandon's delete is not classified, so it leaves the pass through the generic error path and controller-runtime backoff redelivers it; a cleanup claim already committed stands and the retirement resumes on the next pass", placement: unit, coverage: {perm: [], unit: [], kind: [], replay: [gang-failed-invalid-delete-retried]}, status: decided}
+  - {state: Failed/GangSurge, event: api.invalid, outcome: defer, note: "a 422 on the abandon's unroute patch or delete over a retired member is classified and disposed on the marker, not on this source: the rejection lands on the marker's LastFailure with the cleanup claim kept, the revision in force is charged, one Warning fires and the retirement issues nothing for the members still standing while the ladder denies, finishing once they are gone; the source stays at its Failed surge step with its budget meanwhile. A 422 on a status write is not classified, so it leaves the pass through the generic error path and controller-runtime backoff redelivers it; a cleanup claim already committed stands", placement: unit, coverage: {perm: [], unit: [], kind: [], replay: [gang-failed-invalid-delete-retried]}, status: decided}
   - {state: Failed/GangSurge, event: api.throttled, outcome: defer, note: "a shed delete or status write is retried under controller-runtime backoff", placement: sim, coverage: {perm: [], unit: [], kind: [], replay: [gang-failed-api-refusals]}, status: decided}
   - {state: Failed/GangSurge, event: api.namespaceTerminating, outcome: defer, note: "the abandon creates nothing; the teardown that follows owns both rows", placement: sim, coverage: {perm: [], unit: [], kind: [], replay: [gang-failed-api-refusals, gang-cleanup-failed-pause-and-crash]}, status: decided}
 
@@ -2055,6 +2056,6 @@ cells:
   - {state: Failed/GangSurgeTargetCleanup, event: api.alreadyExists, outcome: ignore, note: "nothing is created at a retired index", placement: sim, coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-failed-pause-and-crash]}, status: decided}
   - {state: Failed/GangSurgeTargetCleanup, event: api.notFound, outcome: ignore, note: "a missing retired pod is the outcome the retirement waits for", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [gang-failed-api-refusals]}, status: decided}
   - {state: Failed/GangSurgeTargetCleanup, event: api.quotaDenied, outcome: n/a, reason: "no pod is created at a retired index, so no ResourceQuota admission applies", status: decided}
-  - {state: Failed/GangSurgeTargetCleanup, event: api.invalid, outcome: defer, note: "a 422 on a status write or on the retirement's delete is not classified, so it leaves the pass through the generic error path and the retirement resumes on the next", placement: unit, coverage: {perm: [], unit: [], kind: [], replay: [gang-failed-invalid-delete-retried]}, status: decided}
+  - {state: Failed/GangSurgeTargetCleanup, event: api.invalid, outcome: defer, note: "a 422 on the retirement's unroute patch or delete is read on the marker exactly as on the Update/GangSurgeTargetCleanup row - the rejection lands on LastFailure, the revision in force is charged, one Warning fires and the retirement issues nothing for the members still standing while the ladder denies, finishing once they are gone; a 422 on a status write is not classified, so it leaves the pass through the generic error path and the retirement resumes on the next", placement: unit, coverage: {perm: [], unit: [], kind: [], replay: [gang-failed-invalid-delete-retried]}, status: decided}
   - {state: Failed/GangSurgeTargetCleanup, event: api.throttled, outcome: defer, note: "a shed delete or status write is retried under controller-runtime backoff", placement: sim, coverage: {perm: [], unit: [], kind: [], replay: [gang-failed-api-refusals]}, status: decided}
   - {state: Failed/GangSurgeTargetCleanup, event: api.namespaceTerminating, outcome: defer, note: "nothing is created; the teardown that follows owns both rows", placement: sim, coverage: {perm: [], unit: [], kind: [], replay: [gang-cleanup-failed-pause-and-crash]}, status: decided}

@@ -1322,6 +1322,11 @@ func CleanupWreckage(ctx context.Context, deps workload.Deps, input workload.Rec
 	if s == nil {
 		return true, nil
 	}
+	// A row the apiserver refused is left as the rejection left it until
+	// the revision in force admits a fresh attempt.
+	if parked, _ := rejectionParked(input, s); parked {
+		return true, nil
+	}
 
 	if failedGangSurgeContinuation(s, target.Name) {
 		return abandonFailedGangSurge(ctx, deps, input, plan, inst.Index, *s.Operation.SurgeIndex,
@@ -1340,27 +1345,34 @@ func CleanupWreckage(ctx context.Context, deps workload.Deps, input workload.Rec
 // it under the delete-drain key, ahead of a deletion the caller issues on a
 // later pass: deleting in the pass that unrouted gives the endpoint
 // controllers no window to act on the withdrawal, and a bare delete drops
-// the connections the pod carries. Reports whether any pod left rotation
-// this pass.
-func unrouteServingPods(ctx context.Context, deps workload.Deps, idx int32, pods []*corev1.Pod) (bool, error) {
-	return unroutePodsUnder(ctx, deps, pods, podreadiness.WriterDeleteDrain, deleteDrainKey(idx))
+// the connections the pod carries. Reports whether the caller must stop here
+// this pass: a pod left rotation, or refused consumed the apiserver's refusal
+// of the patch (a nil refused leaves every refusal to the caller as an error).
+func unrouteServingPods(ctx context.Context, deps workload.Deps, idx int32, pods []*corev1.Pod, refused func(*corev1.Pod, error) (bool, error)) (bool, error) {
+	return unroutePodsUnder(ctx, deps, pods, podreadiness.WriterDeleteDrain, deleteDrainKey(idx), refused)
 }
 
 // unroutePodsUnder takes every pod of pods still in rotation out of it under
 // the caller's writer key. A pod already terminating, one that has vanished,
 // or one that came back under a new UID is out of rotation by other means
-// already and is left alone. Reports whether any pod left rotation this pass.
-func unroutePodsUnder(ctx context.Context, deps workload.Deps, pods []*corev1.Pod, writer, key string) (bool, error) {
+// already and is left alone. Reports whether the caller must stop here this
+// pass: a pod left rotation, or refused consumed the apiserver's refusal.
+func unroutePodsUnder(ctx context.Context, deps workload.Deps, pods []*corev1.Pod, writer, key string, refused func(*corev1.Pod, error) (bool, error)) (bool, error) {
 	unrouted := false
 	for _, pod := range pods {
 		if pod == nil || pod.DeletionTimestamp != nil || !podreadiness.IsServing(pod) {
 			continue
 		}
 		if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, writer, key); err != nil {
-			if !apierrors.IsNotFound(err) && !errors.Is(err, podreadiness.ErrPodIdentityChanged) {
-				return false, fmt.Errorf("%s/%s: %w", pod.Namespace, pod.Name, err)
+			if apierrors.IsNotFound(err) || errors.Is(err, podreadiness.ErrPodIdentityChanged) {
+				continue
 			}
-			continue
+			if refused != nil {
+				if handled, derr := refused(pod, err); handled {
+					return true, derr
+				}
+			}
+			return false, fmt.Errorf("%s/%s: %w", pod.Namespace, pod.Name, err)
 		}
 		unrouted = true
 	}
@@ -1400,7 +1412,9 @@ func deleteSupersededRevisionPods(ctx context.Context, deps workload.Deps, input
 	}
 	// A pod that was still carrying traffic goes on the next pass; one
 	// already out of rotation has nothing to wait for and goes now.
-	unrouted, err := unrouteServingPods(ctx, deps, idx, pods)
+	unrouted, err := unrouteServingPods(ctx, deps, idx, pods, func(pod *corev1.Pod, err error) (bool, error) {
+		return disposeRejectedRowWrite(ctx, deps, input, idx, pod.Name, err)
+	})
 	if err != nil {
 		return false, fmt.Errorf("unroute superseded-revision pod: %w", err)
 	}
@@ -1417,6 +1431,9 @@ func deleteSupersededRevisionPods(ctx context.Context, deps workload.Deps, input
 			cache.ObservedDelete(ns, owner, component, idx)
 			if apierrors.IsNotFound(err) {
 				continue
+			}
+			if handled, derr := disposeRejectedRowWrite(ctx, deps, input, idx, pod.Name, err); handled {
+				return false, derr
 			}
 			return false, fmt.Errorf("delete superseded-revision pod %s/%s: %w", pod.Namespace, pod.Name, err)
 		}

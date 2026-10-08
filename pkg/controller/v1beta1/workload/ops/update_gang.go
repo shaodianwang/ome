@@ -8,6 +8,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -392,7 +393,7 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		// Remove the source from rotation before deletion so termination grace
 		// does not leave both generations serving; a member already on its
 		// way out, or gone since the list, is out of rotation by other means.
-		if _, err := unroutePodsUnder(ctx, deps, sourcePods, podreadiness.WriterUpdateSurgeDrain, gangSurgeDrainKey(sourceIdx)); err != nil {
+		if _, err := unroutePodsUnder(ctx, deps, sourcePods, podreadiness.WriterUpdateSurgeDrain, gangSurgeDrainKey(sourceIdx), nil); err != nil {
 			return false, fmt.Errorf("drain source gang pod %w", err)
 		}
 		// Flipping the gate only starts the drain: the endpoint controller has
@@ -649,11 +650,22 @@ func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workl
 		return false, fmt.Errorf("list failed surge gang pods (instance=%d): %w", surgeIdx, err)
 	}
 	if len(surgePods) > 0 {
+		// A marker whose member write the apiserver refused is left as the
+		// rejection left it until the revision in force admits a fresh
+		// attempt; the source keeps its surge step and budget meanwhile, as
+		// for any member still standing. With no member left there is
+		// nothing to refuse, and the retirement finishes below.
+		if parked, _ := rejectionParked(input, marker); parked {
+			return false, nil
+		}
 		if !deps.ExpectationsCache().Satisfied(ns, owner, comp, surgeIdx) {
 			return false, nil
 		}
 		// A member in rotation leaves it a pass ahead of its deletion.
-		if unrouted, err := unrouteServingPods(ctx, deps, surgeIdx, surgePods); err != nil {
+		refused := func(pod *corev1.Pod, err error) (bool, error) {
+			return disposeRejectedRowWrite(ctx, deps, input, surgeIdx, pod.Name, err)
+		}
+		if unrouted, err := unrouteServingPods(ctx, deps, surgeIdx, surgePods, refused); err != nil {
 			return false, fmt.Errorf("unroute abandoned surge gang member (instance=%d): %w", surgeIdx, err)
 		} else if unrouted {
 			return false, nil
@@ -667,6 +679,9 @@ func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workl
 				deps.ExpectationsCache().ObservedDelete(ns, owner, comp, surgeIdx)
 				if apierrors.IsNotFound(err) {
 					continue
+				}
+				if handled, derr := disposeRejectedRowWrite(ctx, deps, input, surgeIdx, pod.Name, err); handled {
+					return false, derr
 				}
 				return false, fmt.Errorf("delete failed surge pod %s/%s: %w", pod.Namespace, pod.Name, err)
 			}

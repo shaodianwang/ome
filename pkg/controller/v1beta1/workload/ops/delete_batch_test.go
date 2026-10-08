@@ -2390,3 +2390,179 @@ func TestRetiredAttemptFailure_RecordsOnlyAnAttemptFailingOnItsOwn(t *testing.T)
 		})
 	}
 }
+
+// TestDeleteBatchRejectedWriteDisposesVictimOnce: a scale-down wave issues
+// two pod writes for its victim, the drain patch that takes it out of
+// rotation and the delete that follows. A permanent rejection of either
+// ends the victim as a rejected create does: Failed with the rejection on
+// LastFailure, the Delete operation released, the revision in force held,
+// one Warning. The next wave leaves the victim alone while the ladder
+// denies that revision, and the pass is not held open behind it.
+//
+// Cells: instance/Delete/Drain/api.invalid/before
+func TestDeleteBatchRejectedWriteDisposesVictimOnce(t *testing.T) {
+	owner := deleteBatchOwner()
+	const revision = "llama-engine-rev1"
+	for _, tc := range []struct {
+		name string
+		// A serving victim is drained first, so the patch is the rejected
+		// write; one out of rotation goes straight to the delete.
+		serving bool
+	}{
+		{name: "drain patch", serving: true},
+		{name: "pod delete", serving: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			statuses := []workload.InstanceStatus{deleteOwnedStatus(0, time.Now())}
+			pod := deleteFailurePod(0, tc.serving, "")
+			rejection := apierrors.NewInvalid(schema.GroupKind{Kind: "Pod"}, pod.Name, nil)
+			c := &deleteFailureClient{Client: newDeleteFailureBaseClient(t, pod)}
+			if tc.serving {
+				c.statusPatchErrorPod, c.statusPatchErr = pod.Name, rejection
+			} else {
+				c.deleteHook = func(context.Context, client.Object, ...client.DeleteOption) error { return rejection }
+			}
+			store := newDeleteMutationStore(owner, statuses)
+			events := record.NewFakeRecorder(16)
+			blocks := map[string]workload.RetryBlock{}
+			wave := func(rows []workload.InstanceStatus) (DeleteBatchResult, error) {
+				t.Helper()
+				input := deleteBatchInput(owner, rows)
+				input.ObservedState.UpdateRevision = revision
+				for _, b := range blocks {
+					input.ObservedState.RetryBlocks = append(input.ObservedState.RetryBlocks, b)
+				}
+				input.ApplyInstanceMutationsWithRetryBlock = store.apply
+				input.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+					return store.apply(ctx, []workload.InstanceMutation{{Index: idx, Mutate: mutate}}, "", nil)
+				}
+				input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+					b, found := blocks[rev]
+					if !found {
+						b = workload.RetryBlock{TargetRevision: rev}
+					}
+					switch mutate(&b) {
+					case workload.RetryBlockPersist:
+						blocks[rev] = b
+					case workload.RetryBlockRemove:
+						delete(blocks, rev)
+					}
+					return nil
+				}
+				deps := workload.Deps{Client: c, Expectations: workload.NewExpectations(), Recorder: events}
+				return DeleteBatch(context.Background(), deps, input, deleteBatchPlan(), []int32{0}, map[int32][]*corev1.Pod{0: {pod}})
+			}
+
+			if _, err := wave(statuses); err != nil {
+				t.Fatalf("DeleteBatch: %v (a permanent rejection is disposed, not returned)", err)
+			}
+			row, found := store.statuses[0]
+			if !found || row.Phase != workload.InstancePhaseFailed || row.Operation != nil {
+				t.Fatalf("victim after the rejection: got %+v (found=%v) want Failed with the Delete operation released", row, found)
+			}
+			if row.LastFailure == nil || row.LastFailure.Reason != workload.RejectionReasonInvalidPodSpec {
+				t.Fatalf("LastFailure: got %+v want reason %s", row.LastFailure, workload.RejectionReasonInvalidPodSpec)
+			}
+			if b, held := blocks[revision]; !held || b.State != workload.RetryBlockHeld {
+				t.Fatalf("RetryBlock for %s: got %+v want Held (the revision in force is blamed)", revision, blocks)
+			}
+			if n := countEventsWithReason(drainEvents(events), workload.EventReasonInstanceRejected); n != 1 {
+				t.Fatalf("InstanceRejected events after the rejection: got %d want 1", n)
+			}
+			deletesIssued := len(c.deleteCalls)
+			if tc.serving && deletesIssued != 0 {
+				t.Fatalf("a victim whose drain was refused was deleted anyway: %v", c.deleteCalls)
+			}
+
+			result, err := wave([]workload.InstanceStatus{row})
+			if err != nil {
+				t.Fatalf("DeleteBatch on the disposed victim: %v", err)
+			}
+			if result.InProgress {
+				t.Fatalf("the wave is held open behind a victim the apiserver refused: %+v", result)
+			}
+			if len(c.deleteCalls) != deletesIssued {
+				t.Fatalf("the rejected write was issued again: deletes %v", c.deleteCalls)
+			}
+			if n := countEventsWithReason(drainEvents(events), workload.EventReasonInstanceRejected); n != 0 {
+				t.Fatalf("InstanceRejected events on the wave after: got %d want 0", n)
+			}
+			if again := store.statuses[0]; again.Phase != workload.InstancePhaseFailed || again.Operation != nil {
+				t.Fatalf("victim on the wave after: got %+v want left as the rejection left it", again)
+			}
+		})
+	}
+}
+
+// TestDeleteBatchTakesACreateRefusedOrphan: the wave leaves alone only a
+// victim whose refused write was its own, read as the pod LastFailure
+// names still standing in the row's set. A row the create path failed
+// names no pod that stands - the refused create never made one - so the
+// wave takes it as any extra, its surviving pods included, while the
+// ladder still denies the revision in force.
+//
+// Cells: instance/Delete/Drain/api.invalid/before
+func TestDeleteBatchTakesACreateRefusedOrphan(t *testing.T) {
+	owner := deleteBatchOwner()
+	const revision = "llama-engine-rev1"
+	for _, tc := range []struct {
+		name string
+		// refusedPod is the pod LastFailure names: none for a refused
+		// create, the standing pod for a refused wave write.
+		refusedPod func(pod *corev1.Pod) string
+		admitted   bool
+	}{
+		{name: "create-refused orphan names no standing pod", refusedPod: func(*corev1.Pod) string { return "" }, admitted: true},
+		{name: "wave victim whose refused pod stands", refusedPod: func(pod *corev1.Pod) string { return pod.Name }, admitted: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := deleteFailurePod(1, false, "")
+			row := workload.InstanceStatus{
+				Index:       1,
+				Incarnation: 2,
+				Phase:       workload.InstancePhaseFailed,
+				LastFailure: &workload.InstanceTermination{
+					PodName: tc.refusedPod(pod),
+					Reason:  workload.RejectionReasonInvalidPodSpec,
+					Message: "Pod \"llama\" is invalid",
+				},
+			}
+			c := &deleteFailureClient{Client: newDeleteFailureBaseClient(t, pod)}
+			store := newDeleteMutationStore(owner, []workload.InstanceStatus{row})
+			input := deleteBatchInput(owner, []workload.InstanceStatus{row})
+			input.ObservedState.UpdateRevision = revision
+			input.ObservedState.RetryBlocks = []workload.RetryBlock{{
+				TargetRevision:  revision,
+				State:           workload.RetryBlockHeld,
+				AttemptsStarted: 1,
+				Reason:          workload.RejectionReasonInvalidPodSpec,
+			}}
+			input.ApplyInstanceMutationsWithRetryBlock = store.apply
+			deps := workload.Deps{Client: c, Expectations: workload.NewExpectations(), Recorder: record.NewFakeRecorder(16)}
+
+			result, err := DeleteBatch(context.Background(), deps, input, deleteBatchPlan(), []int32{1}, map[int32][]*corev1.Pod{1: {pod}})
+			if err != nil {
+				t.Fatalf("DeleteBatch: %v", err)
+			}
+			after := store.statuses[1]
+			if tc.admitted {
+				if after.Phase != workload.InstancePhaseDeleting || after.Operation == nil || after.Operation.Type != workload.InstanceOperationDelete {
+					t.Fatalf("orphan after the wave: got %+v want admitted into a Delete operation", after)
+				}
+				if !result.InProgress {
+					t.Fatalf("result: got %+v want the wave in progress over the orphan", result)
+				}
+				return
+			}
+			if after.Phase != workload.InstancePhaseFailed || after.Operation != nil {
+				t.Fatalf("victim after the wave: got %+v want left as the rejection left it", after)
+			}
+			if result.InProgress {
+				t.Fatalf("the wave is held open behind a victim the apiserver refused: %+v", result)
+			}
+			if len(c.deleteCalls) != 0 {
+				t.Fatalf("the refused victim's pod was written again: %v", c.deleteCalls)
+			}
+		})
+	}
+}
