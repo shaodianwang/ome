@@ -294,7 +294,7 @@ func TestEscalation_SinglePodSurgeDeadlineRelocatesOffTheTargetNode(t *testing.T
 		grace  time.Duration
 	}{
 		{name: "bound but never started", target: boundNeverStarted, grace: time.Second},
-		{name: "wedged with the fast escalator disabled", target: waitingPod("engine-0-default-1", "CrashLoopBackOff", "node-target", now.Add(-2*time.Hour)), grace: 0},
+		{name: "wedged with the fast escalator disabled", target: waitingPod("engine-0-default-1", "RunContainerError", "node-target", now.Add(-2*time.Hour)), grace: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fc := clocktesting.NewFakeClock(now)

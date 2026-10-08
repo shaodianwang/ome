@@ -1,6 +1,6 @@
 # Two Instances surge to a new revision. Instance 1's replacement serves
 # and promotes, so the revision is known to work; Instance 0's replacement
-# wedges on a node other than its source's. No stuck-pod grace is
+# is refused a start on a node other than its source's. No stuck-pod grace is
 # configured, so the fast escalator is off and the operation deadline is
 # what ends the attempt. The source keeps serving on node-0; the
 # disposition reads the suspect node off the replacement alone and
@@ -15,9 +15,10 @@ arrows:
   - T-surge-deadline
 cells:
   - instance/Update/Surge/timer.operationDeadline/before
-  - instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before
+  - instance/Update/Surge/pod.waiting[RunContainerError]/before
 intentional: >-
-  a node is blamed only for a revision some Instance has served; here the
+  a runtime start rejection is a failure a node can cause, and a node is
+  blamed for it only for a revision some Instance has served; here the
   sibling promoted on it, so the directive names the replacement's node,
   while the serving source shares the Instance index but not the attempt
   and is neither blamed nor a veto on the reading
@@ -57,10 +58,10 @@ timeline:
       - endpoint.rotationOut[source]: {pod: {index: 1, ordinal: 0}}
       - pod.deleted[source]: {pod: {index: 1, ordinal: 0}}
   - tick: 4
-    note: Instance 0's replacement is bound to node-1 and wedges there; with no stuck-pod grace configured nothing escalates yet
+    note: Instance 0's replacement is bound to node-1 and is refused a start there; with no stuck-pod grace configured nothing escalates yet
     events:
       - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-1}
-      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, ordinal: 1}, message: "back-off restarting failed container"}
+      - pod.waiting[RunContainerError]: {pod: {index: 0, ordinal: 1}, message: "failed to start container"}
   - tick: 5
     note: the operation deadline elapses; the attempt is disposed with a relocation directive against node-1, the replacement's node, while the source keeps serving on node-0
     events:

@@ -75,7 +75,8 @@ const (
 //     resolvable revision → there is nothing to hold; fall through to
 //     the terminal branch rather than report a held revision with no
 //     block.
-//  2. RELOCATABLE — no workload-caused reason, MigrationMode=Auto,
+//  2. RELOCATABLE — no workload-caused reason, no crash loop among the
+//     attempt's pods (attemptCrashLooping), MigrationMode=Auto,
 //     relocation budget (operator config) not exhausted, the target
 //     revision has served on some Instance (revisionHasServed) and is
 //     not Held by the retry ladder (revisionHeld), and the attempt's OWN
@@ -206,22 +207,34 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 	// once the evidence the backstop derives is available to travel with
 	// it.
 	//
+	// The caller's short reason token ("DeadlineExceeded: ..." →
+	// "DeadlineExceeded"; a bare kubelet reason passes through) names the
+	// class the escalator matched and keeps LastFailure.Reason
+	// grep-stable.
+	shortReason := reason
+	if i := strings.IndexByte(reason, ':'); i > 0 {
+		shortReason = reason[:i]
+	}
 	// The node is blamed only when the revision is known to work: some
 	// Instance has run the target revision to Ready — a sibling serving
 	// it now, or this Instance before the attempt — and the failure is
-	// one a node can cause (a crash loop, a runtime start rejection, a pod
-	// that never reports ready; the workload-caused reasons took branch 1
-	// and an unplaced pod names no node). A crash loop or a never-Ready
-	// pod on a revision nobody has served is the revision's own failure
-	// until proven otherwise: it takes the ladder below with no node
-	// blame, so a bad push leaves no exclusion behind for its fix to
-	// inherit. A revision the ladder has Held is no longer known to work
-	// either: the hold is the ladder's verdict that the revision itself
-	// fails, so a further attempt at it blames no node and records no
-	// exclusion — a directive would steer a rebuild the hold never runs.
+	// one a node can cause (a runtime start rejection, a pod that never
+	// reports ready, a pod whose node stopped reporting it; the
+	// workload-caused reasons took branch 1 and an unplaced pod names no
+	// node). A crash loop is never one: a container that keeps exiting
+	// does so on any node, so under either face of the loop the attempt
+	// takes the ladder below with no node blame, wherever the revision
+	// serves. A never-Ready pod on a revision nobody has served is the
+	// revision's own failure until proven otherwise and takes the ladder
+	// the same way, so a bad push leaves no exclusion behind for its fix
+	// to inherit. A revision the ladder has Held is no longer known to
+	// work either: the hold is the ladder's verdict that the revision
+	// itself fails, so a further attempt at it blames no node and records
+	// no exclusion — a directive would steer a rebuild the hold never
+	// runs.
 	relocationNode := ""
 	targetRev := attemptTargetRevision(input, inst)
-	if causePod == nil &&
+	if causePod == nil && !attemptCrashLooping(pods, targetRev, shortReason) &&
 		migrationModeAllowsRelocation(dd.MigrationMode) && dd.AutoMigrateMaxAttempts > 0 &&
 		revisionHasServed(input.ObservedState.InstanceStatuses, inst, targetRev) &&
 		!revisionHeld(input, targetRev) {
@@ -229,14 +242,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 	}
 
 	// Terminal backstop (branches 2 and 3): clear the Operation + stamp
-	// Phase=Failed unconditionally. Preserve the caller's short reason
-	// token ("DeadlineExceeded: ..." → "DeadlineExceeded"; a bare
-	// kubelet reason passes through) so LastFailure.Reason stays
-	// grep-stable.
-	shortReason := reason
-	if i := strings.IndexByte(reason, ':'); i > 0 {
-		shortReason = reason[:i]
-	}
+	// Phase=Failed unconditionally.
 	// A rebuild the scheduler could not place outlasted the operator's
 	// grace. If this Instance holds node exclusions for the revision it
 	// rendered, they are what stands between the pod and the room the
@@ -430,6 +436,18 @@ func terminalWaveReason(shortReason string, termination *types.InstanceTerminati
 // every reconcile.
 func sameTerminalFailure(inst types.InstanceStatus, reason string) bool {
 	return inst.LastFailure != nil && inst.LastFailure.Reason == reason
+}
+
+// attemptCrashLooping reports whether the attempt's failure is a crash
+// loop: the escalator classified CrashLoopBackOff, or a live pod of the
+// attempt shows either face of one. A container that keeps exiting does
+// so on any node, so the rebuild is never steered off the node it ran on.
+func attemptCrashLooping(pods []*corev1.Pod, targetRev, shortReason string) bool {
+	if shortReason == evidence.ReasonCrashLoop {
+		return true
+	}
+	pod, _ := evidence.FirstCrashLoopingPod(pods, targetRev)
+	return pod != nil
 }
 
 // migrationModeAllowsRelocation gates branch 2 on the effective

@@ -1,7 +1,7 @@
 # The relocation directive meets a pool with no room elsewhere. Two
 # Instances surge to a new revision; Instance 1 promotes on it, Instance
-# 0's replacement wedges on node-1 and the deadline records a directive
-# against that node. The wedged replacement is removed and the roll
+# 0's replacement is refused a start on node-1 and the deadline records a
+# directive against that node. The wedged replacement is removed and the roll
 # re-surges a replacement that must avoid node-1; the scheduler finds it
 # no other node and the hold outlasts the configured grace. The exclusion
 # is what stands between the pod and the only room there is, so the
@@ -21,7 +21,7 @@ intentional: >-
   a node exclusion whose rebuild the scheduler could not place is
   released past the unschedulable grace; the attempt fails
   environment-caused and the budget the directive spent stays spent. The
-  Failed source whose wedged replacement is removed is no crash-loop park
+  Failed source whose refused replacement is removed is no crash-loop park
   (its record names the replacement, not its own pod) and is not promoted
   by the Create pass, so it re-surges from Failed rather than from Ready
 initial:
@@ -61,10 +61,10 @@ timeline:
       - endpoint.rotationOut[source]: {pod: {index: 1, ordinal: 0}}
       - pod.deleted[source]: {pod: {index: 1, ordinal: 0}}
   - tick: 4
-    note: Instance 0's replacement is bound to node-1 and wedges there
+    note: Instance 0's replacement is bound to node-1 and is refused a start there
     events:
       - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}, message: node-1}
-      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, ordinal: 1}, message: "back-off restarting failed container"}
+      - pod.waiting[RunContainerError]: {pod: {index: 0, ordinal: 1}, message: "failed to start container"}
   - tick: 5
     note: the operation deadline elapses; the attempt is disposed with a relocation directive against node-1 and the wave is not counted on the ladder
     events:

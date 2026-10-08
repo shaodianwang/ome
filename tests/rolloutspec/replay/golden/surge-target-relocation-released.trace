@@ -32,9 +32,9 @@ tick=3 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-6f8b1e
 tick=3 event Normal RecreateUpdateCompleted OMENative component=engine instance=1 surge to revision svc-a-engine-6f8b1e6c complete (activeOrdinal=1)
 tick=3 hold cleared
 tick=3 pass result=after:5s
-tick=4 note Instance 0's replacement is bound to node-1 and wedges there
+tick=4 note Instance 0's replacement is bound to node-1 and is refused a start there
 tick=4 apply pod.scheduled[target] pod=svc-a-engine-0-default-1 node=node-1 now=t+0s
-tick=4 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff now=t+0s
+tick=4 apply pod.waiting[RunContainerError] pod=svc-a-engine-0-default-1 reason=RunContainerError now=t+0s
 tick=4 row=0 write no-op precondition=no-change
 tick=4 hold cleared
 tick=4 pass result=after:5s
@@ -45,13 +45,13 @@ tick=5 hold cleared
 tick=5 row=0 write no-op precondition=no-change
 tick=5 migration uuid=uid#5 append trigger=Auto phase=Relocated source=0 surge=nil fromNode=node-1 attempt=1 reason=AutoRecover message=relocation directive recorded; rebuild steered off node node-1 allocatedAt=nil deadline=t+30m1s completedAt=t+30m1s
 tick=5 event Normal AutoMigrationTriggered OMENative component=engine instance=0 relocation directive recorded: attempt 1/3, rebuild steered off node node-1 (uuid=uid#5)
-tick=5 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=5 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=nil lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout} precondition=ok
 tick=5 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout: attempt disposed with relocation directive; the rebuild is steered off the recorded node
 tick=5 pass result=after:5s
 tick=6 note the wedged replacement is gone and the roll re-drives the surge; the new replacement must avoid node-1
 tick=6 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+30m1s
 tick=6 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
-tick=6 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#3{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod=svc-a-engine-0-default-1 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=6 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#3{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout} precondition=ok
 tick=6 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)
 tick=6 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
 tick=6 hold cleared
