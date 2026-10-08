@@ -6,6 +6,10 @@ arrows:
   - T-empty-gang-surge-target
   - T-gangtarget-ready
   - T-surgedrain-stuckgrace
+intentional: >-
+  a replacement member lost after the hand-over closes the attempt ahead of
+  the escalation, and with no ladder configured the loss re-arms the
+  rebuild at once
 cells:
   - instance/Update/SurgeDrain/pod.deleted[target]/boundary@T-surgedrain-stuckgrace
   - instance/Update/SurgeDrain/timer.stuckPodGrace/boundary@T-surgedrain-stuckgrace
@@ -49,12 +53,12 @@ timeline:
     events:
       - pod.waiting[ImagePullBackOff]: {pod: {index: 1, runner: worker}, message: "manifest unknown"}
   - tick: 7
-    note: the grace elapses twice over as the replacement leader is lost; the stamp lands once on both rows and the source keeps its operation
+    note: the grace elapses twice over as the replacement leader is lost; the loss closes the source's attempt ahead of the escalation, which stamps the marker once for the wedge
     events:
       - timer.stuckPodGrace: {slack: 1s}
       - pod.deleted[target]: {pod: {index: 1, runner: leader}}
       - timer.stuckPodGrace: {slack: 1s}
   - tick: 8
-    note: the grace is read as elapsed again on the Failed rows and nothing is stamped twice
+    note: the grace is read as elapsed again and nothing is stamped twice; with no ladder configured the loss re-arms the rebuild at once, so the source goes back to Updating under a fresh deadline with the retry counted and the lost leader is re-created at the pinned revision
     events:
       - timer.stuckPodGrace: {slack: 1s}

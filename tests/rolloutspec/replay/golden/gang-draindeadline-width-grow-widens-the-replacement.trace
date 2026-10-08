@@ -64,12 +64,14 @@ tick=7 row=1 write incarnation=1 phase=Failed runningRevision=nil targetRevision
 tick=7 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/SurgeDrain exceeded InstanceReadyTimeout
 tick=7 warn instanceFailed index=1 pod=nil reason=DeadlineExceeded: Update/GangSurgeTarget exceeded InstanceReadyTimeout
 tick=7 pass result=after:5s
-tick=8 note the width grows to two workers; the edit mints no revision, and the continuation's build reads the live Runner list, so the replacement's PodGroup is widened and the missing member is created at the pinned revision
+tick=8 note the width grows to two workers; the edit mints no revision, and the continuation's build reads the live Runner list, so the replacement's PodGroup is widened and the missing member is created at the pinned revision; the added name is no loss against the published count, so nothing is charged, and the Failed source re-arms under a fresh deadline with the retry counted
 tick=8 apply spec.gangWidth[grow] workers=2 generation=2 now=t+30m1s
 tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=8 row=1 write no-op precondition=no-change
 tick=8 podgroup update name=svc-a-engine-1
 tick=8 pod create name=svc-a-engine-1-worker-1 revision=367ef4b7 incarnation=1 ordinal=1
+tick=8 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod=svc-a-engine-1-worker-0 reason=ContainersNotReady container=main message=pod is Running but its containers never became ready; not ready: main} precondition=ok
+tick=8 event Normal GangSurgeRebuilt OMENative component=engine instance=0 rebuilt 1 of 3 member(s) of the replacement gang (surge-index=1) at revision svc-a-engine-367ef4b7; retry 1 under a fresh deadline
 tick=8 hold cleared
 tick=8 pass result=after:5s
 tick=9 note the first replacement worker comes back Ready, but the replacement is still short of the member the width added, so the source's delete waits
@@ -96,7 +98,7 @@ tick=11 condition type=GangSchedulingUnavailable status=False reason=GangSchedul
 tick=11 row=1 write no-op precondition=no-change
 tick=11 row=0 write no-op precondition=no-change
 tick=11 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-367ef4b7 readySince=t+30m1s op=nil lastFailure={pod=svc-a-engine-1-worker-0 reason=ContainersNotReady container=main message=pod is Running but its containers never became ready; not ready: main} precondition=ok
-tick=11 row=0 remove incarnation=1 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-1-worker-0 reason=ContainersNotReady container=main message=pod is Running but its containers never became ready; not ready: main} precondition=ok
+tick=11 row=0 remove incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod=svc-a-engine-1-worker-0 reason=ContainersNotReady container=main message=pod is Running but its containers never became ready; not ready: main} precondition=ok
 tick=11 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 gang surge complete: instance 1 promoted to revision svc-a-engine-367ef4b7
 tick=11 hold cleared
 tick=11 pass result=requeue

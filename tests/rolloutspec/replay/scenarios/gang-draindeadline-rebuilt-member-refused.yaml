@@ -1,20 +1,28 @@
 # A gang source fails on its deadline at the drain step, loses a replacement
-# member, and the rebuilt member is refused by its node. A refused member is
-# terminal and holds its name, and the recycle that would free it declines
-# past the attempt's deadline and withholds the build with it, so the
-# continuation neither replaces the member nor finishes the hand-over: the
-# pair stands with the source out of rotation and the replacement short,
-# and a corrective revision changes nothing, because past the Surge step
-# the cycle finishes only on its pin.
+# member, and the rebuilt member is refused by its node. The loss closes the
+# attempt and, with no ladder configured, the member is rebuilt in the same
+# pass under a fresh deadline with the retry counted. The refused member is
+# terminal, and under the fresh deadline the recycle deletes it at once; its
+# name is held while it terminates, so the continuation waits for it to go,
+# and a corrective revision changes nothing, because past the Surge step the
+# cycle finishes only on its pin.
 scenario: gang-draindeadline-rebuilt-member-refused
 arrows:
   - T-empty-gang-surge-target
   - T-gangtarget-ready
   - T-surgedrain-deadline
+  - T-surgedrain-gang-replacement-lost
+  - T-failedgangsurgedrain-rearm
+intentional: >-
+  a replacement member lost after the hand-over is rebuilt under a fresh
+  deadline, so a rebuilt member its node refuses is recycled instead of
+  holding its name past an elapsed one
 cells:
-  - instance/Failed/GangSurgeDrain/pod.admissionRejected[OutOfResource]/before
-  - instance/Failed/GangSurgeDrain/pod.phaseTerminal[Failed]/before
-  - instance/Failed/GangSurgeDrain/spec.revision/before
+  - instance/Failed/GangSurgeDrain/pod.deleted[target]/before
+  - instance/Update/SurgeDrain/pod.admissionRejected[OutOfResource]/before
+  - instance/Update/SurgeDrain/pod.phaseTerminal[Failed]/before
+  - instance/Update/SurgeDrain/pod.terminating[target]/before
+  - instance/Update/SurgeDrain/spec.revision/before
 initial:
   spec:
     replicas: 1
@@ -59,19 +67,19 @@ timeline:
     events:
       - timer.operationDeadline: {slack: 1s}
   - tick: 8
-    note: the short worker is lost, so the continuation rebuilds it under the same attempt at the pinned revision
+    note: the short worker is lost, so the loss closes the attempt and is recorded on the source; with no ladder configured the member is rebuilt in the same pass at the pinned revision and the source re-armed under a fresh deadline with the retry counted
     events:
       - pod.deleted[target]: {pod: {index: 1, runner: worker}}
   - tick: 9
-    note: the rebuilt worker binds and its node refuses it; the refused member is terminal and holds its name, and the recycle declines past the attempt's elapsed deadline and withholds the build, so nothing is deleted or created
+    note: the rebuilt worker binds and its node refuses it; the refused member is terminal, and under the fresh deadline the recycle deletes it at once, the refusal lifted onto the source's record
     events:
       - pod.scheduled[target]: {pod: {index: 1, runner: worker}, message: node-1}
       - pod.admissionRejected[OutOfResource]: {pod: {index: 1, runner: worker}, resource: nvidia.com/gpu, message: "Pod Node didn't have enough resource: nvidia.com/gpu"}
   - tick: 10
-    note: a tick with nothing changed finds the refused member still holding its name and waits again
+    note: a tick with nothing changed finds the recycled member still terminating and holding its name, so the continuation waits for it to go
   - tick: 11
-    note: a corrective revision arrives; past the Surge step the cycle finishes only on its pin, so the continuation reads the same refused member and the pair stays where it is
+    note: a corrective revision arrives; past the Surge step the cycle finishes only on its pin, so the continuation reads the same terminating member and the pair stays where it is
     events:
       - spec.revision: {image: registry.example.com/runtime:v3}
   - tick: 12
-    note: a further tick changes nothing; the pair has no exit of its own
+    note: a further tick changes nothing; the rebuild waits on the name until the object is gone

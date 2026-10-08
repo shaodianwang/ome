@@ -653,11 +653,15 @@ or determinism forced a change, and they are the ones to review.
    create is observed as soon as the object exists; a delete is observed
    when the object leaves the apiserver, whether the scenario's
    `pod.deleted` took it out or the force-delete sweep did.
-9. **The deadline park/rearm step is modelled, the rest of the aggregate
-   pass is not.** The adapter parks every in-flight deadline before the
-   dispatcher when paused, and parks or rearms admission-held deadlines
-   after it on every reconcile; the driver does both. The counters and
-   conditions the same aggregate pass publishes are not computed.
+9. **The deadline park/rearm step and the published pod count are
+   modelled, the rest of the aggregate pass is not.** The adapter parks
+   every in-flight deadline before the dispatcher when paused, and parks or
+   rearms admission-held deadlines after it on every reconcile; the driver
+   does both. The adapter also writes each row's `PodCount` from the pass's
+   pod observation, which the next pass reads; the driver hands the engine
+   the previous pass's count on every row the same way, without rendering
+   it. The other counters and the conditions the same aggregate pass
+   publishes are not computed.
 10. **An event may carry only the arguments it declares.** The parser
     rejects anything else, so a mistyped argument fails the load instead
     of silently doing nothing, and `timer.operationDeadline` requires its

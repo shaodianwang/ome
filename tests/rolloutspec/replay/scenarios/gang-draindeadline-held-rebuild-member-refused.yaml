@@ -1,0 +1,90 @@
+# A gang source fails on its deadline at the drain step and loses a
+# replacement member. The loss closes the attempt, recorded on the source
+# with nothing charged by an unconfigured ladder, and quota refuses the
+# rebuild's first create, the refusal recorded on the marker; the next create
+# lands while that hold stands, so the rebuilt member comes up on the Failed
+# row with no re-arm and no clock. Its node then refuses it. A refused member
+# is terminal and holds its name, the recycle that would free it declines
+# past the source's elapsed deadline and withholds the build with it, and a
+# held name is no drop in the member count for the loss to count, so the
+# continuation neither replaces the member nor finishes the hand-over: the
+# pair stands with the source out of rotation and the replacement short, and
+# a corrective revision changes nothing, because past the Surge step the
+# cycle finishes only on its pin.
+scenario: gang-draindeadline-held-rebuild-member-refused
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-deadline
+intentional: >-
+  a rebuild created while quota held it is not re-armed, so a member its
+  node refuses on the Failed row holds its name past the elapsed deadline
+cells:
+  - instance/Failed/GangSurgeDrain/pod.deleted[target]/before
+  - instance/Failed/GangSurgeDrain/api.quotaDenied/before
+  - instance/Failed/GangSurgeDrain/pod.admissionRejected[OutOfResource]/before
+  - instance/Failed/GangSurgeDrain/pod.phaseTerminal[Failed]/before
+  - instance/Failed/GangSurgeDrain/spec.revision/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    containerName: ome-container
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both replacement members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 6
+    note: the replacement worker's readiness regresses while the source is still published, so the pair is no longer fully serving
+    events:
+      - pod.containersNotReady[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the deadline elapses with the replacement short, so the source is stamped Failed at its drain step and the marker Failed too, both operations kept
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 8
+    note: the short worker is lost, so the loss closes the attempt and is recorded on the source, nothing charged by an unconfigured ladder; quota refuses the rebuild's create, so the refusal is recorded on the marker and the create is retried
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+      - api.quotaDenied: {verb: create}
+  - tick: 9
+    note: quota admits the rebuild; created at the pinned revision while the hold stood on the marker, the member comes up on the Failed row with no retry counted, no wave charged and no clock
+  - tick: 10
+    note: the rebuilt worker binds and its node refuses it; the refused member is terminal and holds its name, and the recycle declines past the source's elapsed deadline and withholds the build, so nothing is deleted or created
+    events:
+      - pod.scheduled[target]: {pod: {index: 1, runner: worker}, message: node-1}
+      - pod.admissionRejected[OutOfResource]: {pod: {index: 1, runner: worker}, resource: nvidia.com/gpu, message: "Pod Node didn't have enough resource: nvidia.com/gpu"}
+  - tick: 11
+    note: a tick with nothing changed finds the refused member still holding its name; a held name is no drop in the member count, so no loss is counted and the continuation waits again
+  - tick: 12
+    note: a corrective revision arrives; past the Surge step the cycle finishes only on its pin, so the continuation reads the same refused member and the pair stays where it is
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 13
+    note: a further tick changes nothing; the pair has no exit of its own

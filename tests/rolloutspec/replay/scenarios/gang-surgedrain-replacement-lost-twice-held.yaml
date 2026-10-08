@@ -1,0 +1,88 @@
+# A gang surge hands over and its replacement gang is deleted from outside;
+# the attempt is closed and counted, and once the ladder's backoff is due
+# the gang is rebuilt under a fresh deadline. The rebuilt gang comes up, the
+# drained source is deleted, and the rebuilt gang is deleted as well before
+# the promote. With the ladder at its limit the second loss holds the pinned
+# revision: the pair is abandoned, the source is marked Failed with no
+# attempt and nothing is rebuilt until a corrected revision or a reset.
+scenario: gang-surgedrain-replacement-lost-twice-held
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-gang-replacement-lost
+  - T-failedgangsurgedrain-rearm
+intentional: >-
+  a replacement gang lost after the hand-over is rebuilt under the next
+  attempt, and the ladder's limit holds the pinned revision with the
+  Instance Failed and no attempt
+cells:
+  - instance/Update/SurgeDrain/pod.deleted[target]/before
+  - instance/Failed/GangSurgeDrain/pod.deleted[target]/before
+  - instance/Update/GangSurgeTarget/pod.deleted[target]/before
+  - instance/Failed/GangSurgeDrain/timer.retryAt/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 2, initialDelay: 1m, maxDelay: 30m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both replacement members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 6
+    note: the whole replacement gang is deleted from outside after the hand-over; the loss closes the attempt, so the source is stamped Failed with its surge kept and the pinned revision's ladder counts the attempt
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the ladder's backoff is due, so the replacement gang is rebuilt at the pinned revision and the source re-arms for its next attempt under a fresh deadline with the retry counted on the operation
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 8
+    note: both rebuilt members report Ready, so the continuation marks them serving and waits for the drained source to leave the routed Service
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 9
+    note: the source leader leaves the routed Service, so the drain has converged and the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: the source pods are gone and the rebuilt gang is deleted from outside before the promote; the ladder is at its limit, so the second loss holds the pinned revision, the pair is abandoned, the replacement index is released and the source is marked Failed with no attempt on its running revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 11
+    note: a tick with nothing changed rebuilds nothing; the held revision admits no attempt and the Instance stays Failed
+  - tick: 12
+    note: the ladder's clock passes with the revision still held, so nothing is rebuilt
+    events:
+      - clock.advance: 5m

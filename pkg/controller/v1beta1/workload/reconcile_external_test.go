@@ -1331,6 +1331,9 @@ type recoveryHarness struct {
 	// webhook: every pod create fails closed with the dispatcher's own
 	// error and nothing is created.
 	admissionDown bool
+	// shedCreates is how many pod creates the apiserver answers with a 429
+	// before it takes writes again; each refused create counts one.
+	shedCreates int
 	// statusWrites counts the InstanceStatus writes the passes committed
 	// through the one-row seam; a test zeroes it to measure a window.
 	statusWrites int
@@ -2275,6 +2278,10 @@ func (h *recoveryHarness) interceptCreate(ctx context.Context, cl client.WithWat
 	if pod, ok := obj.(*corev1.Pod); ok {
 		if h.admissionDown {
 			return webhookUnreachableCreateError()
+		}
+		if h.shedCreates > 0 {
+			h.shedCreates--
+			return apierrors.NewTooManyRequests("the apiserver shed the create", 10)
 		}
 		if pod.UID == "" {
 			pod.UID = uuid.NewUUID()
@@ -13894,5 +13901,299 @@ func TestDeadlineInsideTheSurgeDrainWindow_DoesNotFailTheSurge(t *testing.T) {
 	if !h.run(20, func() bool { return h.converged(h.revFixed.Name) }) {
 		h.dumpState("after the drain window")
 		t.Fatalf("the surge did not complete on %s after the deadline elapsed inside its drain window", h.revFixed.Name)
+	}
+}
+
+// After the hand-over of a gang surge, with the replacement in rotation and
+// the source out of it, the replacement is the Instance's only serving set.
+// The stories below pin what happens when that set dies there: it is
+// rebuilt under a fresh deadline, every rebuild counts on the pinned
+// revision's ladder, and the ladder's limit fails the Instance and holds.
+
+// gangReplacementLostReason is the failure a gang source records when its
+// replacement dies after the hand-over.
+const gangReplacementLostReason = "ReplacementLost"
+
+// gangSurgeHandedOver drives a gang Component through a push to the first
+// pass past the hand-over: the replacement gang is complete and in rotation
+// and the source has left the serving gate at the drain step. It returns
+// the harness and the replacement's index.
+func gangSurgeHandedOver(t *testing.T) (*recoveryHarness, int32) {
+	t.Helper()
+	h := newRecoveryHarness(t, true)
+	h.atomicStatus = true
+	h.routed = true
+	h.useRollingBudget(workloadtypes.UpdateStrategySurgeThenDrain)
+	h.driveToReadyOnV1()
+	h.lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 4 * time.Minute}
+	h.setTarget(h.revFixed, fixedImage)
+	handedOver := func() bool {
+		s := h.instance(0)
+		return s != nil && s.Operation != nil && s.Operation.SurgeIndex != nil &&
+			s.Operation.Step == workloadtypes.UpdateStepSurgeDrain
+	}
+	if !h.run(20, handedOver) {
+		h.dumpState("hand-over")
+		t.Fatalf("the gang surge never took the source out of rotation")
+	}
+	surgeIdx := *h.instance(0).Operation.SurgeIndex
+	if got := len(h.podsOf(surgeIdx)); got != 2 {
+		h.dumpState("replacement gang")
+		t.Fatalf("replacement gang: got %d pods, want the leader and the worker", got)
+	}
+	for _, pod := range h.podsOf(surgeIdx) {
+		if !podreadiness.IsServing(pod) {
+			t.Fatalf("replacement pod %s is not in rotation after the hand-over", pod.Name)
+		}
+	}
+	for _, pod := range h.podsOf(0) {
+		if podreadiness.IsServing(pod) {
+			t.Fatalf("source pod %s is still in rotation after the hand-over", pod.Name)
+		}
+	}
+	return h, surgeIdx
+}
+
+// requireAttemptClosedByLoss checks the pass after a loss at the drain
+// step: the source is Failed with its surge kept, the loss is its recorded
+// failure, the pinned revision's ladder counts the attempt, and nothing was
+// rebuilt under the attempt that died.
+func (h *recoveryHarness) requireAttemptClosedByLoss(surgeIdx int32, survivors int) {
+	h.t.Helper()
+	s := h.instance(0)
+	if s == nil || s.Phase != workloadtypes.InstancePhaseFailed || s.Operation == nil ||
+		s.Operation.SurgeIndex == nil || *s.Operation.SurgeIndex != surgeIdx ||
+		s.Operation.Step != workloadtypes.UpdateStepSurgeDrain {
+		h.dumpState("attempt not closed")
+		h.t.Fatalf("the loss did not close the attempt: source row %+v", s)
+	}
+	if s.LastFailure == nil || s.LastFailure.Reason != gangReplacementLostReason {
+		h.t.Fatalf("the loss is not the source's recorded failure: %+v", s.LastFailure)
+	}
+	b := h.findBlock(h.revFixed.Name)
+	if b == nil || b.State != workloadtypes.RetryBlockBackoff || b.AttemptsStarted != 1 {
+		h.dumpState("ladder")
+		h.t.Fatalf("the lost attempt was not counted on the pinned revision's ladder: %+v", b)
+	}
+	if got := len(h.podsOf(surgeIdx)); got != survivors {
+		h.dumpState("rebuilt under the dead attempt")
+		h.t.Fatalf("replacement pods after the loss: got %d, want %d (nothing is rebuilt under the attempt that died)", got, survivors)
+	}
+}
+
+// rearmedRebuild reports the source re-armed for its next attempt: Updating
+// at the drain step with the retry counted on the operation.
+func (h *recoveryHarness) rearmedRebuild(retry int32) func() bool {
+	return func() bool {
+		s := h.instance(0)
+		return s != nil && s.Phase == workloadtypes.InstancePhaseUpdating && s.Operation != nil &&
+			s.Operation.Step == workloadtypes.UpdateStepSurgeDrain && s.Operation.RetryCount == retry
+	}
+}
+
+// requireFreshWindow checks the re-armed attempt runs under a fresh
+// deadline, a full InstanceReadyTimeout from its new start and later than
+// the window of the attempt that died, as the ladder's attempt in progress.
+func (h *recoveryHarness) requireFreshWindow(before workloadtypes.InstanceOperation) {
+	h.t.Helper()
+	op := h.instance(0).Operation
+	if !op.StartedAt.After(before.StartedAt.Time) || !op.Deadline.After(before.Deadline.Time) {
+		h.t.Fatalf("the rebuild kept the dead attempt's window: started %v deadline %v, before started %v deadline %v",
+			op.StartedAt, op.Deadline, before.StartedAt, before.Deadline)
+	}
+	if want := op.StartedAt.Add(4 * time.Minute); !op.Deadline.Time.Equal(want) {
+		h.t.Fatalf("the rebuild's deadline is %v, want a full timeout from its start %v", op.Deadline.Time, want)
+	}
+	b := h.findBlock(h.revFixed.Name)
+	if b == nil || b.State != workloadtypes.RetryBlockRetryInProgress || b.AttemptsStarted != 1 {
+		h.t.Fatalf("the re-armed attempt is not the ladder's attempt in progress: %+v", b)
+	}
+}
+
+// The whole replacement gang is deleted after the hand-over, while the
+// source is out of rotation behind it. The loss closes the attempt: the
+// source is Failed with its surge kept and the pinned revision's ladder
+// counts the attempt. Once the ladder admits the next one, the gang is
+// rebuilt under a fresh deadline with the retry counted on the operation,
+// and the hand-over finishes on the pinned revision.
+//
+// Cells: instance/Update/SurgeDrain/pod.deleted[target]/before, instance/Failed/GangSurgeDrain/pod.deleted[target]/before, instance/Failed/GangSurgeDrain/timer.retryAt/before, instance/Update/GangSurgeTarget/pod.deleted[target]/before
+func TestGangSurgeAfterHandover_ReplacementLostIsRebuiltUnderAFreshDeadlineAndCounted(t *testing.T) {
+	h, surgeIdx := gangSurgeHandedOver(t)
+	before := *h.instance(0).Operation
+
+	h.losePods(surgeIdx)
+	h.step()
+	h.requireAttemptClosedByLoss(surgeIdx, 0)
+
+	if !h.run(10, h.rearmedRebuild(1)) {
+		h.dumpState("never re-armed")
+		t.Fatalf("the ladder's backoff elapsed and the replacement was not rebuilt")
+	}
+	h.requireFreshWindow(before)
+	if got := len(h.podsOf(surgeIdx)); got != 2 {
+		h.dumpState("rebuild")
+		t.Fatalf("rebuilt replacement: got %d pods, want the leader and the worker", got)
+	}
+	if !h.run(40, func() bool { return h.converged(h.revFixed.Name) }) {
+		h.dumpState("handoff never finished")
+		t.Fatalf("the rebuilt replacement was never promoted on the pinned revision")
+	}
+	if b := h.findBlock(h.revFixed.Name); b != nil {
+		t.Fatalf("the finished handoff left the ladder standing: %+v", *b)
+	}
+}
+
+// One member of the replacement gang is deleted after the hand-over. The
+// loss closes the attempt as a whole loss does and counts it; the surviving
+// member keeps serving; once the ladder admits the next attempt the member
+// is rebuilt under a fresh deadline, and the hand-over finishes on the
+// pinned revision.
+//
+// Cells: instance/Update/SurgeDrain/pod.deleted[target]/before, instance/Failed/GangSurgeDrain/pod.deleted[target]/before, instance/Update/GangSurgeTarget/pod.deleted[target]/before
+func TestGangSurgeAfterHandover_LostMemberIsRebuiltUnderAFreshDeadlineAndCounted(t *testing.T) {
+	h, surgeIdx := gangSurgeHandedOver(t)
+	before := *h.instance(0).Operation
+	leader := h.podOf(surgeIdx, "leader").UID
+
+	h.loseRunner(surgeIdx, "worker")
+	h.step()
+	h.requireAttemptClosedByLoss(surgeIdx, 1)
+	if pod := h.podOf(surgeIdx, "leader"); pod.UID != leader || !podreadiness.IsServing(pod) {
+		t.Fatalf("the surviving leader did not keep serving through the loss")
+	}
+
+	if !h.run(10, h.rearmedRebuild(1)) {
+		h.dumpState("never re-armed")
+		t.Fatalf("the ladder's backoff elapsed and the lost member was not rebuilt")
+	}
+	h.requireFreshWindow(before)
+	pods := h.podsOf(surgeIdx)
+	if len(pods) != 2 {
+		h.dumpState("rebuild")
+		t.Fatalf("rebuilt replacement: got %d pods, want the leader and the worker", len(pods))
+	}
+	for _, pod := range pods {
+		if pod.Labels[query.LabelRunner] == "leader" && pod.UID != leader {
+			t.Fatalf("the surviving leader was rebuilt along with the lost member")
+		}
+	}
+	if !h.run(40, func() bool { return h.converged(h.revFixed.Name) }) {
+		h.dumpState("handoff never finished")
+		t.Fatalf("the rebuilt replacement was never promoted on the pinned revision")
+	}
+}
+
+// The rebuilt replacement dies again, after it came up and the drained
+// source was deleted, with the ladder at its limit. The second loss holds
+// the pinned revision: the pair is abandoned, the Instance is marked Failed
+// with no attempt, and nothing is rebuilt until a corrected revision or an
+// operator reset.
+//
+// Cells: instance/Update/SurgeDrain/pod.deleted[target]/before, instance/Failed/GangSurgeDrain/pod.deleted[target]/before
+func TestGangSurgeAfterHandover_ReplacementLostAgainHoldsTheRevisionAndFailsTheInstance(t *testing.T) {
+	h, surgeIdx := gangSurgeHandedOver(t)
+	h.losePods(surgeIdx)
+	h.step()
+	h.requireAttemptClosedByLoss(surgeIdx, 0)
+
+	cameUpAgain := func() bool {
+		s := h.instance(0)
+		if s == nil || s.Phase != workloadtypes.InstancePhaseUpdating || s.Operation == nil ||
+			s.Operation.RetryCount != 1 || len(h.podsOf(0)) != 0 {
+			return false
+		}
+		rebuilt := h.podsOf(surgeIdx)
+		if len(rebuilt) != 2 {
+			return false
+		}
+		for _, pod := range rebuilt {
+			if !podreadiness.IsServing(pod) {
+				return false
+			}
+		}
+		return true
+	}
+	if !h.run(30, cameUpAgain) {
+		h.dumpState("rebuild never came up")
+		t.Fatalf("the rebuilt replacement never came up behind the deleted source")
+	}
+	h.losePods(surgeIdx)
+	if !h.run(10, func() bool { return h.heldOn(h.revFixed.Name) }) {
+		h.dumpState("ladder never held")
+		t.Fatalf("the second loss did not hold the pinned revision")
+	}
+	h.settle(6)
+	s := h.instance(0)
+	if s == nil || s.Phase != workloadtypes.InstancePhaseFailed || s.Operation != nil || s.RunningRevision != h.revV1.Name {
+		h.dumpState("not held at Failed")
+		t.Fatalf("the exhausted ladder did not mark the Instance Failed with its attempt released: %+v", s)
+	}
+	if h.instance(surgeIdx) != nil {
+		t.Fatalf("the replacement index was not released with the held surge")
+	}
+	if pods := h.livePods(); len(pods) != 0 {
+		h.dumpState("rebuilt after the hold")
+		t.Fatalf("%d pod(s) were rebuilt after the ladder held", len(pods))
+	}
+	if !h.heldOn(h.revFixed.Name) {
+		t.Fatalf("the hold on %s did not last", h.revFixed.Name)
+	}
+	if len(h.heldWarnings) != 1 || !strings.HasPrefix(h.heldWarnings[0], h.revFixed.Name) {
+		t.Fatalf("WarnRetryHeld: got %v, want exactly one warning for %s", h.heldWarnings, h.revFixed.Name)
+	}
+}
+
+// The whole replacement gang is deleted after the hand-over and the
+// apiserver sheds the rebuild's creates on two consecutive passes. Members
+// missing since the last published count are a rebuild still pending, not
+// a new loss: the ladder shows the one wave the loss counted, the source
+// stays as the loss left it, and the third pass creates the members and
+// re-arms the attempt under a fresh deadline.
+//
+// Cells: instance/Failed/GangSurgeDrain/api.throttled[TooManyRequests]/before, instance/Failed/GangSurgeDrain/pod.deleted[target]/before, instance/Failed/GangSurgeDrain/timer.retryAt/before
+func TestGangSurgeAfterHandover_ThrottledRebuildChargesNoFurtherWave(t *testing.T) {
+	h, surgeIdx := gangSurgeHandedOver(t)
+	before := *h.instance(0).Operation
+
+	h.losePods(surgeIdx)
+	h.step()
+	h.requireAttemptClosedByLoss(surgeIdx, 0)
+	closed := *h.instance(0)
+
+	h.shedCreates = 2
+	for pass := 1; pass <= 2; pass++ {
+		h.step()
+		if h.shedCreates != 2-pass {
+			t.Fatalf("pass %d: the apiserver shed %d create(s), want one per pass", pass, 2-pass-h.shedCreates+1)
+		}
+		s := h.instance(0)
+		if s.Phase != closed.Phase || s.Operation == nil || s.Operation.RetryCount != closed.Operation.RetryCount ||
+			!s.Operation.Deadline.Equal(&closed.Operation.Deadline) {
+			h.dumpState("source moved under the throttle")
+			t.Fatalf("pass %d: the source did not stay as the loss left it: %+v", pass, s)
+		}
+		if b := h.findBlock(h.revFixed.Name); b == nil || b.State != workloadtypes.RetryBlockBackoff || b.AttemptsStarted != 1 {
+			h.dumpState("ladder under the throttle")
+			t.Fatalf("pass %d: the throttled rebuild moved the ladder: %+v", pass, b)
+		}
+		if got := len(h.podsOf(surgeIdx)); got != 0 {
+			t.Fatalf("pass %d: %d replacement pod(s) exist behind a shed create", pass, got)
+		}
+	}
+
+	h.step()
+	if got := len(h.podsOf(surgeIdx)); got != 2 {
+		h.dumpState("rebuild after the throttle")
+		t.Fatalf("the pass after the throttle created %d pod(s), want the leader and the worker", got)
+	}
+	if !h.rearmedRebuild(1)() {
+		h.dumpState("not re-armed")
+		t.Fatalf("the rebuild did not re-arm the attempt once its members were created: %+v", h.instance(0))
+	}
+	h.requireFreshWindow(before)
+	if !h.run(40, func() bool { return h.converged(h.revFixed.Name) }) {
+		h.dumpState("handoff never finished")
+		t.Fatalf("the rebuilt replacement was never promoted on the pinned revision")
 	}
 }

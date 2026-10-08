@@ -5,16 +5,25 @@
 # reads the replacement as short and does not delete the source behind it;
 # it rebuilds the member once its name is free, and the hand-over finishes
 # when the rebuilt member comes up.
+# Once the member is gone the loss counts the failed attempt on the pinned
+# revision's ladder; when the backoff is due the member is rebuilt under the
+# same name, the source re-arms under a fresh deadline, and the hand-over
+# finishes when the rebuilt member comes up.
 scenario: gang-draindeadline-replacement-member-leaving-rebuilt
 arrows:
   - T-empty-gang-surge-target
   - T-gangtarget-ready
   - T-surgedrain-deadline
+  - T-failedgangsurgedrain-rearm
   - T-failedgangtarget-ready
   - T-failedgangsurgedrain-complete
+intentional: >-
+  a replacement member lost after the hand-over counts the failed attempt
+  on the pinned revision's ladder and is rebuilt under the next one
 cells:
   - instance/Failed/GangSurgeDrain/pod.terminating[target]/before
   - instance/Failed/GangSurgeDrain/pod.deleted[target]/before
+  - instance/Failed/GangSurgeDrain/timer.retryAt/before
 initial:
   spec:
     replicas: 1
@@ -28,6 +37,7 @@ initial:
   config:
     requeueOperation: 5s
     requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 1m, maxDelay: 30m, multiplier: 2}
 timeline:
   - tick: 1
     note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
@@ -67,10 +77,14 @@ timeline:
     events:
       - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
   - tick: 10
-    note: the terminating member is gone, so the continuation rebuilds it under the same name at the pinned revision; the pair is short a member until it comes up
+    note: the terminating member is gone; the loss counts the failed attempt on the pinned revision's ladder, the source stays Failed with its surge kept, and nothing is rebuilt under the attempt that died
     events:
       - pod.deleted[target]: {pod: {index: 1, runner: worker}}
   - tick: 11
+    note: the ladder's backoff is due, so the lost member is rebuilt under the same name at the pinned revision and the source re-arms for its next attempt under a fresh deadline with the retry counted on the operation
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 12
     note: the source pods are gone and the rebuilt member reports Ready, so the replacement is promoted Ready on the pinned revision and the source row is removed
     events:
       - pod.deleted[source]: {pod: {index: 0, runner: leader}}

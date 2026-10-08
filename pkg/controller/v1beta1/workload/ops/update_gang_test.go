@@ -145,7 +145,7 @@ func TestAbandonFailedGangSurge_DeletesStalePodsFirst(t *testing.T) {
 	blockCalls := recordRetryBlockCalls(&input, nil)
 	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 
-	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 2, src.RunningRevision, "gang-a-engine-badrev", "pod stuck", workload.CauseWorkload)
+	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 2, src.RunningRevision, "gang-a-engine-badrev", "pod stuck", workload.CauseWorkload, gangSurgeEnd{})
 	if err != nil {
 		t.Fatalf("abandonFailedGangSurge: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone(t *testing.T) {
 	blockCalls := recordRetryBlockCalls(&input, nil)
 	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 
-	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, surgeIdx, src.RunningRevision, src.TargetRevision, "pod stuck", workload.CauseWorkload)
+	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, surgeIdx, src.RunningRevision, src.TargetRevision, "pod stuck", workload.CauseWorkload, gangSurgeEnd{})
 	if err != nil {
 		t.Fatalf("abandonFailedGangSurge: %v", err)
 	}
@@ -296,7 +296,7 @@ func TestAbandonFailedGangSurge_NeverPromotedSourceEndsFailed(t *testing.T) {
 		blockCalls := recordRetryBlockCalls(&input, nil)
 		plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 		if _, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, surgeIndex,
-			src.RunningRevision, "", "", workload.CauseUnattributed); err != nil {
+			src.RunningRevision, "", "", workload.CauseUnattributed, gangSurgeEnd{}); err != nil {
 			t.Fatalf("abandonFailedGangSurge: %v", err)
 		}
 		if len(removed) != 1 || removed[0] != surgeIndex {
@@ -352,7 +352,7 @@ func TestAbandonFailedGangSurge_NeverPromotedSourceEndsFailed(t *testing.T) {
 		}
 		plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 		if _, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(legacyNewFakeClient(t)), input, plan,
-			source.Index, surgeIndex, source.RunningRevision, "", "", workload.CauseUnattributed); err != nil {
+			source.Index, surgeIndex, source.RunningRevision, "", "", workload.CauseUnattributed, gangSurgeEnd{}); err != nil {
 			t.Fatalf("abandonFailedGangSurge: %v", err)
 		}
 		if _, found := store.statuses[surgeIndex]; found {
@@ -397,7 +397,7 @@ func TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy(t *testing.T) {
 	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 
 	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, surgeIdx,
-		src.RunningRevision, src.Operation.TargetRevision, instanceFailureReason(src, "gang surge abandoned"), instanceFailureCause(src))
+		src.RunningRevision, src.Operation.TargetRevision, instanceFailureReason(src, "gang surge abandoned"), instanceFailureCause(src), gangSurgeEnd{})
 	if err != nil {
 		t.Fatalf("abandonFailedGangSurge: %v", err)
 	}
@@ -471,7 +471,7 @@ func gangAbandonWaveUnderPolicy(t *testing.T, t0 time.Time, failure *workload.In
 
 	if _, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, surgeIdx,
 		src.RunningRevision, src.Operation.TargetRevision,
-		instanceFailureReason(src, "gang surge abandoned"), instanceFailureCause(src)); err != nil {
+		instanceFailureReason(src, "gang surge abandoned"), instanceFailureCause(src), gangSurgeEnd{}); err != nil {
 		t.Fatalf("abandonFailedGangSurge: %v", err)
 	}
 	if src.Operation != nil || src.Phase != workload.InstancePhaseReady {
@@ -757,7 +757,7 @@ func TestAbandonFailedGangSurge_EventReasons(t *testing.T) {
 		plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 
 		if _, err := abandonFailedGangSurge(context.Background(), deps, input, plan, 0, surgeIdx,
-			src.RunningRevision, failedTargetRev, "pod stuck", workload.CauseWorkload); err != nil {
+			src.RunningRevision, failedTargetRev, "pod stuck", workload.CauseWorkload, gangSurgeEnd{}); err != nil {
 			t.Fatalf("abandonFailedGangSurge: %v", err)
 		}
 		events := drainRecorderEvents(rec)
@@ -1885,7 +1885,7 @@ func TestAbandonFailedGangSurge_PersistsCleanupMarkerAcrossRemovalFailure(t *tes
 
 	done, err := abandonFailedGangSurge(
 		context.Background(), legacyTestDeps(c), input, plan, source.Index, surgeIndex,
-		source.RunningRevision, targetRevision, "pod stuck", workload.CauseWorkload,
+		source.RunningRevision, targetRevision, "pod stuck", workload.CauseWorkload, gangSurgeEnd{},
 	)
 	if !errors.Is(err, statusFailure) || done {
 		t.Fatalf("first pass: done=%v err=%v", done, err)
@@ -1913,7 +1913,7 @@ func TestAbandonFailedGangSurge_PersistsCleanupMarkerAcrossRemovalFailure(t *tes
 	}
 	done, err = abandonFailedGangSurge(
 		context.Background(), legacyTestDeps(c), input, plan, source.Index, surgeIndex,
-		source.RunningRevision, targetRevision, "pod stuck", workload.CauseWorkload,
+		source.RunningRevision, targetRevision, "pod stuck", workload.CauseWorkload, gangSurgeEnd{},
 	)
 	if err != nil || done {
 		t.Fatalf("retry pass: done=%v err=%v", done, err)
@@ -1967,7 +1967,7 @@ func TestAbandonFailedGangSurge_AbandonGraceBoundsUnservedMembers(t *testing.T) 
 	input := gangInputWithRemove(isvc, c)
 	input.AbandonedReplacementGrace = 7 * time.Second
 
-	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 1, v1Name, v2Name, "", workload.CauseUnattributed)
+	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 1, v1Name, v2Name, "", workload.CauseUnattributed, gangSurgeEnd{})
 	if err != nil || done {
 		t.Fatalf("abandon pass: done=%v err=%v", done, err)
 	}
@@ -1982,7 +1982,7 @@ func TestAbandonFailedGangSurge_AbandonGraceBoundsUnservedMembers(t *testing.T) 
 	if podreadiness.IsServing(fresh) {
 		t.Fatalf("the leader must leave rotation before it is deleted")
 	}
-	done, err = abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 1, v1Name, v2Name, "", workload.CauseUnattributed)
+	done, err = abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 1, v1Name, v2Name, "", workload.CauseUnattributed, gangSurgeEnd{})
 	if err != nil || done {
 		t.Fatalf("delete pass: done=%v err=%v", done, err)
 	}
@@ -2093,7 +2093,7 @@ func TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource(t *testin
 	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
 	done, err := abandonFailedGangSurge(
 		context.Background(), legacyTestDeps(legacyNewFakeClient(t)), input, plan,
-		source.Index, surgeIndex, runningRevision, "", "", workload.CauseUnattributed,
+		source.Index, surgeIndex, runningRevision, "", "", workload.CauseUnattributed, gangSurgeEnd{},
 	)
 	if err != nil || done {
 		t.Fatalf("abandon: done=%v err=%v", done, err)
@@ -2360,7 +2360,7 @@ func atomicAbandonWave(t *testing.T, store *terminalMutationStore, t0 time.Time,
 
 	done, err := abandonFailedGangSurge(
 		context.Background(), legacyTestDeps(legacyNewFakeClient(t)), input, plan, source.Index, surgeIndex,
-		runningRevision, targetRevision, instanceFailureReason(&source, "gang surge abandoned"), instanceFailureCause(&source),
+		runningRevision, targetRevision, instanceFailureReason(&source, "gang surge abandoned"), instanceFailureCause(&source), gangSurgeEnd{},
 	)
 	if err != nil || done {
 		t.Fatalf("abandon: done=%v err=%v", done, err)

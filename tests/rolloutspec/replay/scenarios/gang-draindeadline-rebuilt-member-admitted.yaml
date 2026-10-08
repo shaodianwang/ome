@@ -1,12 +1,13 @@
 # A gang source fails on its deadline at the drain step and then loses a
-# replacement member. The continuation rebuilds the member under the same
-# attempt: quota refuses the first create and the refusal is recorded on the
-# marker, the next create lands, the rebuilt member is held behind a
-# scheduling gate and then admitted while no clock runs on a Failed row and
-# a failed PodGroup reading is skipped on a pair the finalization owns, and
-# once the member is Ready the source's pods are deleted behind their
-# endpoints, a rejected delete costing one pass, and the hand-over finishes
-# on the pinned revision.
+# replacement member. The loss closes the attempt, recorded on the source
+# with nothing charged by an unconfigured ladder, and quota refuses the
+# rebuild's first create, the refusal recorded on the marker. The next create
+# lands while that hold stands, so the rebuilt member comes up on the Failed
+# row with no retry counted and no clock: it is held behind a scheduling gate
+# and then admitted while a failed PodGroup reading is skipped on a pair the
+# finalization owns, and once the member is Ready the source's pods are
+# deleted behind their endpoints, a rejected delete costing one pass, and the
+# hand-over finishes on the pinned revision.
 scenario: gang-draindeadline-rebuilt-member-admitted
 arrows:
   - T-empty-gang-surge-target
@@ -14,6 +15,10 @@ arrows:
   - T-surgedrain-deadline
   - T-failedgangtarget-ready
   - T-failedgangsurgedrain-complete
+intentional: >-
+  a replacement member lost after the hand-over closes the attempt; a
+  rebuild created while quota held it comes up on the Failed row without a
+  re-arm
 cells:
   - instance/Failed/GangSurgeDrain/pod.deleted[target]/before
   - instance/Failed/GangSurgeDrain/api.quotaDenied/before
@@ -66,12 +71,12 @@ timeline:
     events:
       - timer.operationDeadline: {slack: 1s}
   - tick: 8
-    note: the short worker is lost and quota refuses its rebuild; the continuation rebuilds a lost member under the same attempt, so the refusal is recorded on the marker and the create is retried
+    note: the short worker is lost, so the loss closes the attempt and is recorded on the source, nothing charged by an unconfigured ladder; quota refuses the rebuild's create, so the refusal is recorded on the marker and the create is retried
     events:
       - pod.deleted[target]: {pod: {index: 1, runner: worker}}
       - api.quotaDenied: {verb: create}
   - tick: 9
-    note: quota admits the rebuild, so the member is created at the pinned revision with no retry counted and no wave charged
+    note: quota admits the rebuild; created at the pinned revision while the hold stood on the marker, the member comes up on the Failed row with no retry counted, no wave charged and no clock
   - tick: 10
     note: the rebuilt worker is held behind a scheduling gate as the elapsed deadline is read again and the replacement group reports a failed phase; a Failed row is skipped by the escalation pass, the finalization owns the pair's groups so the reading is not judged, and the continuation waits
     events:

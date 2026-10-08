@@ -1,0 +1,85 @@
+# A gang surge hands over, the whole replacement gang is deleted from
+# outside, the loss is counted, and when the ladder's backoff is due the
+# apiserver sheds the rebuild's create. Members missing since the last
+# published count are a rebuild still pending, not a new loss: nothing is
+# charged while the create is refused, the source stays as the loss left it,
+# and the pass the apiserver takes writes again creates the members and
+# re-arms the attempt under a fresh deadline; the hand-over finishes on the
+# pinned revision.
+scenario: gang-surgedrain-replacement-rebuild-throttled
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-ready
+  - T-surgedrain-gang-replacement-lost
+  - T-failedgangsurgedrain-rearm
+  - T-surgedrain-gang-complete
+intentional: >-
+  a shed create of the rebuild charges no further wave: members missing
+  since the last published count are a rebuild still pending
+cells:
+  - instance/Update/SurgeDrain/pod.deleted[target]/before
+  - instance/Failed/GangSurgeDrain/pod.deleted[target]/before
+  - instance/Failed/GangSurgeDrain/timer.retryAt/before
+  - instance/Failed/GangSurgeDrain/api.throttled[TooManyRequests]/before
+  - instance/Failed/GangSurgeDrain/ctrl.resync/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 1m, maxDelay: 30m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: both replacement members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, runner: leader}}
+  - tick: 6
+    note: the whole replacement gang is deleted from outside after the hand-over; the drop against the published count is a loss, so the source is stamped Failed with its surge kept and the pinned revision's ladder counts the attempt
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}
+  - tick: 7
+    note: the ladder's backoff is due and the apiserver sheds the rebuild's first create; the members missing since the last published count are a rebuild still pending, so nothing is charged, the source stays as the loss left it and the pass waits out the server's delay
+    events:
+      - timer.retryAt: {slack: 1s}
+      - api.throttled[TooManyRequests]: {verb: create, retryAfter: 10s}
+  - tick: 8
+    note: the apiserver takes writes again, so both members are created at the pinned revision and the source re-arms for its next attempt under a fresh deadline with the retry counted on the operation
+  - tick: 9
+    note: both rebuilt members report Ready, so the continuation marks them serving and waits for the drained source to leave the routed Service
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 10
+    note: the source leader leaves the routed Service, so the drain has converged and the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 11
+    note: the source pods are gone, so the rebuilt replacement is promoted Ready on the pinned revision, the ladder is pruned and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

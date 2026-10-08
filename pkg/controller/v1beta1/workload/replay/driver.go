@@ -118,6 +118,10 @@ type driver struct {
 	terminating map[string]*podTeardown
 	// migrations is the owner's persisted status.migrations list.
 	migrations []types.MigrationRecord
+	// published is the pod count per row the status publication wrote from
+	// the previous pass's observation; the engine reads it as PodCount at
+	// the start of the next pass.
+	published map[int32]int32
 	// migrationRequests counts the requests the scenario has made, so an
 	// unnamed one gets a stable identity.
 	migrationRequests int
@@ -867,10 +871,14 @@ func (d *driver) runTick(ctx context.Context, tick Tick) error {
 		target = pinned
 	}
 
+	rows, publishing, err := d.publishedRows(ctx)
+	if err != nil {
+		return err
+	}
 	observed := types.WorkloadObservedState{
 		CurrentRevision:  d.currentRevision,
 		UpdateRevision:   specTarget.Name,
-		InstanceStatuses: d.store.Rows(),
+		InstanceStatuses: rows,
 		RetryBlocks:      d.store.RetryBlocks(),
 		Migrations:       append([]types.MigrationRecord(nil), d.migrations...),
 	}
@@ -902,10 +910,13 @@ func (d *driver) runTick(ctx context.Context, tick Tick) error {
 		if err := d.reconcileHeldDeadlines(ctx, input, true, 0); err != nil {
 			return err
 		}
-		input.ObservedState.InstanceStatuses = d.store.Rows()
+		input.ObservedState.InstanceStatuses = d.overlayPublished(d.store.Rows())
 	}
 	result, rerr := workload.Reconcile(ctx, deps, input, plan, target)
 	d.trace.emit("pass result=%s", renderResult(result, rerr))
+	// The status publication that follows the pass writes this pass's pod
+	// counts, which the next pass reads.
+	d.published = publishing
 	// The status-aggregate pass runs after the dispatcher on every
 	// reconcile: it parks the deadline of an Instance held by admission or
 	// by an external wait, and rearms one that has been released.
@@ -1024,6 +1035,32 @@ func (d *driver) podsByInstance(ctx context.Context) (map[int32][]*corev1.Pod, e
 		byIndex[index] = append(byIndex[index], pod)
 	}
 	return byIndex, nil
+}
+
+// publishedRows is the engine's row observation for this pass: the store's
+// rows carrying the pod count the status publication wrote from the
+// previous pass's observation, as the adapter's rollup hands it to the next
+// reconcile. It also returns this pass's counts, which the publication
+// after the pass writes.
+func (d *driver) publishedRows(ctx context.Context) ([]types.InstanceStatus, map[int32]int32, error) {
+	byIndex, err := d.podsByInstance(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	publishing := make(map[int32]int32, len(byIndex))
+	for index, pods := range byIndex {
+		publishing[index] = int32(len(pods))
+	}
+	return d.overlayPublished(d.store.Rows()), publishing, nil
+}
+
+// overlayPublished writes the published pod counts onto a row observation;
+// the store's rows carry none, so nothing is rendered for them.
+func (d *driver) overlayPublished(rows []types.InstanceStatus) []types.InstanceStatus {
+	for i := range rows {
+		rows[i].PodCount = d.published[rows[i].Index]
+	}
+	return rows
 }
 
 // retryPolicyOf converts the scenario's retry ladder to the engine's

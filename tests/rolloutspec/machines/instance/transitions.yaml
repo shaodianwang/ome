@@ -661,6 +661,14 @@ transitions:
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
     lane: adapter
     why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+  - id: T-surgedrain-gang-replacement-lost
+    from: Update/SurgeDrain
+    event: pod.deleted
+    variant: target
+    guard: a gang source past the hand-over whose replacement gang lost members since the pod count last published, with neither row of the pair held by an external wait
+    to: Failed
+    effects: [the attempt closed, Phase Failed with the surge kept and the loss on LastFailure; the loss counted once on the pinned revision's ladder; a ladder that holds at this wave ends the pair in the same pass, the marker removed and the source left Failed with no attempt]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
 
   # --- Update/GangSurgeTarget --------------------------------------------
   - id: T-gangtarget-ready
@@ -1532,6 +1540,21 @@ transitions:
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
     lane: adapter
     why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
+  - id: T-failedgangsurgedrain-rearm
+    from: Failed/GangSurgeDrain
+    event: timer.retryAt
+    guard: the replacement gang is short of a member and the pinned revision's ladder admits the next attempt, its backoff due
+    to: Update/SurgeDrain
+    effects: [the missing members created at the pinned revision and, once they are, Phase Updating at the drain step, the retry counted on the operation, a fresh deadline from now and the ladder's block made the attempt in progress; members missing with no drop against the published count are the same rebuild, created and charged nothing]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-failedgangsurgedrain-held
+    from: Failed/GangSurgeDrain
+    event: pod.deleted
+    variant: target
+    guard: the replacement gang is short of a member and the pinned revision's ladder holds, at this loss or before it
+    to: Failed
+    effects: [the surviving members unrouted and deleted, the marker claimed for cleanup and removed, the source left Failed with no operation and the hold on LastFailure, on the revision it ran]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
 
   # --- Failed/GangSurgeTarget (planned) ----------------------------------
   - id: T-failedgangtarget-ready

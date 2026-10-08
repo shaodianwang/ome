@@ -4,7 +4,9 @@
 # plan's live Runner list on every pass: the replacement's PodGroup is
 # widened and the missing member is created at the pinned revision, and
 # the drain's delete of the source and the hand-over wait for the whole
-# widened replacement to be runtime-ready.
+# widened replacement to be runtime-ready. An added name is no loss against
+# the published count, so nothing is charged; the Failed source re-arms
+# under a fresh deadline once the member is created.
 scenario: gang-draindeadline-width-grow-widens-the-replacement
 arrows:
   - T-empty-gang-surge-target
@@ -12,6 +14,10 @@ arrows:
   - T-surgedrain-deadline
   - T-failedgangtarget-ready
   - T-failedgangsurgedrain-complete
+intentional: >-
+  a member the width adds past the hand-over is no loss against the
+  published count; the Failed source re-arms under a fresh deadline once
+  the member is created, and nothing is charged
 cells:
   - instance/Failed/GangSurgeDrain/spec.gangWidth[grow]/before
 initial:
@@ -57,7 +63,7 @@ timeline:
     events:
       - timer.operationDeadline: {slack: 1s}
   - tick: 8
-    note: the width grows to two workers; the edit mints no revision, and the continuation's build reads the live Runner list, so the replacement's PodGroup is widened and the missing member is created at the pinned revision
+    note: the width grows to two workers; the edit mints no revision, and the continuation's build reads the live Runner list, so the replacement's PodGroup is widened and the missing member is created at the pinned revision; the added name is no loss against the published count, so nothing is charged, and the Failed source re-arms under a fresh deadline with the retry counted
     events:
       - spec.gangWidth[grow]: {to: 2}
   - tick: 9

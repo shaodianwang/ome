@@ -2921,11 +2921,14 @@ func TestGangSurge_ReplacementPodsLostAroundThePromote(t *testing.T) {
 			PodSpec:       legacyTargetSpecImage("example.com/app:v2"),
 			WorkerPodSpec: legacyTargetSpecImage("example.com/app:v2"),
 		}
+		// The marker carries the count the status publication wrote from
+		// the previous pass, when the whole replacement stood.
 		in.ObservedState.InstanceStatuses = []workload.InstanceStatus{*src, {
 			Index:          surgeIdx,
 			Incarnation:    1,
 			Phase:          workload.InstancePhaseCreating,
 			TargetRevision: targetRev,
+			PodCount:       2,
 			Operation: &workload.InstanceOperation{
 				Type:           workload.InstanceOperationUpdate,
 				Step:           workload.UpdateStepGangSurgeTarget,
@@ -2952,8 +2955,13 @@ func TestGangSurge_ReplacementPodsLostAroundThePromote(t *testing.T) {
 		if src.Operation == nil || src.Operation.Step != workload.UpdateStepSurgeDrain {
 			t.Errorf("source Operation: got %+v want the drain still open at %s", src.Operation, workload.UpdateStepSurgeDrain)
 		}
-		if src.Phase != workload.InstancePhaseUpdating {
-			t.Errorf("source Phase: got %q want Updating", src.Phase)
+		// The loss past the hand-over closes the attempt: the row keeps its
+		// surge and reads Failed with the loss recorded.
+		if src.Phase != workload.InstancePhaseFailed {
+			t.Errorf("source Phase: got %q want Failed", src.Phase)
+		}
+		if src.LastFailure == nil || src.LastFailure.Reason != ReplacementLostReason {
+			t.Errorf("source LastFailure: got %+v want the lost replacement recorded", src.LastFailure)
 		}
 	})
 

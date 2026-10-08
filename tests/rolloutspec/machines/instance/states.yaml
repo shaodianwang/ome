@@ -405,7 +405,7 @@ states:
     applies: {strategies: [SurgeThenDrain], shape: [gang]}
     planned: true
     decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
-    note: a gang-surge source failed after its replacement cleared the promote bar and the drain claim landed - the deadline elapsed or a pod wedged while the source left rotation. The engine resolves this shape to Failed. The abandon path is reachable only from the Surge step, so the continuation finishes the handoff instead - source drained and deleted, replacement promoted on the pinned revision, source row removed - while a replacement that dies first leaves the row with no exit of its own
+    note: a gang-surge source failed after its replacement cleared the promote bar and the drain claim landed - the deadline elapsed or a pod wedged while the source left rotation. The engine resolves this shape to Failed. The abandon path is reachable only from the Surge step, so the continuation finishes the handoff instead - source drained and deleted, replacement promoted on the pinned revision, source row removed - while a replacement that dies first closes the attempt - counted on the pinned revision's ladder, rebuilt under the next attempt once the ladder admits it, or held with the source Failed and no attempt
     not_applicable:
       timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
       timer.migrationDeadline: no operation pins this index to a migration record
