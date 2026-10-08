@@ -848,7 +848,6 @@ func TestInferenceReplicaFetchInventory(t *testing.T) {
 
 	// Placement discovers identities before fetching bounded decoded rows.
 	approve("pkg/controller/v1beta1/placement/planned_observation.go", "Reconciler.observePlannedHome", "List", 1, passThroughSpecMetadata+" (inventory identities; each object is fetched through GetDecoded before resource accounting)")
-	approve("pkg/controller/v1beta1/placement/planned_observation.go", "Reconciler.observePlannedHome", "Get", 1, passThroughSpecMetadata+" (resource-version fence after Pod observation)")
 
 	// Generated client-go informer: a raw list/watch cache that consumes no
 	// rows; row-consuming code reads through the decoded accessor, never

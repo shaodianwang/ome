@@ -899,3 +899,70 @@ func TestSplitObservationWithoutPublication(t *testing.T) {
 		})
 	}
 }
+
+// TestSplitObservationOfBusyMembers observes members whose service and every
+// component are rewritten between any two reads of them. Each home is observed
+// from its fresh reads and acknowledges the accepted plan.
+func TestSplitObservationOfBusyMembers(t *testing.T) {
+	f := observationFixture(t)
+	container := corev1.Container{Name: "ome-container", Image: "img"}
+	f.source.Spec.Decoder = &v1beta1.DecoderSpec{PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{container}}}
+	f.source.Spec.Router = &v1beta1.RouterSpec{PodSpec: v1beta1.PodSpec{Containers: []corev1.Container{container}}}
+	members := []string{"member-a", "member-b", "member-c"}
+	f.source.Status.Placement.Candidates = nil
+	for _, name := range members {
+		f.source.Status.Placement.Candidates = append(f.source.Status.Placement.Candidates, v1beta1.CandidatePlacement{
+			Cluster: name, Allocation: &v1beta1.CandidateAllocationStatus{ClusterUID: types.UID(name + "-uid"), CurrentReplicas: 1, DesiredReplicas: 1},
+		})
+	}
+	busy := func(obj client.Object) bool {
+		switch obj.(type) {
+		case *v1beta1.InferenceReplica, *v1beta1.InferenceService:
+			return true
+		}
+		return false
+	}
+	scheme := testScheme(t)
+	connections := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{}}
+	controlPlane := []client.Object{f.source}
+	for i, name := range members {
+		policy := executionPolicy(f.source, f.source.Status.Placement.Candidates[i].Allocation)
+		raw, err := protocol.Encode(policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		member := DeriveISVC(f.source, "", "")
+		member.UID, member.Generation = types.UID(name+"-service"), 3
+		member.Status.URL = &apis.URL{Scheme: "https", Host: name + ".example.com"}
+		member.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{Status: corev1.ConditionTrue})
+		member.Annotations[constants.PlacementExecution] = raw
+		objects := []client.Object{member}
+		for _, component := range []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent, v1beta1.RouterComponent} {
+			ir := f.resources.ir.DeepCopy()
+			ir.Name, ir.UID, ir.Spec.Component = fmt.Sprintf("service-%s", component), types.UID(fmt.Sprintf("%s-%s", name, component)), component
+			ir.Spec.PlacementExecution = policy.DeepCopy()
+			ir.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(member, v1beta1.SchemeGroupVersion.WithKind("InferenceService"))}
+			pod := f.resources.pods[0].DeepCopy()
+			pod.Name, pod.UID = fmt.Sprintf("%s-0", component), types.UID(fmt.Sprintf("%s-%s-pod", name, component))
+			pod.OwnerReferences[0].Name, pod.OwnerReferences[0].UID = ir.Name, ir.UID
+			objects = append(objects, ir, pod)
+		}
+		worker := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithInterceptorFuncs(busyReads(0, busy)).Build()
+		connections.m[name] = workloadcluster.NewNeverCachingClient(worker)
+		controlPlane = append(controlPlane, readyWC(name, nil))
+	}
+	r, _ := newPlacer(scheme, connections, controlPlane...)
+	observations := r.observeSplitMembers(t.Context(), f.source, members)
+	for _, name := range members {
+		type home struct {
+			Known, ObservationKnown bool
+			Applied                 string
+			Occupied, Ready         int32
+		}
+		observed := observations[name]
+		got := home{observed.Home.Known, observed.Candidate.ObservationKnown, observed.Candidate.AppliedPlanID, observed.Home.Occupied, observed.Candidate.ReadyReplicas}
+		if diff := cmp.Diff(home{Known: true, ObservationKnown: true, Applied: "plan-a", Occupied: 1, Ready: 1}, got); diff != "" {
+			t.Errorf("%s (-want +got):\n%s", name, diff)
+		}
+	}
+}

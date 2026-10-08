@@ -66,23 +66,7 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 	if err := cl.List(ctx, irs, client.InNamespace(source.Namespace), selector); err != nil {
 		return out, err
 	}
-	pods := &corev1.PodList{}
-	if err := cl.List(ctx, pods, client.InNamespace(source.Namespace), selector); err != nil {
-		return out, err
-	}
-	byOwner := map[types.UID][]corev1.Pod{}
-	for _, pod := range pods.Items {
-		owner := metav1.GetControllerOf(&pod)
-		if owner == nil {
-			return out, fmt.Errorf("member pod %q has no component owner", pod.Name)
-		}
-		byOwner[owner.UID] = append(byOwner[owner.UID], pod)
-	}
 	policy := executionPolicy(source, previous.Allocation)
-	statuses := map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus{}
-	counts := map[v1beta1.ComponentType]memberResourceCount{}
-	idleComponents := map[v1beta1.ComponentType]bool{}
-	zeroRequests := map[v1beta1.ComponentType]bool{}
 	applied := memberExists && member.DeletionTimestamp.IsZero()
 	if memberExists {
 		memberPolicy, err := protocol.FromDerived(member)
@@ -91,14 +75,15 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 		}
 		applied = applied && equality.Semantic.DeepEqual(memberPolicy, policy)
 	}
+	// The list only names the components to read. Each component is read once,
+	// and that snapshot carries its ownership, policy, rows and reservations.
+	reads := r.instanceStatusReader(cl)
+	snapshots := make([]*v1beta1.InferenceReplica, 0, len(irs.Items))
+	statuses := map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus{}
 	for i := range irs.Items {
-		listed := &irs.Items[i]
 		ir := &v1beta1.InferenceReplica{}
-		if _, err := irstatus.GetDecoded(ctx, r.instanceStatusReader(cl), client.ObjectKeyFromObject(listed), ir); err != nil {
+		if _, err := irstatus.GetDecoded(ctx, reads, client.ObjectKeyFromObject(&irs.Items[i]), ir); err != nil {
 			return out, err
-		}
-		if ir.UID != listed.UID || ir.ResourceVersion != listed.ResourceVersion {
-			return out, fmt.Errorf("component %q changed during inventory discovery", ir.Name)
 		}
 		owner := metav1.GetControllerOf(ir)
 		if owner == nil || owner.APIVersion != v1beta1.SchemeGroupVersion.String() || owner.Kind != "InferenceService" || owner.Name != source.Name || owner.UID == "" || ir.ParentName() != source.Name {
@@ -119,6 +104,28 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 		if ir.Spec.Component != v1beta1.EngineComponent && ir.Spec.Component != v1beta1.DecoderComponent && ir.Spec.Component != v1beta1.RouterComponent {
 			return out, fmt.Errorf("component %q has an unsupported role", ir.Name)
 		}
+		statuses[ir.Spec.Component] = &ir.Status
+		snapshots = append(snapshots, ir)
+	}
+	// Pods are listed after every component snapshot. A Pod created since a
+	// snapshot is charged to its owner, and a reservation whose Pod is not
+	// listed stays charged through the snapshot, so occupancy is never lost.
+	pods := &corev1.PodList{}
+	if err := cl.List(ctx, pods, client.InNamespace(source.Namespace), selector); err != nil {
+		return out, err
+	}
+	byOwner := map[types.UID][]corev1.Pod{}
+	for _, pod := range pods.Items {
+		owner := metav1.GetControllerOf(&pod)
+		if owner == nil {
+			return out, fmt.Errorf("member pod %q has no component owner", pod.Name)
+		}
+		byOwner[owner.UID] = append(byOwner[owner.UID], pod)
+	}
+	counts := map[v1beta1.ComponentType]memberResourceCount{}
+	idleComponents := map[v1beta1.ComponentType]bool{}
+	zeroRequests := map[v1beta1.ComponentType]bool{}
+	for _, ir := range snapshots {
 		gangSizes, err := memberGangSizes(ctx, cl, ir, byOwner[ir.UID])
 		if err != nil {
 			return out, err
@@ -133,7 +140,7 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 			return out, err
 		}
 		delete(byOwner, ir.UID)
-		statuses[ir.Spec.Component], counts[ir.Spec.Component] = &ir.Status, count
+		counts[ir.Spec.Component] = count
 		if ir.Spec.Replicas == nil || *ir.Spec.Replicas < 0 {
 			return out, fmt.Errorf("component %q has unresolved desired replicas", ir.Name)
 		}
@@ -164,27 +171,11 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 		if ir.Spec.Component != v1beta1.RouterComponent {
 			applied = applied && ir.Spec.Replicas != nil && *ir.Spec.Replicas >= previous.Allocation.CurrentReplicas
 		}
-		// A stable IR version fences both the decoded reservations and the Pod
-		// cohort. Creates already authorized by that version remain charged.
-		live := &v1beta1.InferenceReplica{}
-		if err := cl.Get(ctx, client.ObjectKeyFromObject(ir), live); err != nil {
-			return out, err
-		}
-		if ir.UID == "" || ir.ResourceVersion == "" || live.UID != ir.UID || live.ResourceVersion != ir.ResourceVersion {
-			return out, fmt.Errorf("component %q changed during resource observation", ir.Name)
-		}
 	}
 	if len(byOwner) > 0 {
 		return out, fmt.Errorf("member pods remain without identified live components")
 	}
 	if memberExists {
-		live := &v1beta1.InferenceService{}
-		if err := cl.Get(ctx, client.ObjectKeyFromObject(member), live); err != nil {
-			return out, err
-		}
-		if live.UID != member.UID || live.ResourceVersion != member.ResourceVersion {
-			return out, fmt.Errorf("member changed during resource observation")
-		}
 		out.Member = member
 	}
 	scaled := make([]v1beta1.ComponentType, 0, len(components))
