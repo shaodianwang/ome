@@ -1025,6 +1025,10 @@ spec:
                         type: string
                     type: object
                 type: object
+              ttlSecondsAfterCreation:
+                format: int64
+                minimum: 1
+                type: integer
             type: object
             x-kubernetes-validations:
             - message: ClusterAffinity placement policy cannot be removed; drain and

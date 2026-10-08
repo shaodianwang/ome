@@ -66,6 +66,12 @@ pub struct InferenceServiceSpec {
     pub scaling_policy: Option<InferenceServiceScalingPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic: Option<InferenceServiceTraffic>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "ttlSecondsAfterCreation"
+    )]
+    pub ttl_seconds_after_creation: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

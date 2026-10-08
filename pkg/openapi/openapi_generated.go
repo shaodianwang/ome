@@ -6853,6 +6853,13 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingSpec"),
 						},
 					},
+					"ttlSecondsAfterCreation": {
+						SchemaProps: spec.SchemaProps{
+							Description: "TTLSecondsAfterCreation limits how long this InferenceService lives. Once that many seconds have passed since its creationTimestamp, the controller deletes it, and garbage collection removes everything it owns. Unset means it lives until deleted. The deadline is computed from creationTimestamp on every reconcile, so changing or clearing the field moves or cancels it. Placement member copies ignore it; the source InferenceService's TTL governs them.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
 				},
 			},
 		},

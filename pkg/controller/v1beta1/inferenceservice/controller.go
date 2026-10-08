@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/clock"
 	knapis "knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"knative.dev/pkg/network"
@@ -154,10 +155,12 @@ type InferenceServiceReconciler struct {
 	// SetupWithManager initializes it (if nil) and registers the Pod
 	// event handler against the same instance the component dispatch
 	// path threads into ReconcileParams.
-	Expectations    *omenative.Expectations
-	Log             logr.Logger
-	Scheme          *runtime.Scheme
-	Recorder        record.EventRecorder
+	Expectations *omenative.Expectations
+	Log          logr.Logger
+	Scheme       *runtime.Scheme
+	Recorder     record.EventRecorder
+	// Clock measures spec.ttlSecondsAfterCreation. Nil means the real clock.
+	Clock           clock.PassiveClock
 	RuntimeSelector runtimeselector.Selector
 	// AcceleratorClassSelector resolves the AcceleratorClass for each
 	// Engine/Decoder component (explicit name, or policy over the
@@ -229,7 +232,7 @@ type InferenceServiceReconciler struct {
 	componentDeps *components.ComponentDeps
 }
 
-func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	// Fetch the InferenceService instance
 	isvc := &v1beta1.InferenceService{}
 	if err := r.Get(ctx, req.NamespacedName, isvc); err != nil {
@@ -248,6 +251,19 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// consistent.
 	log := r.Log.WithValues("namespace", isvc.Namespace, "isvc", isvc.Name)
 	ctx = ctrl.LoggerInto(ctx, log)
+	// spec.ttlSecondsAfterCreation is checked before anything that can fail,
+	// so an invalid spec cannot keep an expired InferenceService alive. A
+	// placement member copy is left to the TTL of its source.
+	if isvc.DeletionTimestamp.IsZero() && !protocol.IsMember(isvc) {
+		if remaining, ok := ttlRemaining(isvc, r.now()); ok {
+			if remaining <= 0 {
+				log.Info("Deleting InferenceService because ttlSecondsAfterCreation has passed",
+					"ttlSecondsAfterCreation", *isvc.Spec.TTLSecondsAfterCreation)
+				return ctrl.Result{}, r.deleteExpired(ctx, isvc)
+			}
+			defer func() { result = requeueBy(result, err, remaining) }()
+		}
+	}
 	// Unsupported member authority must hold before any reconciliation writes.
 	// Deletion still follows finalizer cleanup regardless of the stored policy.
 	if isvc.DeletionTimestamp.IsZero() {

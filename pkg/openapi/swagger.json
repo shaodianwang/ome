@@ -3801,6 +3801,11 @@
         "traffic": {
           "description": "Traffic configures the load-balancing policy applied to all HTTPRoutes OME emits for this InferenceService. See the TrafficSpec doc for details.",
           "$ref": "#/definitions/v1beta1.TrafficSpec"
+        },
+        "ttlSecondsAfterCreation": {
+          "description": "TTLSecondsAfterCreation limits how long this InferenceService lives. Once that many seconds have passed since its creationTimestamp, the controller deletes it, and garbage collection removes everything it owns. Unset means it lives until deleted. The deadline is computed from creationTimestamp on every reconcile, so changing or clearing the field moves or cancels it. Placement member copies ignore it; the source InferenceService's TTL governs them.",
+          "type": "integer",
+          "format": "int64"
         }
       }
     },
