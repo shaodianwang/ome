@@ -14156,6 +14156,194 @@ func TestGangSurgeAfterHandover_LostMemberIsRebuiltUnderAFreshDeadlineAndCounted
 	}
 }
 
+// The whole replacement gang dies after the hand-over and the loss closes
+// the attempt; the operator then re-applies the starting revision while the
+// attempt is parked. The pin is withdrawn, so nothing is rebuilt at it when
+// the ladder's backoff comes due: the pair ends, the source gang returns to
+// rotation on the starting revision with its drain hold lifted, the marker
+// is removed, and no pod of the withdrawn revision is created again.
+//
+// Cells: instance/Failed/GangSurgeDrain/spec.revision/before, instance/Failed/GangSurgeDrain/timer.retryAt/before
+func TestGangSurgeAfterHandover_ReplacementLostThenRollbackEndsThePairOnTheStartingRevision(t *testing.T) {
+	h, surgeIdx := gangSurgeHandedOver(t)
+	h.losePods(surgeIdx)
+	h.step()
+	h.requireAttemptClosedByLoss(surgeIdx, 0)
+	source := map[types.UID]struct{}{}
+	for _, pod := range h.podsOf(0) {
+		source[pod.UID] = struct{}{}
+	}
+
+	h.setTarget(h.revV1, goodImage)
+	noWithdrawnPod := h.noPodOnRevisionInvariant(h.revFixed)
+	ended := func() bool {
+		s := h.instance(0)
+		return s != nil && s.Phase == workloadtypes.InstancePhaseReady && s.Operation == nil &&
+			s.RunningRevision == h.revV1.Name && h.instance(surgeIdx) == nil
+	}
+	if !h.runWithInvariant(10, ended, noWithdrawnPod) {
+		h.dumpState("pair never ended")
+		t.Fatalf("the rollback did not end the pair whose replacement was lost: %+v", h.instance(0))
+	}
+	pods := h.podsOf(0)
+	if len(pods) != 2 {
+		t.Fatalf("source gang after the rollback: got %d pods, want the leader and the worker it kept", len(pods))
+	}
+	for _, pod := range pods {
+		if _, kept := source[pod.UID]; !kept {
+			t.Fatalf("source pod %s was rebuilt; the source gang runs the starting revision and keeps its pods", pod.Name)
+		}
+		if !podreadiness.IsServing(pod) {
+			t.Fatalf("source pod %s is not back in rotation after the pair ended", pod.Name)
+		}
+	}
+	// The ladder's backoff elapses with the revision withdrawn: nothing
+	// re-arms, and no repair opens on the source.
+	h.runWithInvariant(15, func() bool { return false }, noWithdrawnPod)
+	if got := len(h.podsOf(surgeIdx)); got != 0 {
+		t.Fatalf("replacement index %d holds %d pod(s) after the ladder's clock; a withdrawn revision is not retried", surgeIdx, got)
+	}
+	if n := h.restartsRecorded(); n != 0 {
+		t.Fatalf("restarts recorded = %d, want none: the rollback owns the Instance: %v", n, h.events)
+	}
+	if !ended() {
+		h.dumpState("after the ladder's clock")
+		t.Fatalf("the Instance left Ready on the starting revision after the ladder's clock: %+v", h.instance(0))
+	}
+}
+
+// The drained source is deleted and the whole replacement gang dies before
+// the promote; the loss closes the attempt. The operator then re-applies
+// the starting revision. The pin is withdrawn and no source pod stands, so
+// the pair ends as a fresh start: the source row re-enters Failed with no
+// attempt on the revision it ran, which is the roll target again, and the
+// Create pass rebuilds the gang there without a repair; no pod of the
+// withdrawn revision is created again.
+//
+// Cells: instance/Failed/GangSurgeDrain/spec.revision/before, instance/Failed/GangSurgeDrain/timer.retryAt/before
+func TestGangSurgeAfterHandover_ReplacementLostWithSourceGoneThenRollbackRebuildsAtTheTarget(t *testing.T) {
+	h, surgeIdx := gangSurgeHandedOver(t)
+	sourceGone := func() bool { return len(h.podsOf(0)) == 0 && h.instance(0) != nil && h.instance(0).Operation != nil }
+	if !h.run(30, sourceGone) {
+		h.dumpState("source never drained")
+		t.Fatalf("the drained source was never deleted behind the serving replacement")
+	}
+	h.losePods(surgeIdx)
+	h.step()
+	h.requireAttemptClosedByLoss(surgeIdx, 0)
+
+	h.setTarget(h.revV1, goodImage)
+	noWithdrawnPod := h.noPodOnRevisionInvariant(h.revFixed)
+	rebuilt := func() bool {
+		s := h.instance(0)
+		return s != nil && s.Operation == nil && s.RunningRevision == h.revV1.Name &&
+			h.instance(surgeIdx) == nil && len(h.podsOf(0)) == 2
+	}
+	if !h.runWithInvariant(15, rebuilt, noWithdrawnPod) {
+		h.dumpState("never rebuilt at the target")
+		t.Fatalf("the source was not rebuilt at the starting revision after the rollback: %+v", h.instance(0))
+	}
+	h.requirePodsRender(0, h.revV1, goodImage)
+	if !h.runWithInvariant(40, func() bool { return h.converged(h.revV1.Name) }, noWithdrawnPod) {
+		h.dumpState("never converged")
+		t.Fatalf("the rebuilt gang never settled Ready on the starting revision")
+	}
+	if n := h.restartsRecorded(); n != 0 {
+		t.Fatalf("restarts recorded = %d, want none: the fresh start is the Create pass's, not a repair's: %v", n, h.events)
+	}
+}
+
+// noPodOnRevisionInvariant fails the test as soon as a live pod carries
+// rev's hash: the invariant a rollback leaves behind for the revision it
+// withdrew.
+func (h *recoveryHarness) noPodOnRevisionInvariant(rev *appsv1.ControllerRevision) func() {
+	hash := query.RevisionOf(rev).Hash()
+	return func() {
+		for _, pod := range h.livePods() {
+			if pod.Labels[query.LabelRevisionHash] == hash {
+				h.dumpState("withdrawn revision retried")
+				h.t.Fatalf("pod %s was created on the withdrawn revision %s after the rollback", pod.Name, rev.Name)
+			}
+		}
+	}
+}
+
+// A replacement member is deleted by hand with a grace period after the
+// hand-over and exits cleanly, so it reads Succeeded while it is removed.
+// The recycle takes the dead member, and once the object is gone the
+// attempt recreates it at once, as it stands: the source never reads
+// Failed, the recycle is counted once, no wave lands on the pinned
+// revision's ladder, nothing is announced as a rebuilt replacement, and
+// the hand-over finishes with the whole gang on the pinned revision.
+//
+// Cells: instance/Update/SurgeDrain/pod.phaseTerminal[Succeeded]/before, instance/Update/SurgeDrain/pod.deleted[target]/before
+func TestGangSurgeAfterHandover_RecycledMemberIsRecreatedAtOnce(t *testing.T) {
+	for _, runner := range []string{"leader", "worker"} {
+		t.Run(runner, func(t *testing.T) {
+			h, surgeIdx := gangSurgeHandedOver(t)
+			// Deletes are graceful from here: the kubelet publishes the
+			// stopped pod before it removes the object.
+			h.podGrace = 30 * time.Second
+			victim := h.podOf(surgeIdx, runner)
+			h.deleteExitingClean(victim)
+
+			attemptStands := func() {
+				s := h.instance(0)
+				if s == nil || s.Phase != workloadtypes.InstancePhaseUpdating || s.Operation == nil {
+					h.dumpState("attempt closed")
+					t.Fatalf("the recycled member's removal closed the attempt: %+v", s)
+				}
+				if b := h.findBlock(h.revFixed.Name); b != nil {
+					h.dumpState("ladder charged")
+					t.Fatalf("the recycled member's removal was counted as a lost replacement: %+v", *b)
+				}
+			}
+			recreated := func() bool {
+				pods := h.podsOf(surgeIdx)
+				if len(pods) != 2 {
+					return false
+				}
+				for _, pod := range pods {
+					if pod.Name == victim.Name && pod.UID != victim.UID {
+						return true
+					}
+				}
+				return false
+			}
+			if !h.runWithInvariant(8, recreated, attemptStands) {
+				h.dumpState("not recreated at once")
+				t.Fatalf("the recycled %s was not recreated as soon as its object was gone", runner)
+			}
+			if s := h.instance(0); s.Operation.RetryCount != 1 {
+				t.Fatalf("RetryCount = %d, want the recycle counted once and no re-arm", s.Operation.RetryCount)
+			}
+			if !h.run(40, func() bool { return h.converged(h.revFixed.Name) }) {
+				h.dumpState("handoff never finished")
+				t.Fatalf("the hand-over did not finish on the pinned revision after the recreate")
+			}
+			for _, e := range h.events {
+				if strings.Contains(e, "GangSurgeRebuilt") {
+					t.Fatalf("a recycled member was announced as a rebuilt replacement: %s", e)
+				}
+			}
+		})
+	}
+}
+
+// deleteExitingClean is a pod deleted by hand with a grace period whose
+// process exits 0 on SIGTERM: the kubelet publishes it Succeeded while it
+// is removed, then removes it.
+func (h *recoveryHarness) deleteExitingClean(pod *corev1.Pod) {
+	h.t.Helper()
+	if h.exitsCleanOnStop == nil {
+		h.exitsCleanOnStop = map[string]bool{}
+	}
+	h.exitsCleanOnStop[pod.Name] = true
+	if err := h.c.Delete(h.ctx, pod); err != nil {
+		h.t.Fatalf("delete %s: %v", pod.Name, err)
+	}
+}
+
 // The rebuilt replacement dies again, after it came up and the drained
 // source was deleted, with the ladder at its limit. The second loss holds
 // the pinned revision: the pair is abandoned, the Instance is marked Failed

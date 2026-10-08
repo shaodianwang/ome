@@ -44,9 +44,12 @@ const (
 
 // gangSurgeEnd is how an abandon leaves the source: Ready on its running
 // revision, or, when held is set, Failed with no attempt and that record,
-// because the pinned revision admits no further attempt.
+// because the pinned revision admits no further attempt. withdrawn marks
+// a pair ended past the hand-over because the roll target moved off the
+// pinned revision while the replacement was short of members.
 type gangSurgeEnd struct {
-	held *workload.InstanceTermination
+	held      *workload.InstanceTermination
+	withdrawn bool
 }
 
 // gangSurgeUpdate creates a replacement gang at a fresh Instance index, waits
@@ -105,9 +108,13 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 			return false, nil
 		}
 		// Past the Surge step the marker reaches its cleanup step only
-		// through the hold of a lost replacement, which finishes here.
+		// through the end of a lost replacement, which finishes here: the
+		// hold of its ladder, or the withdrawal of its revision.
 		if !startingSurge && !promotedTarget && surgeMarker.Operation != nil &&
 			surgeMarker.Operation.Step == workload.UpdateStepGangSurgeTargetCleanup {
+			if surgeTargetName != target.Name {
+				return endWithdrawnGangSurge(ctx, deps, input, plan, src, surgeIdx)
+			}
 			return holdLostGangSurge(ctx, deps, input, plan, src, surgeIdx, surgeTargetName)
 		}
 		if promotedTarget {
@@ -268,10 +275,15 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 			return false, nil
 		}
 		// Past the hand-over a replacement that lost members died behind a
-		// source out of rotation: the rebuild is the next attempt, not this one.
+		// source out of rotation: the rebuild is the next attempt, not this
+		// one, and only at a revision the roll still wants.
 		rearm := false
 		if !startingSurge && !promotedSurgeTarget {
-			create, after, err := rebuildLostReplacement(ctx, deps, input, plan, src, surgeMarker, surgeIdx, surgeTargetName, len(surgePods), len(surgeTargets))
+			if surgeTargetName != target.Name {
+				return endWithdrawnGangSurge(ctx, deps, input, plan, src, surgeIdx)
+			}
+			recycled := recycledMembers(src, missing)
+			create, after, err := rebuildLostReplacement(ctx, deps, input, plan, src, surgeMarker, surgeIdx, surgeTargetName, recycled, len(surgePods), len(surgeTargets))
 			if err != nil || !create {
 				return false, err
 			}
@@ -724,7 +736,12 @@ func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workl
 		}
 	}
 	reset := fmt.Sprintf("resetting to revision %s for a fresh rollout", sourceRunningRev)
-	if sourceRunningRev == "" {
+	switch {
+	case end.withdrawn && sourceRunningRev != "":
+		reset = fmt.Sprintf("the source returns to rotation on revision %s", sourceRunningRev)
+	case end.withdrawn:
+		reset = "the source's pods are gone and it re-enters as a fresh start at the roll target"
+	case sourceRunningRev == "":
 		reset = "the source never ran a revision and re-enters as a fresh start"
 	}
 	if end.held != nil {
@@ -735,6 +752,10 @@ func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workl
 		workload.RecordWarning(deps.Recorder, workload.EventTarget(input), eventReasonGangSurgeAbandoned,
 			"OMENative %s abandoned failed gang surge (surge-index=%d); %s",
 			workload.InstanceKey(comp, sourceIdx), surgeIdx, reset)
+	} else if end.withdrawn {
+		workload.RecordNormal(deps.Recorder, workload.EventTarget(input), eventReasonGangSurgeAbandoned,
+			"OMENative %s abandoned gang surge (surge-index=%d): the roll target moved off revision %s while the replacement gang was short of members, so nothing is rebuilt at it; %s",
+			workload.InstanceKey(comp, sourceIdx), surgeIdx, pinned, reset)
 	} else {
 		workload.RecordNormal(deps.Recorder, workload.EventTarget(input), eventReasonGangSurgeAbandoned,
 			"OMENative %s abandoned superseded gang surge (surge-index=%d); %s",
@@ -812,15 +833,17 @@ func gangSurgeTargetOwnsRemoval(row *workload.InstanceStatus, requireCleanupMark
 // rebuildLostReplacement decides the drain-step continuation's rebuild of a
 // replacement gang short of members. A loss is a drop in the replacement's
 // member count against the count the status publication wrote from the
-// previous pass: members already missing then are a rebuild still pending,
-// created under the attempt as it stands and charged nothing. A loss closes
-// the attempt and counts it once on the pinned revision's ladder; the next
-// attempt rebuilds the set under a fresh deadline once the ladder admits
-// it, re-armed after its members are created; a ladder that holds the
-// revision ends the pair with the source Failed and no attempt. Reports
-// whether the caller may create the missing members this pass, and whether
-// the source re-arms once they are created.
-func rebuildLostReplacement(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, src, marker *workload.InstanceStatus, surgeIdx int32, pin string, observed, size int) (create, rearm bool, err error) {
+// previous pass, less the members the recycle took: a dead member the
+// controller removed itself is the recycle's to recreate, at once and
+// under the attempt as it stands, and members already missing at the
+// published count are a rebuild still pending, created and charged
+// nothing. A loss closes the attempt and counts it once on the pinned
+// revision's ladder; the next attempt rebuilds the set under a fresh
+// deadline once the ladder admits it, re-armed after its members are
+// created; a ladder that holds the revision ends the pair with the source
+// Failed and no attempt. Reports whether the caller may create the missing
+// members this pass, and whether the source re-arms once they are created.
+func rebuildLostReplacement(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, src, marker *workload.InstanceStatus, surgeIdx int32, pin string, recycled, observed, size int) (create, rearm bool, err error) {
 	// A rebuild the cluster is holding back is not a loss: its create waits
 	// on the hold, as every attempt's does.
 	if workload.OperationExternallyHeld(src.Operation) || (marker != nil && workload.OperationExternallyHeld(marker.Operation)) {
@@ -832,7 +855,7 @@ func rebuildLostReplacement(ctx context.Context, deps workload.Deps, input workl
 		return true, false, nil
 	}
 	published, _ := workload.AdapterPublished(marker)
-	lost := int(published) - observed
+	lost := int(published) - observed - recycled
 	block := workload.RetryBlock{TargetRevision: pin}
 	if standing := workload.FindRetryBlock(input.ObservedState.RetryBlocks, pin); standing != nil {
 		block = *standing
@@ -863,6 +886,25 @@ func rebuildLostReplacement(ctx context.Context, deps workload.Deps, input workl
 		return false, false, nil
 	}
 	return true, true, nil
+}
+
+// recycledMembers counts the missing members the terminal recycle took: the
+// row's failure record names the member and is dated no later than the
+// attempt's last progress, the two the recycle writes together. Such a
+// member's removal is the controller's own, not a loss of the replacement.
+// An escalation's record is dated after the last progress, and a loss
+// names no pod, so neither reads as the recycle's.
+func recycledMembers(src *workload.InstanceStatus, missing []podTarget) int {
+	if src == nil || src.Operation == nil || src.Operation.RetryCount == 0 || src.LastFailure == nil ||
+		src.LastFailure.PodName == "" || src.LastFailure.Time.After(src.Operation.LastProgressAt.Time) {
+		return 0
+	}
+	for _, t := range missing {
+		if t.Name == src.LastFailure.PodName {
+			return 1
+		}
+	}
+	return 0
 }
 
 // rearmGangSurgeRebuild opens the next attempt once a lost replacement's
@@ -959,4 +1001,35 @@ func holdLostGangSurge(ctx context.Context, deps workload.Deps, input workload.R
 		Time:    metav1.NewTime(input.Now()),
 	}
 	return abandonFailedGangSurge(ctx, deps, input, plan, src.Index, surgeIdx, src.RunningRevision, "", "", workload.CauseUnattributed, gangSurgeEnd{held: held})
+}
+
+// endWithdrawnGangSurge ends a gang surge past the hand-over whose
+// replacement is short of members while the roll target has moved off the
+// pinned revision: a replacement is rebuilt only for a revision the roll
+// still wants. The source gang's drain hold is lifted so it returns to
+// rotation on the revision the roll is back on; with no source pod standing
+// it re-enters as the Create pass's fresh start at the target. Multi-pass,
+// through the abandon's own steps.
+func endWithdrawnGangSurge(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, src *workload.InstanceStatus, surgeIdx int32) (bool, error) {
+	ns, owner, comp := input.Key.Namespace, input.Key.OwnerName, plan.Component
+	sourcePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), ns, owner, comp, src.Index)
+	if err != nil {
+		return false, fmt.Errorf("list source gang pods for the withdrawn surge (instance=%d): %w", src.Index, err)
+	}
+	hold := podreadiness.Message{UserAgent: podreadiness.WriterUpdateSurgeDrain, Key: gangSurgeDrainKey(src.Index)}
+	standing := 0
+	for _, pod := range sourcePods {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		standing++
+		if err := podreadiness.RemoveNotReadyKeyIgnoreNotFound(ctx, deps.Client, deps.Reader(), pod, hold); err != nil {
+			return false, fmt.Errorf("lift the drain hold of source pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
+	}
+	sourceRunningRev := src.RunningRevision
+	if standing == 0 {
+		sourceRunningRev = ""
+	}
+	return abandonFailedGangSurge(ctx, deps, input, plan, src.Index, surgeIdx, sourceRunningRev, "", "", workload.CauseUnattributed, gangSurgeEnd{withdrawn: true})
 }

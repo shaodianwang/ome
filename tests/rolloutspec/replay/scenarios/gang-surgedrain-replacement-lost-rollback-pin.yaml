@@ -1,0 +1,83 @@
+# A gang surge hands over, the whole replacement gang dies behind the
+# drained source, and the loss closes the attempt on the pushed revision's
+# ladder. The roll is then pinned back to the stored starting revision
+# while the attempt is parked. The pin the surge carries is withdrawn, so
+# the pair ends instead of rebuilding the replacement when the ladder
+# admits the next attempt: the source gang returns to rotation on the
+# starting revision and the marker is removed; no pod of the withdrawn
+# revision is created again.
+scenario: gang-surgedrain-replacement-lost-rollback-pin
+arrows:
+  - T-ready-surge
+  - T-surgedrain-gang-replacement-lost
+  - T-failedgangsurgedrain-withdrawn
+cells:
+  - instance/Update/SurgeDrain/pod.deleted[target]/before
+  - instance/Failed/GangSurgeDrain/spec.rollbackTarget[set]/before
+  - instance/Ready/timer.retryAt/before
+intentional: >-
+  a rollback pin withdraws the surge's revision as a template edit does:
+  the pair ends, the source gang returns to rotation on the pinned
+  starting revision, and no pod of the withdrawn revision is created again
+initial:
+  spec:
+    replicas: 2
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    maxSurge: "1"
+    maxUnavailable: "0"
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 1m, maxDelay: 30m, multiplier: 2}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 0, runner: worker, ready: true, serving: true, node: node-1}
+    - {index: 1, runner: leader, ready: true, serving: true, routed: true, node: node-2}
+    - {index: 1, runner: worker, ready: true, serving: true, node: node-3}
+timeline:
+  - tick: 1
+    note: the template changes, so the first gang claims the free index as its replacement and the other gang waits on the surge budget
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 2
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 3
+    note: both replacement members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 2, runner: leader}}
+      - pod.ready[target]: {pod: {index: 2, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 2, runner: leader}}
+  - tick: 4
+    note: the whole replacement gang dies behind the drained source; the loss closes the attempt, so the source is stamped Failed with its surge kept and the pushed revision's ladder counts the attempt
+    events:
+      - pod.deleted[target]: {pod: {index: 2, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 2, runner: worker}}
+  - tick: 5
+    note: the roll is pinned back to the stored starting revision while the attempt is parked, which withdraws the revision the surge pinned
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}
+  - tick: 6
+    note: a pass with nothing changed
+  - tick: 7
+    note: the ladder's backoff comes due with the pinned revision withdrawn
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 8
+    note: the source leader is published again
+    events:
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 9
+    note: the ladder's clock passes
+    events:
+      - clock.advance: 5m
+  - tick: 10
+    note: a pass with nothing changed

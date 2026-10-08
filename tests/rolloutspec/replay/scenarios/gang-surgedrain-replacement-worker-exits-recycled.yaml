@@ -1,0 +1,91 @@
+# A gang surge hands over and the replacement's worker is deleted by hand
+# with a grace period while its leader stands in rotation: the kubelet
+# stops the container, which exits cleanly, so the pod reads Succeeded
+# while it is still being removed. A dead member can never return to the promote bar,
+# so the recycle takes it and the attempt recreates the member under the
+# same name once the object is gone, paced by the recycle's own ladder; the
+# object's removal is the recycle's and not a loss of the replacement, so
+# no attempt closes and the hand-over finishes with the whole gang on the
+# pinned revision as soon as the recreated worker comes up.
+scenario: gang-surgedrain-replacement-worker-exits-recycled
+arrows:
+  - T-ready-surge
+  - T-surgedrain-gang-complete
+cells:
+  - instance/Update/SurgeDrain/pod.terminating[target]/before
+  - instance/Update/SurgeDrain/pod.phaseTerminal[Succeeded]/before
+  - instance/Update/SurgeDrain/pod.deleted[target]/before
+  - instance/Update/SurgeDrain/pod.ready[target]/before
+  - instance/Update/SurgeDrain/pod.deleted[source]/before
+intentional: >-
+  a replacement member the recycle removed is the recycle's to recreate,
+  at once and under the attempt as it stands; its removal is not a loss
+  of the replacement, so the pair is whole again without waiting on the
+  ladder and finishes on the pinned revision with both members
+initial:
+  spec:
+    replicas: 2
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    maxSurge: "1"
+    maxUnavailable: "0"
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 1m, maxDelay: 30m, multiplier: 2}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, runner: leader, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 0, runner: worker, ready: true, serving: true, node: node-1}
+    - {index: 1, runner: leader, ready: true, serving: true, routed: true, node: node-2}
+    - {index: 1, runner: worker, ready: true, serving: true, node: node-3}
+timeline:
+  - tick: 1
+    note: the template changes, so the first gang claims the free index as its replacement and the other gang waits on the surge budget
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 2
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 3
+    note: both replacement members report Ready and the leader enters rotation, so the source advances to the drain and leaves the serving gate
+    events:
+      - pod.ready[target]: {pod: {index: 2, runner: leader}}
+      - pod.ready[target]: {pod: {index: 2, runner: worker}}
+      - endpoint.rotationIn[target]: {pod: {index: 2, runner: leader}}
+  - tick: 4
+    note: the replacement worker is deleted by hand with a grace period and its container exits cleanly, so the pod reads Succeeded while it is being removed; the recycle takes the dead member and the attempt counts the recycle
+    events:
+      - pod.terminating[target]: {pod: {index: 2, runner: worker}}
+      - pod.phaseTerminal[Succeeded]: {pod: {index: 2, runner: worker}}
+  - tick: 5
+    note: the object is gone, so the recycled worker is recreated under the same name at the pinned revision beside the standing leader
+    events:
+      - pod.deleted[target]: {pod: {index: 2, runner: worker}}
+  - tick: 6
+    note: a pass with nothing changed
+  - tick: 7
+    note: the ladder's clock passes a minute, which the recycle's recreate never waited on
+    events:
+      - clock.advance: 1m1s
+  - tick: 8
+    note: the recreated worker reports Ready, so the whole replacement is runtime-ready again
+    events:
+      - pod.ready[target]: {pod: {index: 2, runner: worker}}
+  - tick: 9
+    note: the source leader leaves the routed Service, so the drain has converged and the source pods are deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 10
+    note: the source pods are gone, so the whole replacement is promoted Ready on the pinned revision and the source row is removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 11
+    note: a pass with nothing changed

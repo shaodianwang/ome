@@ -670,6 +670,15 @@ transitions:
     effects: [the attempt closed, Phase Failed with the surge kept and the loss on LastFailure; the loss counted once on the pinned revision's ladder; a ladder that holds at this wave ends the pair in the same pass, the marker removed and the source left Failed with no attempt]
     decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
 
+  - id: T-surgedrain-gang-withdrawn
+    from: Update/SurgeDrain
+    event: pod.deleted
+    variant: target
+    guard: a gang source past the hand-over whose replacement gang is short of a member while the roll target has moved off the pinned revision
+    to: Ready
+    effects: [the replacement is rebuilt for no revision the roll has withdrawn - its leftovers go, the marker is removed and the source is reset in one transaction, its drain hold lifted so it returns to rotation on its running revision, or the fresh-start Failed shape on that revision when no source pod stands; no RetryBlock is written]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+
   # --- Update/GangSurgeTarget --------------------------------------------
   - id: T-gangtarget-ready
     from: Update/GangSurgeTarget
@@ -1546,6 +1555,13 @@ transitions:
     guard: the replacement gang is short of a member and the pinned revision's ladder admits the next attempt, its backoff due
     to: Update/SurgeDrain
     effects: [the missing members created at the pinned revision and, once they are, Phase Updating at the drain step, the retry counted on the operation, a fresh deadline from now and the ladder's block made the attempt in progress; members missing with no drop against the published count are the same rebuild, created and charged nothing]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-failedgangsurgedrain-withdrawn
+    from: Failed/GangSurgeDrain
+    event: spec.revision
+    guard: the replacement gang is short of a member and the roll target has moved off the pinned revision, by a template edit or a rollback pin
+    to: Ready
+    effects: [the pair ends instead of re-arming at the withdrawn revision - the replacement's leftovers go, the marker is removed and the source is reset in one transaction, its drain hold lifted so it returns to rotation on its running revision, or the fresh-start Failed shape on that revision when no source pod stands, which the Create pass rebuilds at the target; the ladder of the withdrawn revision is left as the loss wrote it]
     decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
   - id: T-failedgangsurgedrain-held
     from: Failed/GangSurgeDrain
