@@ -36,6 +36,17 @@ OME is a vendor-neutral engine. Its core, the Go packages under `pkg/`, `cmd/`, 
 
 **Treat a violation like a hardcoded magic value:** a review blocker to call out explicitly, not a nit. Fix it where it was written; a neutral core is the property, not a cleanup pass.
 
+## Writing for people (HARD BLOCKER)
+
+Every PR description, issue, commit body, event string and review comment is written for an operator who has never read this controller's source. The test: a teammate from another team can tell from the first paragraph alone what breaks, when, and what changes. If it needs a glossary, rewrite it.
+
+- Lead with the story: what the user did, what they saw go wrong, with one concrete example that has numbers ("20 instances, each a gang of 1 leader and 7 workers; the worker count is changed to 8"). Mechanism comes after the story; files come last.
+- Everyday words. Say "version 1 / version 2", "the new gang / the old gang", "retries three times, then stops", "the operator rolls back", "OME created two more version 2 pods". The engine's private vocabulary (pin, hand-over, ladder, dark row, floor, marker, supersede, withdrawn, re-arm, re-drive, disposition, home, surge ordinal) may appear only after it is defined in the same sentence.
+- Sentences of about twenty words, one idea each, active voice, a verb in every sentence. No semicolon chains. No nominalizations: not "the disposition records a relocation directive" but "OME marks the node as bad and rebuilds the pod elsewhere".
+- PR body sections, in this order: Problem (the story), Reproduce (steps a person can run), What changes (behaviour, not code), Detailed changes (files), Testing (what ran, with results; what did not run and why).
+- Code comments follow the same rule: state the invariant in plain words; a comment that only parses with the private vocabulary is not a comment.
+- Agents briefing other agents pass this section verbatim and reject a report that breaks it.
+
 ## Code Comments
 
 Comments describe what the code **is** and **why** — never what *changed* or what's *coming*.
@@ -75,7 +86,9 @@ kind create cluster --name scratch --kubeconfig /tmp/ome-kind.kubeconfig
 
 No in-tree creator passes `--kubeconfig`, so every one of them inherits the caller's: `createCluster` in `tests/integration/kindutil/cluster.go` (behind the `make test-kind*` targets), `hack/kwok-sim/fleet-up.sh`, and the `.buildkite/run_*_gke.sh` scripts. The temp-file wrapper above is what contains them. Treat a new caller that skips it like a hardcoded magic value: call it out, don't add it silently.
 
-## Common Commands
+## Commands
+
+Prefer `make` targets over raw `go`/`kubectl` commands: they pin the toolchain and set the environment.
 
 ### Build
 ```bash
@@ -93,13 +106,6 @@ make test-kind            # Run KIND-backed integration tests (real kubelet — 
 make test-kind-clean      # Delete leftover KIND clusters from prior test-kind runs
 make coverage             # Show coverage summary (48% threshold enforced)
 ```
-
-`make test-kind` runs only the coordination suite under
-`tests/integration/singlecluster/controller/omenative_coordination_kind/`. It
-needs Docker on the host and a `kind` binary on PATH or at `bin/kind` (install
-the pinned version with `make kind`). `KIND_KEEP_CLUSTER=true` is
-on by default so re-runs are fast; set `KIND_RECREATE=true` to force
-a fresh cluster. Narrow with `GINKGO_FOCUS='regex'`.
 
 **Required env for direct `go test` calls** (save these as shell aliases — you will retype them constantly):
 
@@ -125,76 +131,7 @@ go test ./pkg/controller/v1beta1/inferenceservice/... -run TestReconcile -v
 Without the exports, prefix each invocation manually:
 `KUBEBUILDER_ASSETS="$(bin/setup-envtest use "$(cat .envtest-k8s-version)" -p path)" go test ./pkg/runtimeselector/... -v`
 
-#### Integration Tests (detailed)
-
-Integration suites live under `tests/integration/` and split into two halves:
-
-```
-tests/integration/
-├── dep-crds/                              # vendored optional-CRD YAMLs (LWS, KEDA, Gateway API, scheduler-plugins, Envoy Gateway, Prometheus)
-├── framework/                             # shared test scaffolding (envtest)
-├── kindutil/                              # shared test scaffolding (KIND) + fake-serving image source
-├── components/, util/                     # helpers
-└── singlecluster/
-    ├── webhook/{inferenceservice,basemodel,servingruntime,pod,runtimepreset,runtimerevision,acceleratorquota,acceleratorquota_cert}
-    ├── controller/{inferenceservice,basemodel,servingruntime,runtimerevision,acceleratorquota,acceleratorquota_capacity,omenative_coordination_kind,alfred_kind}
-    ├── clustercache/
-    └── agents/metadata/
-```
-
-Each leaf directory is its own Ginkgo suite with a single `TestXxx(t)` entry that calls `util.RunSuite` (envtest) or `kindutil.RunKindSuite` (KIND).
-
-**envtest suites** — fast, hermetic, run by `make integration-test`. Use them for: webhooks, CRD/RBAC defaulters, BaseModel/ServingRuntime/RuntimeRevision reconcilers, ClusterCache, agent-side metadata. NOT used for OMENative reconciler behavior — that's KIND territory now (the envtest `coordination/` + `omenative/` suites were deleted because PodKubeletSimulator races made them chronically flaky).
-
-```sh
-make integration-test                               # full envtest suite
-KUBEBUILDER_ASSETS="$(bin/setup-envtest use "$(cat .envtest-k8s-version)" -p path)" \
-  go test ./tests/integration/singlecluster/webhook/inferenceservice/... -v   # focused
-```
-
-`KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true` forwards the envtest kube-apiserver/etcd stdout+stderr into test logs when debugging control-plane startup failures.
-
-**KIND suite** (`omenative_coordination_kind/`) — real kubelet + scheduler + containerd via Docker. Authoritative for: cross-Component rollout coordination, pod-lifecycle timing (drain races, recreate ordering, in-place patch convergence), per-revision Service convergence, Sequential handoff timing, RatioBalanced gate at scale, ImagePullBackOff failure escalation, pod-UID rotation, migration, PD-disaggregated topologies. ~80 spec files, ~5 min/file wall-clock.
-
-```sh
-make test-kind                                       # full suite (~30-60 min)
-GINKGO_FOCUS='PD per-Component' make test-kind       # narrow to specific specs (~5-10 min)
-GINKGO_FOCUS='RecreatePod' make test-kind            # narrow by It-string fragment
-make test-kind-clean                                 # delete leftover KIND clusters
-```
-
-Requirements:
-- Docker daemon running on the host (KIND brings up the cluster as a Docker container).
-- `kind` binary on `PATH` or at `bin/kind`; run `make kind` to install the pinned version.
-- A throwaway `KUBECONFIG` — these targets create the cluster in whatever the caller exports. See **Kubeconfig Hygiene** above.
-
-`KIND_KEEP_CLUSTER=true` is on by default in `make test-kind` — the cluster persists between runs for fast iteration. Set `KIND_RECREATE=true` to force a fresh cluster (use after suspected dirty state).
-
-Direct `go test` (when you need extra flags):
-
-```sh
-KIND_KEEP_CLUSTER=true \
-  PATH="$(pwd)/bin:$PATH" \
-  go test ./tests/integration/singlecluster/controller/omenative_coordination_kind/... \
-  -v -timeout 30m -ginkgo.v -ginkgo.focus 'rollout converges'
-```
-
-KIND specs use generous timeouts (`kindShortTimeout=30s`, `kindMediumTimeout=2m`, `kindLongTimeout=5m`) and a 100ms poll interval — tuned for real kubelet latency, not envtest microseconds.
-
-CI runs the suite through the hard-gating `integration-test-kind-gke` group. The unit-test lane compiles one exact-commit test binary, and named semantic jobs run disjoint file groups in separate three-node KIND clusters on GKE agents. The TW dind cannot provide the bridge networking KIND requires.
-
-**Every new KIND spec file must be classified** into a group in `KIND_SPEC_GROUPS` in `.buildkite/generate_pipeline.py` — the generator enforces exact ownership and rejects unowned (or stale) specs, so an unclassified `*_kind_test.go` fails pipeline generation for every build. Validate locally with `python3 -m unittest discover -s .buildkite -p 'test_*.py'` before pushing.
-
-**Alfred suite** (`alfred_kind/`) — deploys the alfred image built from `.alfred-oss-ref` through the ome-resources alfred templates into a three-worker cluster with fake GPU nodes, and drives it black-box against the in-process controller: node-health and maintenance signals are patched onto Nodes, and the outcome is read back through alfred's metrics, events, recommendations and journal ConfigMaps, the ISVC migration annotations and InferenceReplica status. `make test-kind-alfred` (set `OME_ALFRED_IMAGE` to skip the local image build). New spec files must be classified in `ALFRED_KIND_SPEC_GROUPS` in `.buildkite/generate_pipeline.py`.
-
-**Multi-cluster real-Kueue suite** (`tests/integration/multicluster/`, gated by `OME_MC_REALKUEUE=1`) — validates OEP-0018 single-active placement against a *real* Kueue admission stack. The default `make integration-test` runs this suite's **sim** path (`admitDerivedOn`); with the env gate it stands up 1 control-plane + 2 member envtest apiservers in one process, each member running a full OME manager + Kueue (core controllers + scheduler + pod webhook), and drives fan-out → real quota-gated admission → race → loser-sweep for real (no kubelet — admission = Kueue scheduling-gate removal). Run it via:
-
-```sh
-make mc-realkueue                          # full suite, opt-in
-GINKGO_FOCUS='S1|S3' make mc-realkueue     # narrow to specific scenarios
-```
-
-Opt-in / soft-fail (it's heavy: 3 apiservers + 3 OME managers + 2 Kueue managers in-process). Loser-sweep assertions check the placer's contract — derived **deleted or Terminating** — not full reaping, because the member's finalizer teardown (IR + Kueue-gated pods) is eventually-consistent and lags under load.
+`make test-kind` needs Docker and a `kind` binary (`make kind` installs the pinned one), and a throwaway `KUBECONFIG` (see Kubeconfig Hygiene). Every new `*_kind_test.go` must be classified in `KIND_SPEC_GROUPS` in `.buildkite/generate_pipeline.py` (alfred specs in `ALFRED_KIND_SPEC_GROUPS`); pipeline generation rejects unowned specs. Validate with `python3 -m unittest discover -s .buildkite -p 'test_*.py'`. The suites, their scopes, timeouts and the KIND and multi-cluster details are in `tests/integration/README.md`.
 
 ### Lint & Format
 ```bash
@@ -222,13 +159,7 @@ Hooks run: go-fmt, go-vet, helm-lint, helm-template, codespell, go-mod-tidy, bra
 
 CI runs the codespell hook's configuration over every tracked text file as the `spelling` step (`.buildkite/check_spelling.sh`, which reads the version, word list and exclusions from `.pre-commit-config.yaml` through `hack/check_spelling.py`). A new legitimate word goes into the hook's `-L` list; the CI step follows it.
 
-### Deployment
-```bash
-make install              # Deploy to cluster via kustomize (interactive confirmation)
-make deploy-helm          # Deploy via Helm charts
-make run-ome-manager      # Run controller locally against configured cluster
-make delete-webhooks      # Remove webhooks (needed for local controller debugging)
-```
+Deployment targets (`make install`, `make deploy-helm`, `make run-ome-manager`, `make delete-webhooks`) are listed in `charts/README.md`.
 
 ## Make Command Discipline
 
@@ -257,75 +188,11 @@ For iterative work, focused `go test ./pkg/<package>/... -v` is fine, but the fo
 
 ## Architecture
 
-### CRDs (7 types in `pkg/apis/ome/v1beta1/`)
-- **BaseModel / ClusterBaseModel** — Model source definitions (HuggingFace, S3, OCI, Azure, GCS, GitHub). Auto-parsed for architecture, parameters, capabilities.
-- **ServingRuntime / ClusterServingRuntime** — How models are served. Defines container images, supported model formats/architectures, accelerator requirements, multi-node worker configs.
-- **InferenceService** (short name: `isvc`) — The central deployment resource. Links a model to a runtime. Supports Engine/Decoder components for prefill-decode disaggregation.
-- **AcceleratorClass** — Cluster-scoped GPU hardware definitions with discovery patterns, capabilities, cost info. Policies: BestFit, Cheapest, MostCapable.
-- **FineTunedWeight** — LoRA adapters and fine-tuned weight deltas referencing a base model.
+API group `ome.io`, version `v1beta1`; seven CRDs in `pkg/apis/ome/v1beta1/` (BaseModel/ClusterBaseModel, ServingRuntime/ClusterServingRuntime, InferenceService, AcceleratorClass, FineTunedWeight). Controllers live in `pkg/controller/v1beta1/` (the InferenceService reconciler is the largest; OMENative workload engine under `workload/`, multi-cluster placement under `placement/`), webhooks in `pkg/webhook/admission`, runtime and accelerator selection in `pkg/runtimeselector` and `pkg/acceleratorclassselector`. Binaries are under `cmd/` (`manager`, `ome-agent`, `crd-gen`, `spec-gen`), charts under `charts/`. The full map, CRD relationships and package table are in `docs/architecture.md`.
 
-### Key relationships
-- `InferenceService.spec.model` → `BaseModel` or `ClusterBaseModel`
-- `InferenceService.spec.runtime` → `ServingRuntime` or `ClusterServingRuntime` (optional; auto-selected if omitted)
-- `InferenceService.spec.acceleratorSelector` → `AcceleratorClass` by name or policy
-- `FineTunedWeight.spec.baseModelRef` → `BaseModel` or `ClusterBaseModel`
+## Code agents and sandboxes
 
-### Binaries (`cmd/`)
-| Binary | Role |
-|---|---|
-| `cmd/manager` | Main Kubernetes operator. Runs all controllers and webhooks. Dynamically registers schemes for LWS, Volcano, KEDA based on cluster CRD availability. |
-| `cmd/ome-agent` | Multi-command CLI (Cobra + uber/fx): hf-download, replica (cross-region replication), serving-agent (sidecar), fine-tuned-adapter, model-metadata. |
-| `cmd/crd-gen` | Post-processes generated CRD YAML (strips unwanted validation fields). Invoked by `make manifests`. |
-| `cmd/spec-gen` | Emits the OpenAPI JSON for the CRDs. Invoked by `make generate`; consumed by the Python SDK generator and the API reference site. |
-
-The `model-agent` DaemonSet deployed by `charts/ome-resources/` runs an image built outside this repo.
-
-### Controllers (`pkg/controller/v1beta1/`)
-- **InferenceServiceReconciler** — The largest controller. Auto-selects runtimes via `runtimeselector`, selects accelerators via `acceleratorclassselector`, generates Deployments/LeaderWorkerSets/HPAs/KEDA ScaledObjects. Supports RawDeployment, MultiNode, PDDisaggregated, OMENative, and VirtualDeployment modes.
-- **BaseModelReconciler / ClusterBaseModelReconciler** — Manages model lifecycle. Monitors download status via ConfigMaps. Requeues every 5s during importing/transit states.
-- **AcceleratorClassReconciler** — Discovers matching GPU nodes, maintains `status.nodes` and `status.availableNodes`.
-
-### Key Packages
-| Package | Purpose |
-|---|---|
-| `pkg/runtimeselector` | Fetch-match-score pipeline for auto-selecting the best ServingRuntime for a model based on format, architecture, framework, quantization, size. |
-| `pkg/acceleratorclassselector` | Selects the best AcceleratorClass for an InferenceService component using BestFit/Cheapest/MostCapable policies. |
-| `pkg/modelconfig` / `pkg/modelparser` | Parse and normalize model metadata (architecture, params, capabilities) from HuggingFace config files. |
-| `pkg/validation` | Pure validation helpers (no K8s deps) shared between CRD validators and webhooks. |
-| `pkg/xet` | CGo bridge to Rust `libxet` library for high-performance HuggingFace downloads. Build with `cd pkg/xet && make build`. |
-| `pkg/webhook/admission` | Pod mutator (injects config into ISVC pods), ServingRuntime/InferenceService validators and defaulters. |
-| `pkg/constants`, `pkg/version`, `pkg/utils` | Shared label/annotation strings, build-time version stamps, and tiny cross-cutting helpers. |
-| `internal/ome-agent` | Agent implementations dispatched as `ome-agent` subcommands: `replica` (cross-region replication), `serving-agent` (sidecar), `fine-tuned-adapter`, `model-metadata`. |
-
-### Helm Charts (`charts/`)
-- **ome-crd** — CRD-only chart. `make manifests` generates its templates from `config/crd/full/` through `crd-gen helmchart`, which factors repeated schema subtrees into shared partials (`_schemas.tpl`) so the Helm release record stays well under its 1 MiB limit. The rendered CRDs equal `config/crd/full/`; the chart render test enforces it. Never edit the templates by hand.
-- **ome-resources** — Controller deployment, model-agent DaemonSet, RBAC, webhooks, cluster resources.
-
-### Sample Manifests (`config/samples/`)
-- `autoscalerpolicy/` — AutoscalerPolicy examples.
-
-Runtime/model catalog YAMLs (vendor-specific ClusterServingRuntime / ClusterBaseModel) live in operators' own GitOps repos, not in-tree.
-
-## Code Agent / Sandbox Notes
-
-OME builds work out-of-the-box on a fully-provisioned developer Mac, but several steps fail subtly in stripped-down code-agent containers. Workarounds:
-
-- **System packages** (Debian/Ubuntu base images): `apt-get install -y jq libssl-dev pkg-config build-essential curl ca-certificates`.
-  - `jq` is consumed by `make manifests` (CRD post-processing in `hack/` scripts).
-  - `libssl-dev pkg-config build-essential` are required to build `pkg/xet` (Rust → static C lib).
-- **Rust toolchain** for `pkg/xet`:
-  ```sh
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain stable --profile minimal
-  ```
-- **`make generate` writes to the Go env file** (`~/.config/go/env`) if you run it on a Makefile from before commit `[Misc] Makefile: avoid go env -w in make generate`. Update or rebase before reporting failures.
-- **IPv6-only CI sandboxes**: envtest's `kube-apiserver` auto-detects the pod's IPv6 external address, then refuses to start because it doesn't match the IPv4 service-cluster range. Wrap the binary with a shim pinning `--advertise-address=127.0.0.1`; see `.buildkite/run_tests.sh` for the canonical pattern.
-- **envtest debugging**: `export KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true` to forward kube-apiserver/etcd output into test logs.
-- **xet-linked binaries / tests**: `export LD_LIBRARY_PATH=$(pwd)/pkg/xet/target/release` so the dynamic linker finds `libxet.{so,dylib}` (needed for `ome-agent` tests and any binary that links the Rust staticlib path).
-- **KUBEBUILDER_ASSETS one-liner**: rather than retyping the full `bin/setup-envtest` invocation for every `go test` call, save this as a shell alias / persistent env:
-  ```sh
-  export KUBEBUILDER_ASSETS="$(bin/setup-envtest use "$(cat .envtest-k8s-version)" -p path)"
-  ```
+Stripped-down agent containers need extra packages, a Rust toolchain for `pkg/xet`, and an IPv6 shim for envtest; the recipes are in `hack/README.md`.
 
 ## OEP Convention
 
@@ -345,16 +212,11 @@ Use `git fetch origin && git checkout -b <branch> origin/main` to ensure you bra
 
 Prefix PR titles with: `[Bugfix]`, `[Core]`, `[API]`, `[Helm]`, `[Docs]`, `[CI/Tests]`, `[Misc]`, or `[OEP]`. Keep title under 52 characters. Substantial architectural changes require an OEP (OME Enhancement Proposal) in `oeps/` — see the OEP Convention section above.
 
+PR descriptions follow the five sections in Writing for people. Keep the body free of tracker numbers other than the issue it fixes.
+
 ## Git author email
 
-GitHub recommends using a GitHub-provided `noreply` email address as your Git
-author identity instead of exposing your actual email address. Configure Git
-with the address shown under your GitHub email settings; supported addresses
-end in `@users.noreply.github.com`.
-
-The repository's pre-commit hook and CI validate the author email on new
-commits. For example, derive the current account's address with GitHub CLI and
-set it globally:
+Commits must carry a GitHub `noreply` author address (`@users.noreply.github.com`); the pre-commit hook and CI reject others. Set it from the GitHub CLI:
 
 ```sh
 github_email="$(gh api user --jq '"\(.id)+\(.login)@users.noreply.github.com"')"
