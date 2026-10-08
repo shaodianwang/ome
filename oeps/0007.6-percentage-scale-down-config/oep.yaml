@@ -2,8 +2,8 @@ title: "Percentage scale-down configuration"
 oep-number: "0007.6"
 authors:
   - "OME contributors"
-status: provisional
-# state: ConfigMap count/percentage pacing; no workload API field.
+status: implemented
+# state: scaleDownPodBatchSize in the controller ConfigMap takes a count or a percentage of live and Terminating Pods (controllerconfig/configmap.go, inferencereplica teardown pacing); no workload API field; #1509
 creation-date: 2026-09-15
 reviewers:
   - TBD
@@ -12,9 +12,9 @@ approvers:
 see-also:
   - "/oeps/0007.3-bounded-scale-down"
 stage: alpha
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 milestone:
-  alpha: "TBD"
+  alpha: "2026-10-07"
   beta: "TBD"
   stable: "TBD"
 feature-gates: []

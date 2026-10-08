@@ -2,8 +2,8 @@ title: Slice provisioning for OME TPU workloads
 oep-number: "0030"
 authors:
   - "@yan9fan"
-status: implementable
-# state: pkg/tpuslice shape derivation (#1702) and the GKE slice client (#1703) landed, and the workload engine carries the Provisioner seam and its CapacityProvisioning hold (#1709); no provisioner wires the slice client into Deps.Provisioner yet, so no slice is created today
+status: implemented
+# state: pkg/controller/v1beta1/sliceprovision provisions and releases slices for ISVCs that opt in with ome.io/tpu-slice-provisioning (lifecycle #1706, wired into the InferenceReplica engine #1710), on pkg/tpuslice shape derivation (#1702) and the GKE slice client (#1703); multi-host shapes with gang placement, unusable-host reprovisioning (#1905, #1984), lost and moved slice rebuilds (#2105, #2224) and slice lifecycle metrics (#1731, #1745, #1748). Beta's week-long zero-leak measurement is not done
 # A 4-chip OME pod requires a matching 2x2x1 partition. Recommends Option 1
 # (ome-controller provisions, ome-scheduler places): slice creation is a slow
 # control-plane call and must stay out of the pod-binding path. Open Question 1
@@ -20,10 +20,10 @@ see-also:
 # Alpha would be one shape (2x2x1), single-host, opt-in per ISVC on a test cluster.
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-09-28"
   beta: "TBD"
   stable: "TBD"
 
@@ -32,12 +32,14 @@ milestone:
 feature-gates: []
 disable-supported: true
 
-# RESERVED -- NOT YET IMPLEMENTED. Slice lifecycle is the thing that can leak
-# hardware, so it is the thing that must be counted; a leaked partition is
-# invisible without these.
+# Slice lifecycle is the thing that can leak hardware, so it is the thing that
+# must be counted. A slice deleted or moved from outside while its pods run counts
+# as lost; a release held back while another workload's pods hold chips on its
+# hosts counts as deferred.
 metrics:
   - ome_tpu_slice_created_total
   - ome_tpu_slice_released_total
   - ome_tpu_slice_create_failures_total
-  - ome_tpu_slice_leaked_total
+  - ome_tpu_slice_release_deferred_total
+  - ome_tpu_slice_lost_total
   - ome_tpu_slice_provision_duration_seconds
