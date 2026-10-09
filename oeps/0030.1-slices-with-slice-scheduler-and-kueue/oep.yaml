@@ -1,0 +1,37 @@
+title: TPU slices with slice-scheduler and Kueue
+oep-number: "0030.1"
+authors:
+  - "@fanyang-real"
+status: provisional
+# state: Parts 1 and 2 merged (#2224, #2225); Parts 3-6 are design only. Rechecked on main at e2e17b02e (2026-10-09): sliceprovision still creates a slice before Kueue sees a pod, no pod carries Kueue pod-group labels, the priority class is still a constants.go literal, and slice-scheduler's pod reconciler waits only for its own pods
+# Follow-up to OEP-0030: provisioned slices meet slice-scheduler, which moves
+# and preempts slices, and Kueue, which gates pods on quota. Proposes
+# provisioning a queued Instance's slice as a Kueue admission check, after
+# quota is reserved.
+creation-date: 2026-10-04
+last-updated: 2026-10-09
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also:
+  - "/oeps/0030-tpu-slice-provisioning"
+  - "/oeps/0018-multi-cluster-placement"  # Open Question: Kueue pod groups for a Size>1 Instance
+  - "/oeps/0024-quota"  # the fixed WorkloadPriorityClass name
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# Part 3 is opt-in per ClusterQueue, by listing the admission check.
+feature-gates: []
+disable-supported: true
+
+metrics:
+  - ome_tpu_slice_lost_total
