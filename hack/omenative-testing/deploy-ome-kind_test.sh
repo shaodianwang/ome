@@ -206,4 +206,37 @@ endpoints_line="$(grep -n 'get endpointslices' "$fake_log" | tail -1 | cut -d: -
 [ -n "$endpoints_line" ] && [ "$converge_line" -lt "$endpoints_line" ] ||
   fail "the webhook endpoints were not waited for after the converge pass"
 
+# The controller is pinned to the control-plane node only on request: the
+# default install leaves the chart's placement values empty; the switch passes
+# the role label as the node selector and tolerates its taint, in both passes.
+if grep -Fq 'ome.controller.nodeSelector' "$fake_log" || grep -Fq 'ome.controller.tolerations' "$fake_log"; then
+  fail "the default install must not pin the controller to a node"
+fi
+: >"$fake_log"
+FAKE_MANAGER_ID="$manager_a" \
+FAKE_AGENT_ID="$agent_a" \
+FAKE_LOG="$fake_log" \
+FAKE_CONTROL_PLANE_CLASS="$control_plane_class" \
+OME_IMAGE_TAG=source \
+OME_EVAL_MANAGER_ON_CONTROL_PLANE=true \
+PATH="${fake_bin}:$PATH" \
+  "$repo_root/hack/omenative-testing/deploy-ome-kind.sh" --skip-build >/dev/null
+for arg in \
+  'ome.controller.nodeSelector.node-role\.kubernetes\.io/control-plane=' \
+  'ome.controller.tolerations[0].key=node-role.kubernetes.io/control-plane' \
+  'ome.controller.tolerations[0].operator=Exists'; do
+  [ "$(grep -c -F -- "<--set> <${arg}>" "$fake_log")" -eq 2 ] ||
+    fail "both chart passes must pin the controller to the control-plane node (missing --set ${arg})"
+done
+rc=0
+FAKE_MANAGER_ID="$manager_a" \
+FAKE_AGENT_ID="$agent_a" \
+FAKE_LOG="$fake_log" \
+FAKE_CONTROL_PLANE_CLASS="$control_plane_class" \
+OME_IMAGE_TAG=source \
+OME_EVAL_MANAGER_ON_CONTROL_PLANE=maybe \
+PATH="${fake_bin}:$PATH" \
+  "$repo_root/hack/omenative-testing/deploy-ome-kind.sh" --skip-build >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 2 ] || fail "an unreadable OME_EVAL_MANAGER_ON_CONTROL_PLANE must be refused with exit 2, got ${rc}"
+
 echo "deploy-ome-kind tag tests passed."

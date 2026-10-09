@@ -7884,33 +7884,48 @@ def _manager_nodes():
     return set((r.stdout or "").split()) if r.returncode == 0 else set()
 
 
-def _node_allowed(node, nodes, managers):
-    """Whether a node may lose its kubelet: a worker that is a running
-    container and hosts no manager pod."""
+def _node_excluded(node, nodes, managers):
+    """Why `node` may not lose its kubelet, or None when it may: a worker
+    among the cluster's Nodes that hosts no manager pod and is a running
+    container of this host's docker."""
     info = nodes.get(node)
-    return bool(info) and not info["control_plane"] and node not in managers and _node_is_container(node)
+    if not info:
+        return "is not among the cluster's Nodes"
+    if info["control_plane"]:
+        return "is the control plane"
+    if node in managers:
+        return "hosts a manager pod"
+    if not _node_is_container(node):
+        return "is not a running container of this host's docker"
+    return None
+
+
+def _node_allowed(node, nodes, managers):
+    """Whether a node may lose its kubelet (see _node_excluded)."""
+    return _node_excluded(node, nodes, managers) is None
 
 
 def _node_pick(pod_state, old_hashes, comp, inst=None):
     """(victim pod, its node) by the break rule over the pods whose node may
-    lose its kubelet: a worker that is a running container and hosts no
-    manager pod; `inst` aims at one Instance index instead (an operation
-    whose natural victim must differ). (None, reason) when no pod qualifies."""
-    nodes, managers, allowed = _nodes_info(), _manager_nodes(), {}
-    eligible = {}
+    lose its kubelet (see _node_excluded); `inst` aims at one Instance index
+    instead (an operation whose natural victim must differ). (None, reason)
+    when no pod qualifies, the reason saying of every node under the case
+    why it was passed over."""
+    nodes, managers, by_node = _nodes_info(), _manager_nodes(), {}
     for name, p in pod_state.items():
         node = (p or {}).get("node")
-        if not p or not node:
-            continue
-        if node not in allowed:
-            allowed[node] = _node_allowed(node, nodes, managers)
-        if allowed[node]:
-            eligible[name] = p
+        if p and node:
+            by_node.setdefault(node, {})[name] = p
+    excluded = {node: _node_excluded(node, nodes, managers) for node in by_node}
+    eligible = {name: p for node, pods in by_node.items() if not excluded[node] for name, p in pods.items()}
     victim = _crashloop_pick_pod(eligible, old_hashes, comp, inst=inst)
-    if not victim:
-        return None, (f"no {comp} pod sits on a worker that is a running container and hosts no manager pod "
-                      f"(nodes under the case: {', '.join(sorted(allowed)) or 'none'})")
-    return victim, pod_state[victim]["node"]
+    if victim:
+        return victim, pod_state[victim]["node"]
+    unpicked = f"has no {comp} pod the fault may pick"
+    per_node = "; ".join(f"{node} {excluded[node] or unpicked}" for node in sorted(by_node))
+    detail = f": {per_node}" if per_node else ""
+    return None, (f"no {comp} pod sits on a worker that is a running container and hosts no manager pod{detail} "
+                  f"(nodes under the case: {', '.join(sorted(by_node)) or 'none'})")
 
 
 def _node_ready(node):
@@ -19971,9 +19986,9 @@ def _move_fire(f, mv, ctx):
         return
     if f["kind"] == "node":
         node = (pod_state.get(name) or {}).get("node")
-        if not node or not _node_allowed(node, _nodes_info(), _manager_nodes()):
-            f["skip"] = (f"node fault unavailable here: the node under {name} ({node or '?'}) is the control plane, "
-                         f"hosts the manager, or is not a running container of this host's docker")
+        reason = _node_excluded(node, _nodes_info(), _manager_nodes()) if node else "is not known (the pod is unbound)"
+        if reason:
+            f["skip"] = f"node fault unavailable here: the node under {name} ({node or '?'}) {reason}"
             f["notes"].append(f"ⓘ {f['skip']}")
             return
         _node_stop(f, name, node, pod_state)

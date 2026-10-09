@@ -26,6 +26,10 @@
 #   OME_EVAL_FORCE_DELETE  set the controller's lifecycle.forceDelete policy (default: false)
 #   OME_EVAL_FORCE_DELETE_THRESHOLD  its nodeUnreachableThreshold (default: 90s)
 #   OME_EVAL_FORCE_DELETE_SLACK  its overdueSlack             (default: 30s)
+#   OME_EVAL_MANAGER_ON_CONTROL_PLANE  pin the controller to the control-plane
+#                      node (default: false)
+#   OME_EVAL_CONTROL_PLANE_NODE_LABEL  the role label, also the taint key, of
+#                      that node (default: node-role.kubernetes.io/control-plane)
 #   OME_EVAL_CONTROL_PLANE_PRIORITY_CLASS  PriorityClass stamped on every
 #                      Deployment in OME_NAMESPACE (default: fixture value)
 #   OME_EVAL_CONTROL_PLANE_PRIORITY  its value (default: fixture value)
@@ -207,6 +211,15 @@ case "${OME_EVAL_FORCE_DELETE:-false}" in
 esac
 FORCE_DELETE_THRESHOLD="${OME_EVAL_FORCE_DELETE_THRESHOLD:-90s}"
 FORCE_DELETE_SLACK="${OME_EVAL_FORCE_DELETE_SLACK:-30s}"
+# Manager placement: on, the controller is pinned to the control-plane node
+# (its role label as node selector, its taint tolerated) so every worker stays
+# open to the harness's node faults, which never stop a worker hosting it.
+case "${OME_EVAL_MANAGER_ON_CONTROL_PLANE:-false}" in
+  1|true|TRUE|yes|YES) MANAGER_ON_CONTROL_PLANE=1 ;;
+  0|false|FALSE|no|NO|"") MANAGER_ON_CONTROL_PLANE=0 ;;
+  *) echo "FATAL: OME_EVAL_MANAGER_ON_CONTROL_PLANE must be true or false" >&2; exit 2 ;;
+esac
+CONTROL_PLANE_NODE_LABEL="${OME_EVAL_CONTROL_PLANE_NODE_LABEL:-node-role.kubernetes.io/control-plane}"
 
 require_file() {
   [ -s "$1" ] || { echo "FATAL: required offline artifact is missing: $1" >&2; exit 1; }
@@ -554,6 +567,15 @@ if [ "$FORCE_DELETE_ENABLED" -eq 1 ]; then
   HELM_ARGS+=(
     --set ome.controller.lifecycle.forceDelete.nodeUnreachableThreshold="$FORCE_DELETE_THRESHOLD"
     --set ome.controller.lifecycle.forceDelete.overdueSlack="$FORCE_DELETE_SLACK"
+  )
+fi
+if [ "$MANAGER_ON_CONTROL_PLANE" -eq 1 ]; then
+  echo "    controller pinned to the node labelled ${CONTROL_PLANE_NODE_LABEL}"
+  # A dot splits a --set key, so the label's dots are escaped.
+  HELM_ARGS+=(
+    --set "ome.controller.nodeSelector.${CONTROL_PLANE_NODE_LABEL//./\\.}="
+    --set "ome.controller.tolerations[0].key=${CONTROL_PLANE_NODE_LABEL}"
+    --set "ome.controller.tolerations[0].operator=Exists"
   )
 fi
 

@@ -201,6 +201,10 @@ export OME_EVAL_SCHEDULER="$scheduler"
 export OME_KIND_OFFLINE=true
 export OME_IMAGE_TAG="$short_sha"
 export OME_RUN_TS="$run_stamp"
+# The node cases stop the kubelet of a worker under a serving pod, never of a
+# worker hosting the controller: with the controller on the control-plane
+# node every worker under a case is a candidate.
+export OME_EVAL_MANAGER_ON_CONTROL_PLANE="${OME_EVAL_MANAGER_ON_CONTROL_PLANE:-true}"
 
 stage="wait for the cluster to settle"
 echo "--- ${stage} ---"
@@ -237,6 +241,7 @@ kubectl get nodes
 stage="deploy exact OME images"
 echo "--- ${stage} ---"
 bash hack/omenative-testing/deploy-ome-kind.sh --cluster "$cluster" --skip-build
+kubectl -n ome get pods -l control-plane=ome-controller-manager -o wide
 
 echo "--- validate and run ${feature}/${topology} ---"
 before_cases=0

@@ -6740,6 +6740,61 @@ class NodeFaultTest(unittest.TestCase):
             victim, reason = run._node_pick({"e2": self.PODS["e2"]}, {"old"}, "engine")
             self.assertIsNone(victim)
             self.assertIn("no engine pod sits on a worker", reason)
+            self.assertIn(": kind-control-plane is the control plane (nodes under the case: kind-control-plane)", reason)
+
+    def test_the_reason_names_every_node_under_the_case_and_why(self):
+        # One node per way out: the control plane, the manager's, one that is no
+        # container of this docker, and one whose pods are of another component.
+        pods = dict(self.PODS, d0=dict(self.PODS["e0"], comp="decoder", uid="u3", node="kind-worker3"))
+        nodes = {"kind-control-plane": {"control_plane": True}, "kind-worker": {"control_plane": False},
+                 "kind-worker2": {"control_plane": False}, "kind-worker3": {"control_plane": False}}
+        with mock.patch.object(run, "_nodes_info", lambda: nodes), \
+                mock.patch.object(run, "_manager_nodes", lambda: {"kind-worker"}), \
+                mock.patch.object(run, "_node_is_container", lambda node: node != "kind-worker2"):
+            victim, reason = run._node_pick(pods, {"old"}, "engine")
+        self.assertIsNone(victim)
+        self.assertEqual(
+            "no engine pod sits on a worker that is a running container and hosts no manager pod: "
+            "kind-control-plane is the control plane; kind-worker hosts a manager pod; "
+            "kind-worker2 is not a running container of this host's docker; "
+            "kind-worker3 has no engine pod the fault may pick "
+            "(nodes under the case: kind-control-plane, kind-worker, kind-worker2, kind-worker3)", reason)
+        # A node the cluster does not list is named as such; a pod bound to no node names no node.
+        with mock.patch.object(run, "_nodes_info", dict), mock.patch.object(run, "_manager_nodes", set):
+            victim, reason = run._node_pick({"e0": pods["e0"], "e9": dict(pods["e0"], node="")}, {"old"}, "engine")
+        self.assertIsNone(victim)
+        self.assertIn(": kind-worker is not among the cluster's Nodes (nodes under the case: kind-worker)", reason)
+        # Every eligible node without a pod of the fault's component is said so, not only the managers' nodes.
+        with mock.patch.object(run, "_nodes_info", lambda: nodes), mock.patch.object(run, "_manager_nodes", set), \
+                mock.patch.object(run, "_node_is_container", lambda node: True):
+            victim, reason = run._node_pick(pods, {"old"}, "decoder")
+            self.assertEqual(("d0", "kind-worker3"), (victim, reason))
+            victim, reason = run._node_pick(pods, {"new"}, "engine")
+        self.assertIsNone(victim)
+        self.assertIn(": kind-control-plane is the control plane; kind-worker has no engine pod the fault may pick; "
+                      "kind-worker2 has no engine pod the fault may pick; kind-worker3 has no engine pod the fault may pick "
+                      "(nodes under the case: kind-control-plane, kind-worker, kind-worker2, kind-worker3)", reason)
+
+    def test_a_move_moment_names_why_its_node_may_not_be_stopped(self):
+        notes = []
+        ctx = {"pod_state": dict(self.PODS, e3=dict(self.PODS["e0"], uid="u9", node="")), "old_hashes": {"old"}}
+        with mock.patch.object(run, "_fault_once", lambda f: False), \
+                mock.patch.object(run, "_nodes_info", lambda: {n["metadata"]["name"]: {"control_plane": bool(n["metadata"]["labels"])}
+                                                                for n in self.NODES["items"]}), \
+                mock.patch.object(run, "_manager_nodes", lambda: {"kind-worker"}), \
+                mock.patch.object(run, "_node_is_container", lambda node: True), \
+                mock.patch.object(run, "_node_stop", lambda *a: notes.append("stopped")):
+            for pod, expected in (("e0", "the node under e0 (kind-worker) hosts a manager pod"),
+                                  ("e2", "the node under e2 (kind-control-plane) is the control plane"),
+                                  ("e3", "the node under e3 (?) is not known (the pod is unbound)")):
+                f = {"kind": "node", "fired": False, "notes": []}
+                run._move_fire(f, {"pod": pod}, ctx)
+                self.assertEqual(f"node fault unavailable here: {expected}", f["skip"], pod)
+                self.assertEqual([f"ⓘ {f['skip']}"], f["notes"])
+            f = {"kind": "node", "fired": False, "notes": []}
+            run._move_fire(f, {"pod": "e1"}, ctx)
+        self.assertNotIn("skip", f)
+        self.assertEqual(["stopped"], notes)
 
     def test_fire_marks_and_registers_before_the_stop_and_the_restore_is_idempotent(self):
         f = run._fault_new("p999", {"fault": "node:notready", "during": "idle", "lift": "after-settle", "expect": "repaired"})
@@ -6847,6 +6902,7 @@ class NodeFaultTest(unittest.TestCase):
         self.assertEqual(("SKIP", "SKIP"), (finished["state"], finished["verdict"]), finished)
         self.assertEqual([f["skip"]], finished["notes"])
         self.assertIn("node fault unavailable here: no engine pod sits on a worker", f["skip"])
+        self.assertIn(": kind-worker hosts a manager pod; kind-worker2 hosts a manager pod", f["skip"])
         self.assertIn("(nodes under the case: kind-worker, kind-worker2)", f["skip"])
         self.assertLess(elapsed, 3.0, "the case ends at the hook, not at the end of its budget")
         self.assertFalse(any(c[0] == "docker" and c[1] == "exec" for c in calls), "no kubelet was stopped")

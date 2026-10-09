@@ -65,6 +65,15 @@ scale behavior. Targets whatever cluster your kubeconfig points at — override 
 > policy never acts on that half) and short enough that a relocation lands
 > about three minutes after the stop, well inside the case budget.
 >
+> **Manager placement.** `OME_EVAL_MANAGER_ON_CONTROL_PLANE=1` makes
+> `deploy-ome-kind.sh` pin the controller to the control-plane node: the node
+> selector is the role label `OME_EVAL_CONTROL_PLANE_NODE_LABEL` (default
+> `node-role.kubernetes.io/control-plane`) and its taint is tolerated. A
+> node-loss case stops the kubelet only of a worker that hosts no controller
+> pod, so with the controller off the workers every worker under the case is a
+> candidate; the CI eval lanes set it. Off by default: a cluster of one node
+> runs everything on its control plane anyway.
+>
 > **Canary-analysis cases (`analysis=…`) additionally need:** the bundled
 > `ome-prometheus` enabled in the cluster (chart `prometheus.enabled`, now the
 > default) scraping `$OME_TEST_NS`, and the `canary-metrics` image (built from
