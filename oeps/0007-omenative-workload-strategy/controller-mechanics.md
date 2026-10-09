@@ -1264,9 +1264,41 @@ the remaining observed set and the desired plan.
 OMENative scales down by deleting complete Instances, never by deleting
 some pods from an Instance.
 
-Selection rule:
+Selection rule: the plan decides which Instances stay, and every other
+observed Instance is a scale-down extra. It keeps, in this order:
 
-- delete the newest Ready Instance first
+1. every in-flight migration pair and gang update-surge pair, both
+   halves. Deleting either half abandons a half-built replacement. Only
+   the source counts against the replica budget, so a replica drop during
+   a move sheds an unpinned Instance instead, even a healthy one;
+2. then the remaining Instances by rank, lowest index first within a rank:
+   - an Instance with **no** pod on a cordoned node
+     (`spec.unschedulable`) before any Instance with one;
+   - then one on a revision the retry ladder reads as sound before one on
+     a revision it reads as failing: a RetryBlock that is `Held` or
+     `Backoff`, or a retry in flight that answers a crash the Instance
+     remembers;
+   - then one that is Ready with every pod in rotation before any other.
+
+A cordoned node ranks first because it is being emptied: an Instance kept
+there must move again later, a second disruption that needs a surge on
+capacity that is already short, while dropping it frees the node during
+the scale-down that is happening anyway. A Ready Instance on a failing
+revision is only the pause between crashes, not capacity the Component can
+count on.
+
+Note that the cordon key outranks health: a serving Instance with a pod on
+a cordoned node leaves before one that serves nothing, even when it is the
+only one serving. For example, when a migration expires while its source
+has a pod on a cordoned node, the scale-down retires the restored source
+and keeps the unplaced surge, so that slot serves again only once the
+surge lands.
+
+Lowest index is a deterministic tie-break, **not** an age: indices are
+reused lowest-free, migrations and gang surges move Instances onto fresh
+indices, and status records no Instance creation time. The order in which
+the extras are admitted into delete waves is OEP-0007.3's, cordoned
+Instances first.
 
 Sequence:
 

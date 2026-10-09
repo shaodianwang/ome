@@ -1356,8 +1356,11 @@ type recoveryHarness struct {
 	// binds every new pod to the least-loaded node whose kubelet is alive.
 	// deadNodes names the nodes whose kubelet has stopped — nothing on
 	// them is updated or finishes terminating until the node recovers.
-	nodeNames []string
-	deadNodes map[string]bool
+	// cordonedNodes names the nodes marked unschedulable: their pods keep
+	// running, and no new pod is bound to them.
+	nodeNames     []string
+	deadNodes     map[string]bool
+	cordonedNodes map[string]bool
 
 	// readinessFails names, by UID, the pods whose readiness probe fails
 	// from now on: the kubelet model keeps their container running and
@@ -2628,10 +2631,11 @@ func (h *recoveryHarness) useNodes(names ...string) {
 }
 
 // leastLoadedLiveNode is the node model's placement for pod: the node
-// with the fewest pods bound to it among those whose kubelet is alive
-// and that the pod's required node affinity admits, earliest declared
-// first on a tie. A node with a stopped kubelet is never chosen, as a
-// scheduler honoring its unreachable taint would not.
+// with the fewest pods bound to it among those whose kubelet is alive,
+// that are not cordoned, and that the pod's required node affinity
+// admits, earliest declared first on a tie. A node with a stopped kubelet
+// is never chosen, as a scheduler honoring its unreachable taint would
+// not, and neither is a cordoned one.
 func (h *recoveryHarness) leastLoadedLiveNode(pod *corev1.Pod, pods []corev1.Pod) string {
 	h.t.Helper()
 	bound := map[string]int{}
@@ -2640,7 +2644,7 @@ func (h *recoveryHarness) leastLoadedLiveNode(pod *corev1.Pod, pods []corev1.Pod
 	}
 	chosen := ""
 	for _, name := range h.nodeNames {
-		if h.deadNodes[name] || !nodeAffinityAdmits(pod, name) {
+		if h.deadNodes[name] || h.cordonedNodes[name] || !nodeAffinityAdmits(pod, name) {
 			continue
 		}
 		if chosen == "" || bound[name] < bound[chosen] {
@@ -2724,6 +2728,35 @@ func (h *recoveryHarness) recoverNode(name string) {
 	h.t.Helper()
 	delete(h.deadNodes, name)
 	h.setNodeCondition(name, corev1.ConditionTrue)
+}
+
+// cordonNode marks name unschedulable, as kubectl cordon does: the pods
+// on it keep running and the scheduler model places nothing new there.
+func (h *recoveryHarness) cordonNode(name string) {
+	h.t.Helper()
+	node := &corev1.Node{}
+	if err := h.c.Get(h.ctx, types.NamespacedName{Name: name}, node); err != nil {
+		h.t.Fatalf("get node %s: %v", name, err)
+	}
+	node.Spec.Unschedulable = true
+	if err := h.c.Update(h.ctx, node); err != nil {
+		h.t.Fatalf("cordon node %s: %v", name, err)
+	}
+	if h.cordonedNodes == nil {
+		h.cordonedNodes = map[string]bool{}
+	}
+	h.cordonedNodes[name] = true
+}
+
+// cordonedInstances projects the Instances with a pod on a cordoned node
+// the way the adapter does, from the Nodes and pods the API holds.
+func (h *recoveryHarness) cordonedInstances() map[int32]struct{} {
+	h.t.Helper()
+	nodes, err := query.CordonedNodes(h.ctx, h.c)
+	if err != nil {
+		h.t.Fatalf("list cordoned nodes: %v", err)
+	}
+	return query.CordonedInstances(query.BucketPodsByInstanceIdx(h.livePods()), nodes)
 }
 
 func (h *recoveryHarness) setNodeCondition(name string, ready corev1.ConditionStatus) {
@@ -2869,11 +2902,12 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		},
 		DesiredSpec: h.desired,
 		ObservedState: workloadtypes.WorkloadObservedState{
-			InstanceStatuses: h.irStatuses(),
-			RetryBlocks:      append([]workloadtypes.RetryBlock(nil), h.blocks...),
-			Migrations:       append([]workloadtypes.MigrationRecord(nil), h.migrations...),
-			CurrentRevision:  h.currentRevision,
-			UpdateRevision:   h.target.Name,
+			InstanceStatuses:  h.irStatuses(),
+			RetryBlocks:       append([]workloadtypes.RetryBlock(nil), h.blocks...),
+			Migrations:        append([]workloadtypes.MigrationRecord(nil), h.migrations...),
+			CurrentRevision:   h.currentRevision,
+			UpdateRevision:    h.target.Name,
+			CordonedInstances: h.cordonedInstances(),
 		},
 		MutateInstance:     h.mutateInstance(),
 		MutateMigration:    h.mutateMigration,
@@ -7865,6 +7899,104 @@ func TestScaleDown_RemovesTheInstanceThatServesNothingFirst(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// TestScaleDown_RemovesTheInstanceOnACordonedNodeFirst: four healthy
+// Instances, every pod on a node of its own, and the node under one pod
+// of Instance 1 is cordoned. A scale-down by one removes Instance 1, not
+// the highest index; a scale-down by two removes Instance 1 and then the
+// highest index. The survivors keep the pods they had, nothing lands on
+// the cordoned node, and the rows settle at the new count. Single pod,
+// and gang where only the worker sits on the cordoned node.
+//
+// Cells: instance/Ready/spec.replicasDown/before
+func TestScaleDown_RemovesTheInstanceOnACordonedNodeFirst(t *testing.T) {
+	shapes := []struct {
+		name     string
+		multiPod bool
+		runner   string
+	}{
+		{"single pod", false, "default"},
+		{"gang worker", true, "worker"},
+	}
+	reductions := []struct {
+		name    string
+		down    int32
+		removed []int32
+		kept    []int32
+	}{
+		{"down by one", 1, []int32{1}, []int32{0, 2, 3}},
+		{"down by two", 2, []int32{1, 3}, []int32{0, 2}},
+	}
+	for _, shape := range shapes {
+		for _, reduction := range reductions {
+			t.Run(shape.name+"/"+reduction.name, func(t *testing.T) {
+				h := newRecoveryHarness(t, shape.multiPod)
+				h.atomicStatus = true
+				h.replicas = 4
+				h.useNodes("node-a", "node-b", "node-c", "node-d", "node-e", "node-f", "node-g", "node-h")
+				h.setTarget(h.revV1, goodImage)
+				if !h.run(40, func() bool { return h.settledOn(h.revV1, 4) }) {
+					h.dumpState("initial create")
+					t.Fatalf("four instances never settled on v1")
+				}
+				cordoned := ""
+				for _, pod := range h.podsOf(1) {
+					if pod.Labels[query.LabelRunner] == shape.runner {
+						cordoned = pod.Spec.NodeName
+					}
+				}
+				if cordoned == "" || len(h.podsOnNode(cordoned)) != 1 {
+					h.dumpState("placement")
+					t.Fatalf("story shape: the %s pod of Instance 1 needs a node of its own, got %q", shape.runner, cordoned)
+				}
+				before := map[int32]string{}
+				for _, idx := range reduction.kept {
+					before[idx] = h.instanceIdentity(idx)
+				}
+
+				h.cordonNode(cordoned)
+				h.replicas = 4 - reduction.down
+				h.setTarget(h.revV1, goodImage)
+				atRest := func() bool {
+					rows := h.irStatuses()
+					if int32(len(rows)) != h.replicas {
+						return false
+					}
+					for _, row := range rows {
+						if row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil {
+							return false
+						}
+					}
+					return len(h.livePods()) == int(h.replicas)*len(h.desired.Runners)
+				}
+				if !h.run(40, atRest) {
+					h.dumpState("scale-down")
+					t.Fatalf("the component never came to rest at %d instances", h.replicas)
+				}
+				for _, idx := range reduction.removed {
+					if h.instance(idx) != nil || len(h.podsOf(idx)) != 0 {
+						h.dumpState("scale-down")
+						t.Fatalf("instance %d should have left; row=%+v pods=%d", idx, h.instance(idx), len(h.podsOf(idx)))
+					}
+				}
+				for _, idx := range reduction.kept {
+					if got := h.instanceIdentity(idx); got != before[idx] {
+						h.dumpState("scale-down")
+						t.Fatalf("instance %d should have kept its pods:\n got %q\nwant %q", idx, got, before[idx])
+					}
+				}
+				if on := h.podsOnNode(cordoned); len(on) != 0 {
+					h.dumpState("scale-down")
+					t.Fatalf("%d pod(s) still on the cordoned node %s", len(on), cordoned)
+				}
+				if !h.settledOn(h.revV1, h.replicas) {
+					h.dumpState("scale-down")
+					t.Fatalf("the component is not settled on v1 at %d instances", h.replicas)
+				}
+			})
 		}
 	}
 }

@@ -210,7 +210,7 @@ transitions:
   - id: T-ready-scaledown
     from: Ready
     event: spec.replicasDown
-    guard: the index leaves the desired set - a Ready row with a pod out of rotation before a healthy one, then the highest index - and the scale-down wave admits it within its pod budget
+    guard: the index leaves the desired set - a row with a pod on a cordoned node before any other, then a row on a revision the retry ladder reads as failing, then a Ready row with a pod out of rotation, then the highest index - and the scale-down wave admits it within its pod budget
     to: Delete/Drain
     effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
     decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
@@ -1153,7 +1153,7 @@ transitions:
     event: timer.migrationDeadline
     guard: the migration record passed its deadline and every live source pod is runtime-ready
     to: Ready
-    effects: [Migrate pin cleared, source-drain hold released so the source returns to rotation, RunningRevision untouched, record closed]
+    effects: [Migrate pin cleared, source-drain hold released so the source returns to rotation, RunningRevision untouched, record closed, a source with a pod on a cordoned node then ranks below the unpinned surge and the scale-down retires it in the surge's place]
     decided_in: pkg/controller/v1beta1/workload/ops/migrate_expire.go
   - id: T-migrate-surge-terminal
     from: Migrate/CreateSurge
@@ -1203,7 +1203,7 @@ transitions:
   - id: T-migratetarget-expired
     from: Migrate/SurgeTarget
     event: timer.migrationDeadline
-    guard: the migration record passed its deadline, so the pin is dropped and the unpinned index leaves the plan
+    guard: the migration record passed its deadline, so the pin is dropped and the unpinned index leaves the plan - unless the restored source has a pod on a cordoned node, which then ranks below this index and leaves in its place
     to: Delete/Drain
     effects: [Migrate pin cleared, the index becomes a scale-down extra and the next wave commits Phase Deleting with a Delete Drain operation]
     decided_in: pkg/controller/v1beta1/workload/ops/migrate_expire.go
@@ -1212,7 +1212,7 @@ transitions:
     event: pod.waiting
     guard: a pod of this surge holds a terminal waiting reason past the stuck-pod grace, which the record consumes as early failure evidence
     to: Delete/Drain
-    effects: [the record closed Failed and the pin cleared, so the unpinned index leaves the plan and the scale-down pipeline tears it down; the paired source is restored through the record rather than stamped here]
+    effects: [the record closed Failed and the pin cleared, so the unpinned index leaves the plan and the scale-down pipeline tears it down; the paired source is restored through the record rather than stamped here, unless the source has a pod on a cordoned node; then the source ranks below the unpinned index and leaves in its place]
     decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
 
   - id: T-migratetarget-teardown
@@ -1504,7 +1504,7 @@ transitions:
   - id: T-failedgangsurge-scaledown
     from: Failed/GangSurge
     event: spec.replicasDown
-    guard: a failed source pins nothing, so the pair is ranked as one unit behind the serving rows, and that unit falls beyond the new desired set
+    guard: a failed source pins nothing, so the pair is ranked as one unit in the scale-down order, and that unit falls beyond the new desired set
     to: Delete/Drain
     effects: [the kept Update operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction; the marker it referenced is an extra of the same wave]
     decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
@@ -1537,7 +1537,7 @@ transitions:
   - id: T-failedgangsurgedrain-scaledown
     from: Failed/GangSurgeDrain
     event: spec.replicasDown
-    guard: a failed source pins nothing, so the pair is ranked as one unit behind the serving rows, and that unit falls beyond the new desired set
+    guard: a failed source pins nothing, so the pair is ranked as one unit in the scale-down order, and that unit falls beyond the new desired set
     to: Delete/Drain
     effects: [the kept Update operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
     decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
@@ -1606,7 +1606,7 @@ transitions:
   - id: T-failedgangtarget-scaledown
     from: Failed/GangSurgeTarget
     event: spec.replicasDown
-    guard: the paired source has failed as well, so the pair pins nothing and is ranked as one unit behind the serving rows, and that unit falls beyond the new desired set
+    guard: the paired source has failed as well, so the pair pins nothing and is ranked as one unit in the scale-down order, and that unit falls beyond the new desired set
     to: Delete/Drain
     effects: [the marker operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
     decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
@@ -1639,7 +1639,7 @@ transitions:
   - id: T-failedgangcleanup-scaledown
     from: Failed/GangSurgeTargetCleanup
     event: spec.replicasDown
-    guard: the paired source has failed as well, so the pair pins nothing and is ranked as one unit behind the serving rows, and that unit falls beyond the new desired set; an unreferenced marker is an extra on its own
+    guard: the paired source has failed as well, so the pair pins nothing and is ranked as one unit in the scale-down order, and that unit falls beyond the new desired set; an unreferenced marker is an extra on its own
     to: Delete/Drain
     effects: [the cleanup claim replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
     decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
@@ -1754,7 +1754,7 @@ transitions:
   - id: T-failedmigratetarget-expired
     from: Failed/MigrateTarget
     event: timer.migrationDeadline
-    guard: the migration record passed its deadline, so the pin is dropped and the unpinned index leaves the plan
+    guard: the migration record passed its deadline, so the pin is dropped and the unpinned index leaves the plan - unless the restored source has a pod on a cordoned node, which then ranks below this index and leaves in its place
     to: Delete/Drain
     effects: [Migrate pin cleared with the Failed phase kept, the source restored through the record, the index becomes a scale-down extra and the next wave commits Phase Deleting with a Delete Drain operation]
     decided_in: pkg/controller/v1beta1/workload/ops/migrate_expire.go
@@ -1763,7 +1763,7 @@ transitions:
     event: pod.waiting
     guard: a pod of this surge holds a terminal waiting reason past the stuck-pod grace, which the record consumes as early failure evidence; not reached from a Failed surge row, since the drive's pair confirmation requires the surge to read Creating and runs ahead of the wedge check, so a surge the scheduler grace already failed stands until the record's deadline
     to: Delete/Drain
-    effects: [the record closed Failed and the pin cleared, so the unpinned index leaves the plan and the scale-down pipeline tears it down; the paired source is restored through the record rather than stamped here]
+    effects: [the record closed Failed and the pin cleared, so the unpinned index leaves the plan and the scale-down pipeline tears it down; the paired source is restored through the record rather than stamped here, unless the source has a pod on a cordoned node; then the source ranks below the unpinned index and leaves in its place]
     decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
   - id: T-failedmigratetarget-teardown
     from: Failed/MigrateTarget

@@ -179,6 +179,23 @@ var _ = ginkgo.Describe("OMENative gang migration (KIND)", ginkgo.Ordered, func(
 		// long enough to observe the pre-deadline holding pattern.
 		const migrationTimeout = 45 * time.Second
 
+		workers := schedulableWorkerNodes(Default)
+		Expect(len(workers)).To(BeNumerically(">=", 2),
+			"the suite cluster must have at least one off-source worker to cordon; got %v", workers)
+		sourceNode, spareNodes := workers[0], workers[1:]
+
+		ginkgo.By("cordoning every other worker so the source gang lands on one node and the surge gang cannot schedule")
+		// The surge gang carries a NotIn[sourceNode] anti-affinity on
+		// EVERY member, so with all other workers cordoned no surge pod
+		// has anywhere to land. Cordoning before the gang exists keeps
+		// both source members off the cordoned nodes: a scale-down removes
+		// an Instance with a pod on a cordoned node first, so a source
+		// member there would make the expiry retire the source, not the
+		// surge.
+		for _, node := range spareNodes {
+			cordonNode(node)
+		}
+
 		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
 			WithoutDecoder(),
 			WithEngineWorkerSize(1),
@@ -189,8 +206,7 @@ var _ = ginkgo.Describe("OMENative gang migration (KIND)", ginkgo.Ordered, func(
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
 
-		ginkgo.By("waiting for the source gang Ready and recording its node + pod UIDs")
-		var sourceNode string
+		ginkgo.By("waiting for the source gang Ready on the source node and recording its pod UIDs")
 		sourceUIDs := map[string]types.UID{}
 		Eventually(func(g Gomega) {
 			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
@@ -202,26 +218,11 @@ var _ = ginkgo.Describe("OMENative gang migration (KIND)", ginkgo.Ordered, func(
 			g.Expect(gang["worker"]).To(HaveLen(1))
 			for _, pods := range gang {
 				for _, p := range pods {
-					g.Expect(p.Spec.NodeName).NotTo(BeEmpty())
+					g.Expect(p.Spec.NodeName).To(Equal(sourceNode), "every other worker is cordoned")
 					sourceUIDs[p.Name] = p.UID
 				}
 			}
-			sourceNode = gang["leader"][0].Spec.NodeName
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
-
-		ginkgo.By("cordoning every off-source worker so the surge gang cannot schedule")
-		// The surge gang carries a NotIn[sourceNode] anti-affinity on
-		// EVERY member, so with all other workers cordoned no surge pod
-		// has anywhere to land.
-		var cordoned []string
-		for _, w := range schedulableWorkerNodes(Default) {
-			if w != sourceNode {
-				cordonNode(w)
-				cordoned = append(cordoned, w)
-			}
-		}
-		Expect(cordoned).NotTo(BeEmpty(),
-			"the suite cluster must have at least one off-source worker to cordon")
 
 		reqUUID := uuid.NewString()
 		writeMigrationRequest(Default, client.ObjectKeyFromObject(fix.ISVC), reqUUID, sourceNode, 0)

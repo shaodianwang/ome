@@ -415,4 +415,81 @@ var _ = ginkgo.Describe("OMENative bounded scale-down (KIND)", ginkgo.Ordered, f
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
+	ginkgo.It("scales down the Instance on a cordoned node before a higher index", func() {
+		const isvcName = "bounded-cordon"
+		workers := schedulableWorkerNodes(Default)
+		Expect(len(workers)).To(BeNumerically(">=", 2),
+			"the spec needs a second schedulable worker; got %v", workers)
+		first, rest := workers[0], workers[1:]
+
+		ginkgo.By("placing Instance 0 alone on the first worker")
+		for _, node := range rest {
+			cordonNode(node)
+		}
+		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
+			WithoutDecoder(),
+			WithEngineReplicas(1),
+			WithEngineImage("fake-serving:v1"))
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+		Eventually(func(g Gomega) {
+			statuses := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(statuses).To(HaveLen(1))
+			g.Expect(statuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(aliveEnginePodForInstance(g, ns.Name, isvcName, 0).Spec.NodeName).To(Equal(first))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("cordoning the first worker and scaling to three, so Instances 1 and 2 land elsewhere")
+		for _, node := range rest {
+			setNodeUnschedulable(node, false)
+		}
+		cordonNode(first)
+		Eventually(func(g Gomega) {
+			current := freshISVC(g, ns.Name, isvcName)
+			three := 3
+			current.Spec.Engine.MinReplicas = &three
+			g.Expect(k8sClient.Update(suiteCtx, current)).To(Succeed())
+		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		uids := make(map[int32]types.UID, 3)
+		Eventually(func(g Gomega) {
+			statuses := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(statuses).To(HaveLen(3))
+			for _, status := range statuses {
+				g.Expect(status.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				pod := aliveEnginePodForInstance(g, ns.Name, isvcName, status.Index)
+				if status.Index == 0 {
+					g.Expect(pod.Spec.NodeName).To(Equal(first))
+				} else {
+					g.Expect(pod.Spec.NodeName).NotTo(Equal(first), "a cordoned node takes no new pod")
+				}
+				uids[status.Index] = pod.UID
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("reducing desired replicas from three to two")
+		Eventually(func(g Gomega) {
+			current := freshISVC(g, ns.Name, isvcName)
+			two := 2
+			current.Spec.Engine.MinReplicas = &two
+			g.Expect(k8sClient.Update(suiteCtx, current)).To(Succeed())
+		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		ginkgo.By("observing Instance 0, the one on the cordoned node, leave instead of Instance 2")
+		Eventually(func(g Gomega) {
+			statuses := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(statuses).To(HaveLen(2))
+			kept := make([]int32, 0, len(statuses))
+			for _, status := range statuses {
+				g.Expect(status.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+				kept = append(kept, status.Index)
+			}
+			sort.Slice(kept, func(i, j int) bool { return kept[i] < kept[j] })
+			g.Expect(kept).To(Equal([]int32{1, 2}), "the Instance on the cordoned node must be the one removed")
+			for _, index := range []int32{1, 2} {
+				pod := aliveEnginePodForInstance(g, ns.Name, isvcName, index)
+				g.Expect(pod.UID).To(Equal(uids[index]), "instance %d must keep its pod", index)
+			}
+			g.Expect(boundedScaleDownPodsForInstance(g, ns.Name, isvcName, 0)).To(BeEmpty())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
 })

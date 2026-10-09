@@ -475,10 +475,11 @@ cells:
     event: spec.replicasDown
     outcome: defer
     note: the pair is pinned into the plan above the replica cap and excluded from
-      the scale-down selection, so the reduction lands on other indices now and on
-      this one only after the migration is terminal
+      the scale-down selection, even when the source sits on a cordoned node, so the
+      reduction lands on other indices now and on this one only after the migration
+      is terminal
     placement: unit
-    coverage: {perm: [], unit: [TestInstancePlanIndices_ReplicaDropKeepsMigrationPair, TestInstancePlanIndices_MigrationTargetNotReadyKeepsSourcePinned], kind: []}
+    coverage: {perm: [], unit: [TestInstancePlanIndices_ReplicaDropKeepsMigrationPair, TestInstancePlanIndices_MigrationTargetNotReadyKeepsSourcePinned, TestInstancePlanIndices_CordonDoesNotUnpinAMigrationPair], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: spec.pauseTrue
@@ -1272,7 +1273,7 @@ cells:
       scale-down selection while the pin is held; the reduction reaches it only after
       the pin is cleared
     placement: unit
-    coverage: {perm: [], unit: [TestInstancePlanIndices_ReplicaDropKeepsMigrationPair], kind: []}
+    coverage: {perm: [], unit: [TestInstancePlanIndices_ReplicaDropKeepsMigrationPair, TestInstancePlanIndices_CordonDoesNotUnpinAMigrationPair], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: spec.pauseTrue

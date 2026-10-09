@@ -500,7 +500,7 @@ states:
     applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
     planned: true
     decided_in: pkg/controller/v1beta1/workload/ops/migrate_expire.go
-    note: a row left in phase Creating with no operation - a migration surge whose pin the record's expiry or terminal evidence cleared while its status slot stayed, or a status write applied in part. The engine resolves this shape to no state at all, so no pass owns it; the Create pass reads it as a slot of its own. Beyond the desired set the unpinned index leaves the plan and the scale-down pipeline tears it down; inside the desired set what the Create pass does with its leftover pods is undecided
+    note: a row left in phase Creating with no operation - a migration surge whose pin the record's expiry or terminal evidence cleared while its status slot stayed, or a status write applied in part. The engine resolves this shape to no state at all, so no pass owns it; the Create pass reads it as a slot of its own. Beyond the desired set the unpinned index leaves the plan and the scale-down pipeline tears it down, unless a row with a pod on a cordoned node ranks below it and leaves in its place; inside the desired set what the Create pass does with its leftover pods is undecided
     not_applicable:
       timer.repairRetry: a parked repair's re-arm is measured from a Restart parking at Failed, and this row holds no parked repair
       timer.operationDeadline: no operation is in flight

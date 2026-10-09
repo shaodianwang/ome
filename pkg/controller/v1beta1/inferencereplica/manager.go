@@ -22,6 +22,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/pkg/tpuslice/gke"
 	"github.com/ome-projects/ome/pkg/utils"
@@ -214,6 +215,11 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// indexes; the cache accepts them until the manager starts.
 	if err := registerRefIndexes(context.Background(), mgr.GetFieldIndexer()); err != nil {
 		return fmt.Errorf("inferencereplica: %w", err)
+	}
+	// A scale-down reads the cordoned nodes through this index, so the
+	// read costs the cordoned nodes, not every Node in the cluster.
+	if err := query.RegisterNodeUnschedulableIndex(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		return fmt.Errorf("inferencereplica: register Node unschedulable index: %w", err)
 	}
 	return nil
 }

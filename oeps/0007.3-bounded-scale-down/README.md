@@ -333,21 +333,27 @@ The selector has two mutually exclusive modes:
 1. if any delete-owned Instance exists, select only from that set, oldest
    `Operation.StartedAt` first and then highest Instance index as the
    deterministic tie-breaker;
-2. otherwise, select newly extra Instances, highest Instance index first, and
+2. otherwise, select newly extra Instances, those with a pod on a cordoned
+   node (`spec.unschedulable`) first and then highest Instance index, and
    admit the selected prefix in one status write.
 
 `InstanceStatuses` has Kubernetes map-list semantics, so serialized slice order
 is not an ordering contract. Descending index is an explicit ordinal-shrink
 proxy, **not** a claim that the highest index is the newest Instance: migration
-can reuse sparse indices and status has no Instance creation timestamp. The
-planner still decides the victim set; this rule only makes bounded progress
-deterministic within that set.
+can reuse sparse indices and status has no Instance creation timestamp, so
+neither this rule nor the planner can order by age.
 
-This ordering refines and supersedes OEP-0007's “newest Ready first” rule. The
-current status API has no Instance creation timestamp, and map-list order is
-non-semantic, so the parent rule cannot be implemented faithfully. Highest
-index is the explicit deterministic replacement until the API carries real age
-evidence.
+The planner decides the victim set (OEP-0007 controller mechanics §7.4:
+in-flight migration and gang-surge pairs stay, then Instances on a cordoned
+node leave first, then the health ranks and the lowest index decide); this
+rule only orders bounded progress within that set. Cordoned extras lead the
+fresh admission for the same reason they lead the victim set: when a budget
+splits a reduction across waves, the first wave empties the nodes an operator
+is draining instead of leaving them occupied until the last one.
+
+Delete-owned work keeps its admission order whatever the cordon. Reordering it
+when a node is cordoned mid-wave would let a later candidate's deletes start
+while an earlier one is still draining, and break the concurrency bound below.
 
 For each candidate, the selector computes
 `cost = max(1, authoritativeLivePodCount)`. It
@@ -899,6 +905,9 @@ Pure table tests cover:
   prefixes and admits no fresh victim until every DeleteOwned status is removed;
 - missing or equal `Operation.StartedAt` values use descending index as the
   tie-breaker;
+- fresh extras with a pod on a cordoned node are admitted before every other
+  fresh extra, while delete-owned work keeps its `Operation.StartedAt` order
+  whatever the cordon;
 - active work prevents event-driven over-admission;
 - one-Pod-at-a-time disappearance never admits a fresh Instance before the
   current DeleteOwned wave is fully removed;

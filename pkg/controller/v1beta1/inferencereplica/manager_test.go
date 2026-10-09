@@ -33,6 +33,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/pkg/tpuslice/gke"
 	"github.com/ome-projects/ome/pkg/utils"
@@ -103,6 +104,7 @@ func newSetupManager(t *testing.T, skipNameValidation bool) ctrl.Manager {
 	} {
 		mapper.Add(gvk, meta.RESTScopeNamespace)
 	}
+	mapper.Add(corev1.SchemeGroupVersion.WithKind("Node"), meta.RESTScopeRoot)
 	mgr, err := ctrl.NewManager(&rest.Config{Host: "http://127.0.0.1:0"}, manager.Options{
 		Scheme:                 scheme,
 		Logger:                 logr.Discard(),
@@ -243,6 +245,20 @@ func TestSetupWithManager_GangSchedulingFollowsThePodGroupCRD(t *testing.T) {
 				t.Fatalf("setup must not touch the PodGroup index when the CRD is absent, got %v", err)
 			}
 		})
+	}
+}
+
+// TestSetupWithManager_RegistersTheNodeUnschedulableIndex pins that setup
+// installs the index the scale-down reads cordoned nodes through. The index
+// can be registered once per cache, so a second registration fails.
+func TestSetupWithManager_RegistersTheNodeUnschedulableIndex(t *testing.T) {
+	seedCRDDiscovery(false, false)
+	mgr := newSetupManager(t, true)
+	if err := wiredReconciler(mgr).SetupWithManager(mgr); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := query.RegisterNodeUnschedulableIndex(context.Background(), mgr.GetFieldIndexer()); err == nil {
+		t.Fatal("setup must register the Node unschedulable index")
 	}
 }
 
