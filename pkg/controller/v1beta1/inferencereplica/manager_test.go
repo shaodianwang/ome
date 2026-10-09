@@ -23,6 +23,8 @@ import (
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/config"
+	"sigs.k8s.io/controller-runtime/pkg/controller/priorityqueue"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
@@ -207,6 +209,37 @@ func TestSetupWithManager_RegistersTheController(t *testing.T) {
 	err := wiredReconciler(mgr).SetupWithManager(mgr)
 	if err == nil || !strings.Contains(err.Error(), "already exists") || !strings.Contains(err.Error(), "inferencereplica") {
 		t.Fatalf("second setup must collide on the registered controller name, got %v", err)
+	}
+}
+
+// TestControllerOptions_QueueIsFirstInFirstOut pins the replica queue's order.
+// controller-runtime's priority queue serves an item the manager listed at
+// startup only when no item with a higher priority is ready, and a requeue
+// keeps its priority. Two replicas that requeue after every pass would keep a
+// re-listed replica, such as one whose teardown was in flight when the manager
+// restarted, waiting for as long as they run.
+func TestControllerOptions_QueueIsFirstInFirstOut(t *testing.T) {
+	opts := (&Reconciler{MaxConcurrentReconciles: 4}).controllerOptions()
+	if opts.UsePriorityQueue == nil || *opts.UsePriorityQueue {
+		t.Fatalf("UsePriorityQueue = %v, want false", opts.UsePriorityQueue)
+	}
+	if opts.MaxConcurrentReconciles != 4 {
+		t.Fatalf("MaxConcurrentReconciles = %d, want 4", opts.MaxConcurrentReconciles)
+	}
+
+	// The behavior the option avoids: with a priority queue, the re-listed
+	// replica is never served while the two busy replicas keep requeueing.
+	q := priorityqueue.New[string]("replica-order")
+	defer q.ShutDown()
+	q.AddWithOpts(priorityqueue.AddOpts{Priority: ptr.To(handler.LowPriority)}, "relisted")
+	q.AddWithOpts(priorityqueue.AddOpts{}, "busy-a", "busy-b")
+	for range 20 {
+		item, _ := q.Get()
+		if item == "relisted" {
+			t.Fatal("the priority queue served a startup item ahead of ready requeues; revisit whether the replica queue still needs to be first in, first out")
+		}
+		q.Done(item)
+		q.AddWithOpts(priorityqueue.AddOpts{}, item)
 	}
 }
 

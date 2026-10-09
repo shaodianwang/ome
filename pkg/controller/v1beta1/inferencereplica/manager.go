@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/utils/clock"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -27,6 +28,24 @@ import (
 	"github.com/ome-projects/ome/pkg/tpuslice/gke"
 	"github.com/ome-projects/ome/pkg/utils"
 )
+
+// controllerOptions configures the replica work queue.
+//
+// MaxConcurrentReconciles parallelizes reconciles for distinct replicas; zero
+// (unset) falls back to controller-runtime's single-worker default.
+//
+// The queue is first in, first out. A priority queue would put every replica
+// the manager lists at startup below every replica with a fresh event, and a
+// requeue keeps the priority it had. A replica whose progress comes only from
+// its own requeues, such as a teardown or scale-down wave in flight when the
+// manager restarts, would then wait for as long as other replicas keep the
+// queue busy.
+func (r *Reconciler) controllerOptions() controller.Options {
+	return controller.Options{
+		MaxConcurrentReconciles: r.MaxConcurrentReconciles,
+		UsePriorityQueue:        ptr.To(false),
+	}
+}
 
 // SetupWithManager wires the Reconciler into the controller manager.
 //
@@ -148,9 +167,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	b := ctrl.NewControllerManagedBy(mgr).
-		// MaxConcurrentReconciles parallelizes reconciles for distinct IRs;
-		// zero (unset) falls back to controller-runtime's single-worker default.
-		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
+		WithOptions(r.controllerOptions()).
 		For(&v1beta1.InferenceReplica{}).
 		Owns(&appsv1.ControllerRevision{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{})
