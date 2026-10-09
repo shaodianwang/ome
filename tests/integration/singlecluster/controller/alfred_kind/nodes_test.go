@@ -12,15 +12,18 @@ import (
 )
 
 // Signals the specs raise on a worker: planned-maintenance signals (a label,
-// a taint and a condition that configured triggers match, and a taint no
-// trigger names) and the spot label. resetWorkerSignals clears every one of
-// them.
+// a label holding a start time, a taint and a condition that configured
+// triggers match, and a taint no trigger names) and the spot label.
+// resetWorkerSignals clears every one of them.
 const (
 	maintenanceLabelKey   = "maintenance.example.com/state"
 	maintenanceLabelValue = "patching"
-	maintenanceTaintKey   = "maintenance.example.com/patching"
-	maintenanceCondition  = corev1.NodeConditionType("Patching")
-	unconfiguredTaintKey  = "other.example.com/reboot"
+	// maintenanceStartLabelKey holds the Unix time, in seconds, when
+	// maintenance starts.
+	maintenanceStartLabelKey = "maintenance.example.com/start-at"
+	maintenanceTaintKey      = "maintenance.example.com/patching"
+	maintenanceCondition     = corev1.NodeConditionType("Patching")
+	unconfiguredTaintKey     = "other.example.com/reboot"
 	// preemptibleLabelKey is one of the spot labels alfred reads by default;
 	// present with any value but "false", it marks the node preemptible.
 	preemptibleLabelKey = "node.kubernetes.io/preemptible"
@@ -50,7 +53,7 @@ func schedulableWorkers() []string {
 func resetWorkerSignals() {
 	conditions := []corev1.NodeConditionType{healthCondition, maintenanceCondition}
 	taints := []string{maintenanceTaintKey, unconfiguredTaintKey}
-	labels := []string{maintenanceLabelKey, preemptibleLabelKey}
+	labels := []string{maintenanceLabelKey, maintenanceStartLabelKey, preemptibleLabelKey}
 	for _, w := range workers {
 		gomega.Expect(kindutil.SetNodeUnschedulable(suiteCtx, k8sClient, w, false)).To(gomega.Succeed(), "uncordon %s", w)
 		for _, c := range conditions {

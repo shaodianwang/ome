@@ -28,17 +28,27 @@ const (
 // that matched.
 const (
 	labelTrigger     = "patching-label"
+	startTimeTrigger = "patching-start-time"
 	taintTrigger     = "patching-taint"
 	conditionTrigger = "patching-condition"
+)
+
+// Start times for the start-time label: one second after 1970, which has
+// passed, and the last second of 9999, which has not.
+const (
+	pastStartTime   = "1"
+	futureStartTime = "253402300799"
 )
 
 // maintenanceTriggers configures one trigger of each kind under
 // policies.nodeHealth.maintenance.triggers. A trigger has a unique name and
 // exactly one matcher: a label or taint value is matched exactly when given,
-// and a condition matcher names both type and status.
+// a start-time label matches once the Unix time in its value has passed, and
+// a condition matcher names both type and status.
 func maintenanceTriggers() configMutator {
 	return setConfig("policies.nodeHealth.maintenance.triggers", []any{
 		map[string]any{"name": labelTrigger, "label": map[string]any{"key": maintenanceLabelKey, "value": maintenanceLabelValue}},
+		map[string]any{"name": startTimeTrigger, "label": map[string]any{"key": maintenanceStartLabelKey, "valueIsStartTime": true}},
 		map[string]any{"name": taintTrigger, "taint": map[string]any{"key": maintenanceTaintKey, "value": "true", "effect": string(corev1.TaintEffectNoSchedule)}},
 		map[string]any{"name": conditionTrigger, "condition": map[string]any{"type": string(maintenanceCondition), "status": string(corev1.ConditionTrue)}},
 	})
@@ -211,6 +221,12 @@ var _ = ginkgo.Describe("alfred planned maintenance", func() {
 		})
 	})
 
+	ginkgo.It("a label start time that has passed evacuates", func() {
+		evacuatesOn("maint-start", startTimeTrigger, func(node string) {
+			labelNodeTemp(node, maintenanceStartLabelKey, pastStartTime)
+		})
+	})
+
 	ginkgo.It("a configured taint evacuates", func() {
 		evacuatesOn("maint-taint", taintTrigger, func(node string) {
 			taintNodeTemp(node, corev1.Taint{Key: maintenanceTaintKey, Value: "true", Effect: corev1.TaintEffectNoSchedule})
@@ -223,12 +239,13 @@ var _ = ginkgo.Describe("alfred planned maintenance", func() {
 		})
 	})
 
-	// Maintenance is observed only through configured triggers: a taint none
-	// of them names requests nothing, so the node gets no record, the workload
-	// no finding, and the counters do not move.
-	ginkgo.It("an unconfigured taint is inert", func() {
+	// staysInert places one single-pod workload on the source worker, raises a
+	// signal there that requests no maintenance, and checks across a quiet
+	// window that the node gets no record, the workload no finding, and the
+	// counters do not move.
+	staysInert := func(name string, raise func(node string)) {
 		src := workers[0]
-		fix := newAlfredFixture(ns.Name, withName("maint-inert"))
+		fix := newAlfredFixture(ns.Name, withName(name))
 		readyOn(fix, src, 1)
 		onSrc := livePodsOnNode(omenativePods(Default, ns.Name, fix.ISVC.Name), src)
 		Expect(onSrc).To(HaveLen(1))
@@ -238,8 +255,7 @@ var _ = ginkgo.Describe("alfred planned maintenance", func() {
 		waitJournalSettled()
 		maintenanceBefore := signalCountEventually(maintenanceSignalsMetric, src, "")
 		healthBefore := signalCountEventually(healthSignalsMetric, src, "")
-		taintNodeTemp(src, corev1.Taint{Key: unconfiguredTaintKey, Value: "1", Effect: corev1.TaintEffectNoSchedule})
-		Expect(nodeTaints(Default, src)).To(ContainElement(HaveField("Key", unconfiguredTaintKey)), "the taint is not on %s", src)
+		raise(src)
 
 		ginkgo.By("alfred keeps deciding and produces no finding, no node record and no request")
 		cycleBefore := recommendations(Default).Timestamp
@@ -256,5 +272,21 @@ var _ = ginkgo.Describe("alfred planned maintenance", func() {
 		Expect(signalCountEventually(maintenanceSignalsMetric, src, "")).To(Equal(maintenanceBefore), "the maintenance counter moved for %s", src)
 		Expect(signalCountEventually(healthSignalsMetric, src, "")).To(Equal(healthBefore), "the health counter moved for %s", src)
 		Expect(nodeEvents(Default, src, maintenanceRequestedEvent)).To(BeEmpty(), "%s was reported under maintenance", src)
+	}
+
+	// Maintenance is observed only through configured triggers: a taint none
+	// of them names requests nothing.
+	ginkgo.It("an unconfigured taint is inert", func() {
+		staysInert("maint-inert", func(node string) {
+			taintNodeTemp(node, corev1.Taint{Key: unconfiguredTaintKey, Value: "1", Effect: corev1.TaintEffectNoSchedule})
+			Expect(nodeTaints(Default, node)).To(ContainElement(HaveField("Key", unconfiguredTaintKey)), "the taint is not on %s", node)
+		})
+	})
+
+	// A start-time label requests nothing until its time has passed.
+	ginkgo.It("a label start time in the future is inert", func() {
+		staysInert("maint-future", func(node string) {
+			labelNodeTemp(node, maintenanceStartLabelKey, futureStartTime)
+		})
 	})
 })
