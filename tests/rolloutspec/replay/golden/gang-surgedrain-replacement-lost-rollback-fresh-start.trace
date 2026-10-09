@@ -46,9 +46,9 @@ tick=5 apply pod.deleted[target] pod=svc-a-engine-2-leader-0 now=t+0s
 tick=5 apply pod.deleted[target] pod=svc-a-engine-2-worker-0 now=t+0s
 tick=5 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=5 row=2 write no-op precondition=no-change
-tick=5 retryblock target=svc-a-engine-367ef4b7 persist nil→{state=Backoff attempts=1 nextRetryAt=t+1m0s reason=replacement gang (surge-index=2) lost 2 of 2 member(s) after the hand-over}
-tick=5 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#1{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=2 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=2) lost 2 of 2 member(s) after the hand-over} precondition=ok
-tick=5 warn instanceFailed index=0 pod=nil reason=replacement gang (surge-index=2) lost 2 of 2 member(s) after the hand-over
+tick=5 retryblock target=svc-a-engine-367ef4b7 persist nil→{state=Backoff attempts=1 nextRetryAt=t+1m0s reason=replacement gang (surge-index=2) lost 2 of 2 member(s) after it took over serving}
+tick=5 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#1{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=2 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=2) lost 2 of 2 member(s) after it took over serving} precondition=ok
+tick=5 warn instanceFailed index=0 pod=nil reason=replacement gang (surge-index=2) lost 2 of 2 member(s) after it took over serving
 tick=5 hold cleared
 tick=5 pass result=after:5s
 tick=6 note the operator re-applies the starting revision while the attempt is parked, which withdraws the pinned revision
@@ -57,7 +57,7 @@ tick=6 condition type=GangSchedulingUnavailable status=False reason=GangScheduli
 tick=6 row=2 write no-op precondition=no-change
 tick=6 row=2 write incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-367ef4b7 readySince=nil op=op#2{type=Update step=GangSurgeTargetCleanup target=svc-a-engine-367ef4b7 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
 tick=6 row=0 write no-op precondition=no-change
-tick=6 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=nil lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=2) lost 2 of 2 member(s) after the hand-over} precondition=ok
+tick=6 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=nil lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=2) lost 2 of 2 member(s) after it took over serving} precondition=ok
 tick=6 row=2 remove incarnation=1 phase=Creating runningRevision=nil targetRevision=svc-a-engine-367ef4b7 readySince=nil op=op#2{type=Update step=GangSurgeTargetCleanup target=svc-a-engine-367ef4b7 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
 tick=6 event Normal GangSurgeAbandoned OMENative component=engine instance=0 abandoned gang surge (surge-index=2): the roll target moved off revision svc-a-engine-367ef4b7 while the replacement gang was short of members, so nothing is rebuilt at it; the source's pods are gone and it re-enters as a fresh start at the roll target
 tick=6 hold cleared
@@ -65,7 +65,7 @@ tick=6 pass result=after:5s
 tick=7 note the pair has ended and the source has no pod, so the Create pass rebuilds the gang at the starting revision as a fresh start
 tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=7 hold cleared
-tick=7 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=op#3{type=Create step=CreatePods target=svc-a-engine-3363fef6 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=2) lost 2 of 2 member(s) after the hand-over} precondition=ok
+tick=7 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-3363fef6 readySince=t+0s op=op#3{type=Create step=CreatePods target=svc-a-engine-3363fef6 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=2) lost 2 of 2 member(s) after it took over serving} precondition=ok
 tick=7 pod create name=svc-a-engine-0-leader-0 revision=3363fef6 incarnation=1 ordinal=0
 tick=7 pod create name=svc-a-engine-0-worker-0 revision=3363fef6 incarnation=1 ordinal=0
 tick=7 row=1 write no-op precondition=no-change

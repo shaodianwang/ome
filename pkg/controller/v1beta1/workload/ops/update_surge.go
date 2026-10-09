@@ -638,11 +638,11 @@ func endWithdrawnSurge(ctx context.Context, deps workload.Deps, input workload.R
 	}
 	if runningRev != "" {
 		workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonSurgeAbandoned,
-			"OMENative %s abandoned surge to withdrawn revision %s: the replacement was lost after the hand-over and nothing is rebuilt at it; the source returns to rotation on revision %s",
+			"OMENative %s abandoned surge to withdrawn revision %s: the replacement was lost after it took over serving and nothing is rebuilt at it; the source returns to rotation on revision %s",
 			workload.InstanceKey(input.Key.Component, inst.Index), pinned, runningRev)
 	} else {
 		workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonSurgeAbandoned,
-			"OMENative %s abandoned surge to withdrawn revision %s: the replacement was lost after the hand-over and no source pod stands, so the Instance re-enters as a fresh start at revision %s",
+			"OMENative %s abandoned surge to withdrawn revision %s: the replacement was lost after it took over serving and no source pod stands, so the Instance re-enters as a fresh start at revision %s",
 			workload.InstanceKey(input.Key.Component, inst.Index), pinned, targetName)
 	}
 	return false, nil

@@ -746,7 +746,7 @@ func abandonFailedGangSurge(ctx context.Context, deps workload.Deps, input workl
 	}
 	if end.held != nil {
 		workload.RecordWarning(deps.Recorder, workload.EventTarget(input), eventReasonGangSurgeHeld,
-			"OMENative %s held: revision %s admits no further attempt after the replacement gang (surge-index=%d) was lost past the hand-over; the Instance stays Failed until a corrected revision or a reset",
+			"OMENative %s held: revision %s admits no further attempt after the replacement gang (surge-index=%d) lost members once it had taken over serving; the Instance stays Failed until a corrected revision or a reset",
 			workload.InstanceKey(comp, sourceIdx), pinned, surgeIdx)
 	} else if failedTargetRev != "" {
 		workload.RecordWarning(deps.Recorder, workload.EventTarget(input), eventReasonGangSurgeAbandoned,
@@ -980,7 +980,7 @@ func recordLostAttemptWave(ctx context.Context, input workload.ReconcileInput, p
 func replacementLostTermination(surgeIdx int32, lost, size int, now metav1.Time) *workload.InstanceTermination {
 	return &workload.InstanceTermination{
 		Reason:  ReplacementLostReason,
-		Message: fmt.Sprintf("replacement gang (surge-index=%d) lost %d of %d member(s) after the hand-over", surgeIdx, lost, size),
+		Message: fmt.Sprintf("replacement gang (surge-index=%d) lost %d of %d member(s) after it took over serving", surgeIdx, lost, size),
 		Time:    now,
 	}
 }
@@ -997,7 +997,7 @@ func holdLostGangSurge(ctx context.Context, deps workload.Deps, input workload.R
 	}
 	held := &workload.InstanceTermination{
 		Reason:  ReplacementLostReason,
-		Message: fmt.Sprintf("replacement gang (surge-index=%d) lost after the hand-over; revision %s holds after %d attempt(s)", surgeIdx, pin, attempts),
+		Message: fmt.Sprintf("replacement gang (surge-index=%d) lost members after it took over serving; revision %s holds after %d attempt(s)", surgeIdx, pin, attempts),
 		Time:    metav1.NewTime(input.Now()),
 	}
 	return abandonFailedGangSurge(ctx, deps, input, plan, src.Index, surgeIdx, src.RunningRevision, "", "", workload.CauseUnattributed, gangSurgeEnd{held: held})

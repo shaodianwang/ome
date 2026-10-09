@@ -59,8 +59,8 @@ tick=7 apply pod.deleted[target] pod=svc-a-engine-1-leader-0 now=t+5m1s
 tick=7 apply timer.stuckPodGrace to=t+5m1s now=t+5m1s
 tick=7 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=7 row=1 write no-op precondition=no-change
-tick=7 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 1 of 2 member(s) after the hand-over} precondition=ok
-tick=7 warn instanceFailed index=0 pod=nil reason=replacement gang (surge-index=1) lost 1 of 2 member(s) after the hand-over
+tick=7 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 1 of 2 member(s) after it took over serving} precondition=ok
+tick=7 warn instanceFailed index=0 pod=nil reason=replacement gang (surge-index=1) lost 1 of 2 member(s) after it took over serving
 tick=7 hold cleared
 tick=7 row=0 write no-op precondition=no-change
 tick=7 row=1 write incarnation=1 phase=Failed runningRevision=nil targetRevision=svc-a-engine-367ef4b7 readySince=nil op=op#3{type=Update step=GangSurgeTarget target=svc-a-engine-367ef4b7 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-1-worker-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
@@ -71,7 +71,7 @@ tick=8 apply timer.stuckPodGrace to=t+5m1s now=t+5m1s
 tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=8 row=1 write no-op precondition=no-change
 tick=8 pod create name=svc-a-engine-1-leader-0 revision=367ef4b7 incarnation=1 ordinal=0
-tick=8 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+5m1s lastProgressAt=t+5m1s deadline=t+35m1s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 1 of 2 member(s) after the hand-over} precondition=ok
+tick=8 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+5m1s lastProgressAt=t+5m1s deadline=t+35m1s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 1 of 2 member(s) after it took over serving} precondition=ok
 tick=8 event Normal GangSurgeRebuilt OMENative component=engine instance=0 rebuilt 1 of 2 member(s) of the replacement gang (surge-index=1) at revision svc-a-engine-367ef4b7; retry 1 under a fresh deadline
 tick=8 hold cleared
 tick=8 pass result=after:5s

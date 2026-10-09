@@ -42,7 +42,7 @@ tick=6 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+0s
 tick=6 apply spec.revision image=registry.example.com/runtime:v1 generation=2 now=t+0s
 tick=6 row=0 write no-op precondition=no-change
 tick=6 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
-tick=6 event Normal SurgeAbandoned OMENative component=engine instance=0 abandoned surge to withdrawn revision svc-a-engine-6f8b1e6c: the replacement was lost after the hand-over and no source pod stands, so the Instance re-enters as a fresh start at revision svc-a-engine-882059bb
+tick=6 event Normal SurgeAbandoned OMENative component=engine instance=0 abandoned surge to withdrawn revision svc-a-engine-6f8b1e6c: the replacement was lost after it took over serving and no source pod stands, so the Instance re-enters as a fresh start at revision svc-a-engine-882059bb
 tick=6 hold cleared
 tick=6 pass result=after:5s
 tick=7 note the row has no pod, so the Create pass rebuilds the Instance at the starting revision as a fresh start

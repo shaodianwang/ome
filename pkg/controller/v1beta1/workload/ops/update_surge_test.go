@@ -4316,7 +4316,7 @@ func holdSourceForDrain(t *testing.T, c client.Client, source *corev1.Pod) {
 // Cells: instance/Update/SurgeDrain/pod.deleted[target]/before, instance/Update/SurgeDrain/spec.revision/before, instance/Update/SurgeDrain/spec.rollbackTarget[set]/before
 func TestSurgeUpdate_WithdrawnTargetEndsTheRollWhenTheReplacementIsLost(t *testing.T) {
 	const running, pinned, newer = "llama-70b-engine-rev-v1hash", "llama-70b-engine-rev-v2hash", "llama-70b-engine-rev-v3hash"
-	wantMessage := "abandoned surge to withdrawn revision " + pinned + ": the replacement was lost after the hand-over and nothing is rebuilt at it; the source returns to rotation on revision " + running
+	wantMessage := "abandoned surge to withdrawn revision " + pinned + ": the replacement was lost after it took over serving and nothing is rebuilt at it; the source returns to rotation on revision " + running
 	for _, tc := range []struct{ name, target string }{
 		{"rolled back to the running revision", running},
 		{"moved on to a corrected revision", newer},
@@ -4416,7 +4416,7 @@ func TestSurgeUpdate_WithdrawnTargetWithNoSourceLeftEndsAsAFreshStart(t *testing
 		t.Fatalf("the row must take the fresh-start Failed shape on %s, got phase=%s running=%s target=%q op=%+v",
 			running, s.Phase, s.RunningRevision, s.TargetRevision, s.Operation)
 	}
-	wantMessage := "abandoned surge to withdrawn revision " + pinned + ": the replacement was lost after the hand-over and no source pod stands, so the Instance re-enters as a fresh start at revision " + running
+	wantMessage := "abandoned surge to withdrawn revision " + pinned + ": the replacement was lost after it took over serving and no source pod stands, so the Instance re-enters as a fresh start at revision " + running
 	events := drainRecorderEvents(rec)
 	matched := 0
 	for _, e := range events {

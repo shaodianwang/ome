@@ -53,9 +53,9 @@ tick=6 apply pod.deleted[target] pod=svc-a-engine-1-leader-0 now=t+0s
 tick=6 apply pod.deleted[target] pod=svc-a-engine-1-worker-0 now=t+0s
 tick=6 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=6 row=1 write no-op precondition=no-change
-tick=6 retryblock target=svc-a-engine-367ef4b7 persist nil→{state=Backoff attempts=1 nextRetryAt=t+1m0s reason=replacement gang (surge-index=1) lost 2 of 2 member(s) after the hand-over}
-tick=6 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 2 of 2 member(s) after the hand-over} precondition=ok
-tick=6 warn instanceFailed index=0 pod=nil reason=replacement gang (surge-index=1) lost 2 of 2 member(s) after the hand-over
+tick=6 retryblock target=svc-a-engine-367ef4b7 persist nil→{state=Backoff attempts=1 nextRetryAt=t+1m0s reason=replacement gang (surge-index=1) lost 2 of 2 member(s) after it took over serving}
+tick=6 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 2 of 2 member(s) after it took over serving} precondition=ok
+tick=6 warn instanceFailed index=0 pod=nil reason=replacement gang (surge-index=1) lost 2 of 2 member(s) after it took over serving
 tick=6 hold cleared
 tick=6 pass result=after:5s
 tick=7 note the ladder's backoff is due and the apiserver sheds the rebuild's first create; the members missing since the last published count are a rebuild still pending, so nothing is charged, the source stays as the loss left it and the pass waits out the server's delay
@@ -71,8 +71,8 @@ tick=8 condition type=GangSchedulingUnavailable status=False reason=GangScheduli
 tick=8 row=1 write no-op precondition=no-change
 tick=8 pod create name=svc-a-engine-1-leader-0 revision=367ef4b7 incarnation=1 ordinal=0
 tick=8 pod create name=svc-a-engine-1-worker-0 revision=367ef4b7 incarnation=1 ordinal=0
-tick=8 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+1m1s lastProgressAt=t+1m1s deadline=t+31m1s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 2 of 2 member(s) after the hand-over} precondition=ok
-tick=8 retryblock target=svc-a-engine-367ef4b7 persist {state=Backoff attempts=1 nextRetryAt=t+1m0s reason=replacement gang (surge-index=1) lost 2 of 2 member(s) after the hand-over}→{state=RetryInProgress attempts=1 nextRetryAt=t+1m0s reason=replacement gang (surge-index=1) lost 2 of 2 member(s) after the hand-over}
+tick=8 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+1m1s lastProgressAt=t+1m1s deadline=t+31m1s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 2 of 2 member(s) after it took over serving} precondition=ok
+tick=8 retryblock target=svc-a-engine-367ef4b7 persist {state=Backoff attempts=1 nextRetryAt=t+1m0s reason=replacement gang (surge-index=1) lost 2 of 2 member(s) after it took over serving}→{state=RetryInProgress attempts=1 nextRetryAt=t+1m0s reason=replacement gang (surge-index=1) lost 2 of 2 member(s) after it took over serving}
 tick=8 event Normal GangSurgeRebuilt OMENative component=engine instance=0 rebuilt 2 of 2 member(s) of the replacement gang (surge-index=1) at revision svc-a-engine-367ef4b7; retry 1 under a fresh deadline
 tick=8 hold cleared
 tick=8 pass result=after:5s
@@ -102,8 +102,8 @@ tick=11 condition type=GangSchedulingUnavailable status=False reason=GangSchedul
 tick=11 row=1 write no-op precondition=no-change
 tick=11 row=0 write no-op precondition=no-change
 tick=11 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-367ef4b7 readySince=t+1m1s op=nil precondition=ok
-tick=11 retryblock target=svc-a-engine-367ef4b7 remove {state=RetryInProgress attempts=1 nextRetryAt=t+1m0s reason=replacement gang (surge-index=1) lost 2 of 2 member(s) after the hand-over}→nil
-tick=11 row=0 remove incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+1m1s lastProgressAt=t+1m1s deadline=t+31m1s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 2 of 2 member(s) after the hand-over} precondition=ok
+tick=11 retryblock target=svc-a-engine-367ef4b7 remove {state=RetryInProgress attempts=1 nextRetryAt=t+1m0s reason=replacement gang (surge-index=1) lost 2 of 2 member(s) after it took over serving}→nil
+tick=11 row=0 remove incarnation=1 phase=Updating runningRevision=svc-a-engine-3363fef6 targetRevision=svc-a-engine-367ef4b7 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-367ef4b7 strategy=SurgeThenDrain surgeIndex=1 retryCount=1 started=t+1m1s lastProgressAt=t+1m1s deadline=t+31m1s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 2 of 2 member(s) after it took over serving} precondition=ok
 tick=11 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 gang surge complete: instance 1 promoted to revision svc-a-engine-367ef4b7
 tick=11 hold cleared
 tick=11 pass result=requeue

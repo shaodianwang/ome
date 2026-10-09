@@ -69,8 +69,8 @@ tick=8 apply pod.deleted[target] pod=svc-a-engine-1-worker-0 now=t+30m1s
 tick=8 apply api.quotaDenied verb=create resource=pods count=1 now=t+30m1s
 tick=8 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
 tick=8 row=1 write no-op precondition=no-change
-tick=8 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-f5f6d007 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 1 of 2 member(s) after the hand-over} precondition=ok
-tick=8 warn instanceFailed index=0 pod=nil reason=replacement gang (surge-index=1) lost 1 of 2 member(s) after the hand-over
+tick=8 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-f5f6d007 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 1 of 2 member(s) after it took over serving} precondition=ok
+tick=8 warn instanceFailed index=0 pod=nil reason=replacement gang (surge-index=1) lost 1 of 2 member(s) after it took over serving
 tick=8 pod create-rejected name=svc-a-engine-1-worker-0 rejection=api.quotaDenied
 tick=8 row=1 write incarnation=1 phase=Failed runningRevision=nil targetRevision=svc-a-engine-f5f6d007 readySince=nil op=op#3{type=Update step=GangSurgeTarget target=svc-a-engine-f5f6d007 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-1-worker-0 reason=ContainersNotReady container=ome-container message=pod is Running but its containers never became ready; not ready: ome-container} precondition=ok
 tick=8 event Normal InstanceQuotaBlocked OMENative component=engine instance=1 waiting on capacity: pods "svc-a" is forbidden: exceeded quota: compute-resources, requested: pods=1, used: pods=4, limited: pods=4
@@ -129,7 +129,7 @@ tick=15 condition type=GangSchedulingUnavailable status=False reason=GangSchedul
 tick=15 row=1 write no-op precondition=no-change
 tick=15 row=0 write no-op precondition=no-change
 tick=15 row=1 write incarnation=1 phase=Ready runningRevision=svc-a-engine-f5f6d007 readySince=t+30m1s op=nil lastFailure={pod=svc-a-engine-1-worker-0 reason=ContainersNotReady container=ome-container message=pod is Running but its containers never became ready; not ready: ome-container} precondition=ok
-tick=15 row=0 remove incarnation=1 phase=Failed runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-f5f6d007 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 1 of 2 member(s) after the hand-over} precondition=ok
+tick=15 row=0 remove incarnation=1 phase=Failed runningRevision=svc-a-engine-4c292506 targetRevision=svc-a-engine-f5f6d007 readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-f5f6d007 strategy=SurgeThenDrain surgeIndex=1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=ReplacementLost message=replacement gang (surge-index=1) lost 1 of 2 member(s) after it took over serving} precondition=ok
 tick=15 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 gang surge complete: instance 1 promoted to revision svc-a-engine-f5f6d007
 tick=15 hold cleared
 tick=15 pass result=requeue
