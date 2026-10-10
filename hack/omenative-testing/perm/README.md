@@ -868,7 +868,11 @@ the 1×1 mutual wall only when a pairing Component updates drain-first
 regardless and the drain-time half of the pair floor holds a source's drain
 until the peer's target cohort serves, so an unpaired sample at 1×1 is a
 violation; `p1817` to `p1819` (one side slow through `runner.env
-TEST_STARTUP_DELAY`) and the symmetric `p810`/`p830` assert it. Waive with
+TEST_STARTUP_DELAY`) and the symmetric `p810`/`p830` assert it. The hold also
+keeps a replacement that cannot pair yet from retiring its source while other
+old pairs still serve: `p12106`/`p12107` (6 engines + 2 decoders rolled 3+1 at
+a time, one side slow) carry `hold=1` because without it the first old
+decoder, or three old engines, would leave rotation for nothing. Waive with
 `inv_off=C` + a line-2 `# reason:` comment.
 
 A `canary=auto` case with a canary group in the YAML drives the same protocol

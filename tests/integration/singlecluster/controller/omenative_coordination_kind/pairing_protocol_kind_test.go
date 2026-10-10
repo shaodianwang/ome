@@ -294,6 +294,112 @@ var _ = ginkgo.Describe("behavior — pairing protocol", ginkgo.Ordered, func() 
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 
+	ginkgo.It("2x2 surge transition with a slow engine keeps every old decoder serving until a new-cohort engine serves", func() {
+		// Config: 2 engines + 2 decoders, SurgeThenDrain, one blueGreen group,
+		// protocol v1; the engine's containers start 45 s late, so a decoder's
+		// replacement is Ready long before any engine's. With two old decoders
+		// a floor of one pair would let the first go while its replacement can
+		// pair with nothing.
+		// Invariants: no v1 decoder leaves rotation before a v2 engine serves;
+		// the decoder's drain is held with gate=Pairing meanwhile; a pairable
+		// traffic pair exists at every sample; full convergence on v2 with the
+		// hold gone.
+		const name = "pairing-2x2-slow-engine"
+		fix := newCoordFixture(ns.Name, WithISVCName(name),
+			WithEngineReplicas(2),
+			WithDecoderReplicas(2),
+			WithBlueGreenGroup(v1beta1.EngineComponent, v1beta1.DecoderComponent),
+			WithPairingProtocol("nixl-v1"),
+			WithEngineImage("fake-serving:v1"),
+			WithEngineStartupDelay(45))
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+
+		// servingPods counts the Ready, non-terminating pods of one Component
+		// and cohort.
+		servingPods := func(g Gomega, comp v1beta1.ComponentType, protocol string) int {
+			n := 0
+			for _, pod := range listOMENativePods(g, ns.Name, name) {
+				if pod.Labels[constants.OMEComponentLabel] != string(comp) ||
+					pod.Labels[query.LabelPairingProtocol] != protocol || pod.DeletionTimestamp != nil {
+					continue
+				}
+				for _, cond := range pod.Status.Conditions {
+					if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+						n++
+						break
+					}
+				}
+			}
+			return n
+		}
+
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, name)
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
+			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
+				To(Equal(v1beta1.CoordinationPhaseIdle))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle).NotTo(BeNil())
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		Eventually(func(g Gomega) {
+			assertPairingSurface(g, ns.Name, name, "nixl-v1")
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, name)
+			cur.Spec.Rollout.PairingProtocol = ptr.To("nixl-v2")
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// A decoder's replacement is Ready within seconds; its source may not
+		// leave rotation while no engine serves v2, and the hold must say why.
+		Eventually(func(g Gomega) {
+			ir := freshInferenceReplica(g, ns.Name, name, v1beta1.DecoderComponent)
+			g.Expect(ir.Status.RolloutHold).NotTo(BeNil(), "the decoder drain must be held while every engine serves v1")
+			g.Expect(ir.Status.RolloutHold.Gate).To(Equal(v1beta1.RolloutHoldGatePairing))
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Until a v2 engine serves, both v1 decoders stay in rotation. The
+		// first clause ends the check once the engines are up, whatever the
+		// window length.
+		Consistently(func(g Gomega) {
+			if servingPods(g, v1beta1.EngineComponent, "nixl-v2") > 0 {
+				return
+			}
+			g.Expect(servingPods(g, v1beta1.DecoderComponent, "nixl-v1")).To(Equal(2),
+				"a v1 decoder left rotation before any v2 engine served")
+			c := freshISVC(g, ns.Name, name)
+			g.Expect(pairableTrafficPairExists(c)).To(BeTrue(),
+				"no pairable engine+decoder traffic pair: engine=%v decoder=%v",
+				c.Status.Components[v1beta1.EngineComponent].Traffic,
+				c.Status.Components[v1beta1.DecoderComponent].Traffic)
+		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, name)
+			g.Expect(pairableTrafficPairExists(c)).To(BeTrue(),
+				"pair must stay alive to the end: engine=%v decoder=%v",
+				c.Status.Components[v1beta1.EngineComponent].Traffic,
+				c.Status.Components[v1beta1.DecoderComponent].Traffic)
+			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
+			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
+			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
+				To(Equal(v1beta1.CoordinationPhaseIdle))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(c.Status.Components[v1beta1.DecoderComponent].Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			assertPairingSurface(g, ns.Name, name, "nixl-v2")
+			ir := freshInferenceReplica(g, ns.Name, name, v1beta1.DecoderComponent)
+			if ir.Status.RolloutHold != nil {
+				g.Expect(ir.Status.RolloutHold.Gate).NotTo(Equal(v1beta1.RolloutHoldGatePairing),
+					"the Pairing hold must clear once the transition converged")
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
 	// The admission rule denying uncoordinated protocol changes is covered by
 	// the envtest webhook suite — the KIND environment runs no webhook server.
 })

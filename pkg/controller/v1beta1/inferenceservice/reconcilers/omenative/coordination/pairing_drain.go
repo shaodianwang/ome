@@ -17,19 +17,20 @@ import (
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// EvaluatePairingDrain is the drain-time half of the pair floor.
+// EvaluatePairingDrain is the drain-time half of the pair floor. A surge
+// update asks it right before its source leaves rotation, with the
+// replacement already serving, and the source stays in rotation in two
+// cases:
+//   - the replacement cannot pair yet: no serving pod of the peer Component
+//     runs the target cohort (or the empty protocol, which pairs with
+//     anything), so retiring a source that does pair would trade serving
+//     capacity for none;
+//   - the source is the last pod keeping any pairable engine+decoder pair
+//     alive.
 //
-// CheckPairing runs once, at operation start, over the simulated end state
-// of the whole surge-and-drain op. At 1×1 with no target-cohort capacity it
-// must admit both first movers or deadlock the transition, which leaves each
-// source's drain to its own replacement's readiness; when one side's
-// replacement is slower, the router is left with an engine and a decoder of
-// different cohorts until it arrives. A surge update therefore asks again
-// right before its source leaves rotation, with the replacement already
-// serving: once the source's pods are gone, does some pairable serving
-// engine+decoder pair remain? Holding here cannot deadlock, because the
-// peer's replacement comes up whether or not this drain waits, so there is
-// no mutual-wall escape at this point.
+// Neither hold can deadlock under a surge strategy: the peer's replacements
+// come up whether or not this drain waits, and the first one to serve
+// releases the first hold.
 //
 // It reads pods, not InferenceReplica status: a single-pod surge keeps its
 // replacement inside the source's Instance until the promote, so only the
@@ -110,17 +111,57 @@ func EvaluatePairingDrain(ctx context.Context, reads client.Reader, isvc *v1beta
 		after[component][proto]--
 		leaving[proto] = struct{}{}
 	}
+	peer := pairingPeer(component)
+	if !pairsWithPeer(serving[peer], target) && anyPairsWithPeer(serving[peer], leaving) {
+		return false, v1beta1.RolloutHoldGatePairing, fmt.Sprintf(
+			"pairing protocol transition to %q: the replacement %s cannot pair because no serving %s runs cohort %q yet; holding the drain of the serving %s of cohort %s until one does",
+			target, component, peer, target, component, cohortList(leaving))
+	}
 	if pairableServingPairExists(after) {
 		return true, "", ""
 	}
-	cohorts := make([]string, 0, len(leaving))
-	for proto := range leaving {
-		cohorts = append(cohorts, fmt.Sprintf("%q", proto))
-	}
-	sort.Strings(cohorts)
 	return false, v1beta1.RolloutHoldGatePairing, fmt.Sprintf(
 		"pairing protocol transition to %q: draining the serving %s pods of cohort %s would leave no pairable serving engine+decoder pair; holding the drain until cohort %q serves on both Components",
-		target, component, strings.Join(cohorts, ","), target)
+		target, component, cohortList(leaving), target)
+}
+
+// pairingPeer is the other pairing Component.
+func pairingPeer(component v1beta1.ComponentType) v1beta1.ComponentType {
+	if component == v1beta1.DecoderComponent {
+		return v1beta1.EngineComponent
+	}
+	return v1beta1.DecoderComponent
+}
+
+// pairsWithPeer reports whether a pod of cohort proto can pair with some
+// serving pod of the peer: equal protocols, or either side empty.
+func pairsWithPeer(peerServing map[string]int32, proto string) bool {
+	for p, n := range peerServing {
+		if n > 0 && (p == "" || proto == "" || p == proto) {
+			return true
+		}
+	}
+	return false
+}
+
+// anyPairsWithPeer reports whether any of the cohorts pairs with the peer.
+func anyPairsWithPeer(peerServing map[string]int32, cohorts map[string]struct{}) bool {
+	for proto := range cohorts {
+		if pairsWithPeer(peerServing, proto) {
+			return true
+		}
+	}
+	return false
+}
+
+// cohortList renders cohorts for a hold reason, sorted and quoted.
+func cohortList(cohorts map[string]struct{}) string {
+	out := make([]string, 0, len(cohorts))
+	for proto := range cohorts {
+		out = append(out, fmt.Sprintf("%q", proto))
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
 }
 
 // groupPairsEngineAndDecoder reports whether the resolved group spans both
