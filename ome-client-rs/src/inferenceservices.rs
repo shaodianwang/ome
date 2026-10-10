@@ -5462,6 +5462,12 @@ pub struct InferenceServiceStatusPlacementCandidates {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "observationFailingSince"
+    )]
+    pub observation_failing_since: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "observationKnown"
     )]
     pub observation_known: Option<bool>,

@@ -642,7 +642,7 @@ is:
 |---|---|
 | Source changes affinity or weights | Recompute targets; move toward the new declared placement. |
 | A WorkloadCluster label changes or registry membership changes | Recompute M. All and static Split converge to the new membership; Single keeps its winner only while still matching. |
-| Transient connection failure | Mark observation unknown; preserve owned allocations and last-known serving evidence under the existing health policy. Do not count a read error as freed capacity. |
+| Transient connection failure | Re-read the member within the reconcile as `placement.memberReadRetry` allows. If reads still fail, mark the observation unknown and preserve owned allocations. The home keeps its last ready count for `placement.observationGrace`, then loses it. Do not count a read error as freed capacity. |
 | Static Split member cannot admit its share | Keep the assigned share pending; preserve weights and report the deficit. |
 | Other workloads start/stop, or quota changes | Hardware weights stay unchanged; admission/shortfall status may change. |
 | Accepted hardware totals or membership change in SplitByCapacity | Recompute the hardware-proportional targets and converge through a bounded transition. |
@@ -763,6 +763,20 @@ list. The proposed status must distinguish intent from observation:
 Exact status field names are to be finalized with API review. The distinctions
 are required: `Placed` plus three admitted replicas must not imply satisfaction
 of an 18-replica request. Unknown observations remain unknown, not zero.
+
+A home whose reads fail keeps its last known counts. Its ready count is the
+routing weight, so it is kept only for `placement.observationGrace`, counted
+from the first failed read. The candidate records that time in
+`observationFailingSince`, so a controller restart neither restarts nor ends
+the grace. A successful read clears it. With the grace unset, the first failed
+read withdraws the ready count. A home that was already unknown but has no
+stored start gets no grace, so a CRD that drops the field cannot keep a grace
+running forever. During the grace the home still counts as
+unknown: it does not make the source Ready, and allocation moves wait for it.
+Before a read counts as failed, `placement.memberReadRetry` can repeat it
+within the reconcile after a timeout, a dropped connection, throttling, or a
+server error. Each read has its own `placement.fanoutTimeout`, and the controller
+requeues no later than the end of the earliest grace.
 
 Compute satisfied floor per home as `min(assignedFloor, admittedReplicas)` using
 observations belonging to the applied plan. Extra autoscaled replicas on one
