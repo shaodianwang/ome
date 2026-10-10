@@ -12,6 +12,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -21,16 +22,19 @@ import (
 // update asks it right before its source leaves rotation, with the
 // replacement already serving, and the source stays in rotation in two
 // cases:
-//   - the replacement cannot pair yet: no serving pod of the peer Component
-//     runs the target cohort (or the empty protocol, which pairs with
-//     anything), so retiring a source that does pair would trade serving
-//     capacity for none;
+//   - the replacement cannot pair yet and the peer Component updates by
+//     SurgeThenDrain: no serving pod of the peer runs the target cohort (or
+//     the empty protocol, which pairs with anything), so retiring a source
+//     that does pair would trade serving capacity for none, and the peer's
+//     replacements come up without waiting on this drain, so the first one
+//     to serve releases the hold;
 //   - the source is the last pod keeping any pairable engine+decoder pair
 //     alive.
 //
-// Neither hold can deadlock under a surge strategy: the peer's replacements
-// come up whether or not this drain waits, and the first one to serve
-// releases the first hold.
+// A drain-first or in-place peer is never waited on: its new cohort appears
+// only by leaving the old one, a step the start-time gate admits on this
+// Component's promoted state, so a hold here would wait on a step that waits
+// on this drain.
 //
 // It reads pods, not InferenceReplica status: a single-pod surge keeps its
 // replacement inside the source's Instance until the promote, so only the
@@ -113,9 +117,15 @@ func EvaluatePairingDrain(ctx context.Context, reads client.Reader, isvc *v1beta
 	}
 	peer := pairingPeer(component)
 	if !pairsWithPeer(serving[peer], target) && anyPairsWithPeer(serving[peer], leaving) {
-		return false, v1beta1.RolloutHoldGatePairing, fmt.Sprintf(
-			"pairing protocol transition to %q: the replacement %s cannot pair because no serving %s runs cohort %q yet; holding the drain of the serving %s of cohort %s until one does",
-			target, component, peer, target, component, cohortList(leaving))
+		surges, err := peerSurges(ctx, reads, isvc, peer)
+		if err != nil {
+			return false, v1beta1.RolloutHoldGatePairing, fmt.Sprintf("pairing drain gate: cannot read the %s replica, failing closed: %v", peer, err)
+		}
+		if surges {
+			return false, v1beta1.RolloutHoldGatePairing, fmt.Sprintf(
+				"pairing protocol transition to %q: the replacement %s cannot pair because no serving %s runs cohort %q yet; holding the drain of the serving %s of cohort %s until one does",
+				target, component, peer, target, component, cohortList(leaving))
+		}
 	}
 	if pairableServingPairExists(after) {
 		return true, "", ""
@@ -123,6 +133,24 @@ func EvaluatePairingDrain(ctx context.Context, reads client.Reader, isvc *v1beta
 	return false, v1beta1.RolloutHoldGatePairing, fmt.Sprintf(
 		"pairing protocol transition to %q: draining the serving %s pods of cohort %s would leave no pairable serving engine+decoder pair; holding the drain until cohort %q serves on both Components",
 		target, component, cohortList(leaving), target)
+}
+
+// peerSurges reports whether the peer Component updates by SurgeThenDrain,
+// the one strategy whose new-cohort pods come up before any old pod leaves.
+// An unset strategy is that default; a missing replica reports false.
+func peerSurges(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, peer v1beta1.ComponentType) (bool, error) {
+	ir, err := irprojector.ComponentIRFor(ctx, reads, isvc, peer)
+	if err != nil || ir == nil {
+		return false, err
+	}
+	if ir.Spec.Lifecycle == nil || ir.Spec.Lifecycle.UpdateStrategy == nil {
+		return true, nil
+	}
+	switch ir.Spec.Lifecycle.UpdateStrategy.Type {
+	case v1beta1.UpdateStrategySurgeThenDrain, "":
+		return true, nil
+	}
+	return false, nil
 }
 
 // pairingPeer is the other pairing Component.
