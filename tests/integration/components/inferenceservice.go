@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
@@ -22,6 +23,7 @@ type inferenceServiceOpts struct {
 	modelCacheProvider        sharded.Provider
 	trafficTranslator         traffic.Translator
 	quotaAcceleratorResources []string
+	recorder                  record.EventRecorder
 }
 
 // WithISVCModelCacheProvider sets the ISVC reconciler's ModelCache.
@@ -44,6 +46,15 @@ func WithTrafficTranslator(tr traffic.Translator) InferenceServiceOption {
 	return func(o *inferenceServiceOpts) { o.trafficTranslator = tr }
 }
 
+// WithISVCRecorder sets the recorder the ISVC reconciler raises its Events
+// through. Unset, the reconciler records through the manager's own
+// recorder, which runs under client-go's default per-object event budget;
+// a suite that counts Events on a churning object supplies a recorder
+// built under the configured budget (kindfix.StandardOMESetup).
+func WithISVCRecorder(recorder record.EventRecorder) InferenceServiceOption {
+	return func(o *inferenceServiceOpts) { o.recorder = recorder }
+}
+
 // WithQuotaAcceleratorResources names the resources that put a Component under
 // the quota backend, mirroring the manager's --accelerator-resources flag. Only
 // a suite asserting that a cpu-only Component sheds its Kueue queue-name label
@@ -56,8 +67,8 @@ func WithQuotaAcceleratorResources(names ...string) InferenceServiceOption {
 // SetupInferenceService registers the InferenceServiceReconciler with
 // the supplied manager. Constructs a kubernetes.Clientset from the
 // manager's rest.Config (the reconciler reads ConfigMaps via Clientset
-// rather than the cached client). Event recorder uses
-// mgr.GetEventRecorderFor — sufficient for tests, no broadcaster sink.
+// rather than the cached client). Events go through the recorder
+// WithISVCRecorder supplies, else through mgr.GetEventRecorderFor.
 //
 // The reconciler fetches DeployConfig / IngressConfig from in-cluster
 // ConfigMaps on each reconcile; tests do not pre-build those configs
@@ -87,12 +98,16 @@ func SetupInferenceService(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 		return fmt.Errorf("SetupInferenceService: load status representation settings: %w", err)
 	}
 
+	recorder := cfg.recorder
+	if recorder == nil {
+		recorder = mgr.GetEventRecorderFor("InferenceService")
+	}
 	r := &v1beta1isvccontroller.InferenceServiceReconciler{
 		Client:                mgr.GetClient(),
 		Clientset:             clientset,
 		Log:                   ctrl.Log.WithName("InferenceService"),
 		Scheme:                mgr.GetScheme(),
-		Recorder:              mgr.GetEventRecorderFor("InferenceService"),
+		Recorder:              recorder,
 		InstanceStatusDecoder: decoder,
 		ModelCache:            cfg.modelCacheProvider,
 		TrafficReconciler:     trafficReconciler,

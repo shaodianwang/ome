@@ -22,8 +22,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
@@ -148,6 +151,17 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 		if err := dropConfiguredMaxReplicas(ctx, directClient); err != nil {
 			return err
 		}
+		// Clientset supplies the startup-scoped settings through the same
+		// paths as cmd/manager: the event budget here, the IR controller's
+		// scale and status settings below.
+		clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+		if err != nil {
+			return err
+		}
+		recorder, err := budgetedEventRecorders(mgr, clientset)
+		if err != nil {
+			return err
+		}
 
 		// Register the OMENative pod field-index on the manager cache, exactly
 		// as cmd/manager does (query.RegisterOMENativePodIndex). Without it the
@@ -180,17 +194,13 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 		if err := components.SetupBaseModel(ctx, mgr, components.WithModelCacheProvider(provider)); err != nil {
 			return err
 		}
-		if err := components.SetupInferenceService(ctx, mgr, components.WithISVCModelCacheProvider(provider)); err != nil {
+		if err := components.SetupInferenceService(ctx, mgr,
+			components.WithISVCModelCacheProvider(provider),
+			components.WithISVCRecorder(recorder("InferenceService"))); err != nil {
 			return err
 		}
 
 		if opts.WireInferenceReplica {
-			// Clientset supplies dynamic lifecycle settings and the startup-scoped
-			// scale settings through the same paths as cmd/manager.
-			clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
-			if err != nil {
-				return err
-			}
 			podBatchSizes, err := controllerconfig.LoadPodBatchSizes(clientset)
 			if err != nil {
 				return fmt.Errorf("load lifecycle scale settings: %w", err)
@@ -207,7 +217,7 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 				RuntimeSelector:          runtimeselector.New(mgr.GetClient()),
 				InstanceStatusDecoder:    irstatus.NewDecoder(statusConfig.DecodeBound()),
 				InstanceStatusTarget:     statusConfig.InstanceStatusEncoding,
-				Recorder:                 mgr.GetEventRecorderFor("InferenceReplica"),
+				Recorder:                 recorder("InferenceReplica"),
 				ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
 				ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
 				ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,
@@ -216,6 +226,33 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 		}
 		return nil
 	}
+}
+
+// budgetedEventRecorders returns the recorder factory the wired controllers
+// share: one broadcaster under the eventRecorder budget the seeded ConfigMap
+// carries, recording to the cluster, built as cmd/manager builds its own.
+// The manager's own recorder provider keeps client-go's default budget,
+// which drops every event past the burst about one object and event type
+// until the bucket refills, so a suite counting the warnings a churning
+// Component raises would miss the ones it waits for. The broadcaster stops
+// with the manager.
+func budgetedEventRecorders(mgr ctrl.Manager, clientset kubernetes.Interface) (func(component string) record.EventRecorder, error) {
+	settings, err := controllerconfig.LoadEventRecorderSettings(clientset)
+	if err != nil {
+		return nil, fmt.Errorf("load eventRecorder configuration: %w", err)
+	}
+	broadcaster := record.NewBroadcasterWithCorrelatorOptions(settings.CorrelatorOptions())
+	broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientset.CoreV1().Events("")})
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		<-ctx.Done()
+		broadcaster.Shutdown()
+		return nil
+	})); err != nil {
+		return nil, fmt.Errorf("register the event broadcaster's shutdown: %w", err)
+	}
+	return func(component string) record.EventRecorder {
+		return broadcaster.NewRecorder(mgr.GetScheme(), corev1.EventSource{Component: component})
+	}, nil
 }
 
 // dropConfiguredMaxReplicas removes deploy.replicas.defaultMaxReplicas from

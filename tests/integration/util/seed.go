@@ -39,16 +39,27 @@ func InferenceReplicaConfigJSON() string {
 	return `{"controllerIdentity":{"groups":["system:masters","kubeadm:cluster-admins"]}}`
 }
 
+// EventRecorderConfigJSON is the eventRecorder block the envtest and KIND
+// fixtures seed: the per-object event budget the chart ships, so a manager
+// built from the seed records events under the budget a deployed one has.
+// client-go's own default keeps 25 events per object and event type and
+// refills one every five minutes, which a churning Component spends before
+// the warnings a spec waits for are raised.
+func EventRecorderConfigJSON() string {
+	return `{"burstSize":400,"refillInterval":"5s"}`
+}
+
 // SeedDefaultConfigMaps creates the ConfigMap the controllers read at
 // reconcile time:
 //
 //   - inferenceservice-config — keys: ingress, deploy, lifecycle, omeAgent,
-//     rollout, omenativeStatus, inferenceReplica. The ISVC reconciler reads
-//     ingress + deploy + rollout; the BaseModel PVC path reads omeAgent; the
-//     InferenceReplica reconciler reads lifecycle and omenativeStatus; the
-//     InferenceReplica admission webhook reads inferenceReplica; the manager
-//     binary requires omenativeStatus at startup (ColumnarV2 with the chart's
-//     bound here, matching the chart default).
+//     rollout, omenativeStatus, inferenceReplica, eventRecorder. The ISVC
+//     reconciler reads ingress + deploy + rollout; the BaseModel PVC path
+//     reads omeAgent; the InferenceReplica reconciler reads lifecycle and
+//     omenativeStatus; the InferenceReplica admission webhook reads
+//     inferenceReplica; the manager binary requires omenativeStatus at
+//     startup (ColumnarV2 with the chart's bound here, matching the chart
+//     default) and builds its event broadcasters from eventRecorder.
 //
 // Values are minimal-viable defaults that satisfy each helper's
 // validation:
@@ -76,6 +87,9 @@ func InferenceReplicaConfigJSON() string {
 //     the chart's value keeps suite behavior chart-equivalent
 //   - inferenceReplica names the controller identity by the admin groups
 //     the in-process manager authenticates with (InferenceReplicaConfigJSON)
+//   - eventRecorder carries the chart's per-object event budget
+//     (EventRecorderConfigJSON); the KIND manager setup builds the
+//     controllers' recorders from it the way the manager binary does
 //
 // Idempotent: subsequent calls with the same desired state are no-ops.
 // If a ConfigMap already exists with different data, this function
@@ -140,6 +154,7 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
 }`,
 		controllerconfig.OMENativeStatusConfigName:  OMENativeStatusConfigJSON(),
 		controllerconfig.InferenceReplicaConfigName: InferenceReplicaConfigJSON(),
+		controllerconfig.EventRecorderConfigName:    EventRecorderConfigJSON(),
 	}); err != nil {
 		return fmt.Errorf("seed inferenceservice-config: %w", err)
 	}
