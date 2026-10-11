@@ -192,8 +192,9 @@ TEARDOWN_POLL_S = 5.0
 # ── Continuous invariants (status-truth + endpoints-membership + …) ─────────
 # Polled for the WHOLE duration of every case, in every mode. API-load bound
 # (shared cluster): the poller reads at most 4 label-selected namespaced GETs
-# per tick per running case — one InferenceReplica list (invariants A, G, H),
-# one Service list + one EndpointSlice list (B, G), one ISVC status (H) — plus
+# per tick per running case — one InferenceReplica list (invariants A, G, H,
+# I), one Service list + one EndpointSlice list (B, G, L), one ISVC status
+# (H, I, M) — plus
 # a ControllerRevision list only while a live pod carries a revision hash the
 # label-truth ledger (F) has not read yet. Pod state is reused from the
 # watcher (no extra pod reads). At INV_TICK_S=5 that is 0.8 req/s per case,
@@ -235,7 +236,21 @@ INV_OPT_IN = {"J", "K"}
 INV_CLASSES = {"A", "B", "C", "D", "F", "G", "H", "I"} | INV_OPT_IN
 INV_NAMES = {"A": "status-truth", "B": "endpoints-membership", "C": "pair-alive", "D": "gang-scheduling",
              "F": "label-truth", "G": "ready-serving", "H": "superseded-revision",
-             "I": "operation-progress", "J": "no-auto-recovery", "K": "no-node-exclusion"}
+             "I": "operation-progress", "J": "no-auto-recovery", "K": "no-node-exclusion",
+             "L": "pairable-capacity", "M": "traffic-backed"}
+# Advisory readings: recorded and reported with a warning line, never
+# failed, until a full round has shown their noise level. L (pairable
+# capacity) and M (traffic backed by pods) are whole classes; the other two
+# are kinds inside A and I. Removing a pair from this set turns it hard.
+INV_ADVISORY = {("L", "pairable-capacity"), ("M", "traffic-backed"),
+                ("A", "serving-count-drift"), ("I", "deadline-without-reason")}
+# L: a dip below the pairable floor is debounced like the capacity floor —
+# consecutive ticks spanning at least FLOOR_SUSTAIN_S.
+INV_SUSTAIN_L = 1 + math.ceil(FLOOR_SUSTAIN_S / INV_TICK_S)
+# M: a weighted traffic target with no serving pod on its revision, seen on
+# 2 consecutive ticks; one reconcile of lag between the pod view and the
+# traffic write is not a gap.
+INV_SUSTAIN_M = 2
 # The audit ledger ConfigMap the engine keeps per service, and the record it
 # writes when it gives up on an Instance's node and steers the rebuild
 # elsewhere. Invariant J reads it.
@@ -1234,13 +1249,17 @@ def _pod_mutated_by_harness(inv, name, uid):
         inv["mutated_uids"][uid] = name
 
 
-def _inv_new(case_id, hdr):
+def _inv_new(case_id, hdr, N=None, max_unavail=None):
     """Fresh invariant-poller state. Header `inv_off=<class>|all` over
     INV_CLASSES (which requires an adjacent '# reason:' comment — enforced by
     validate-only) disables checks.
     Invariant C (pair-alive) additionally requires arming: a pairing-mode
     handler sets inv["pairing"] at trigger time for a non-empty→non-empty
-    protocol transition; without that it never evaluates."""
+    protocol transition; without that it never evaluates.
+    N and max_unavail are the handler's replica counts and maxUnavailable
+    budgets per Component, kept by reference so a scale that moves the
+    capacity floor's basis moves invariant L's too; without them L reads
+    nothing."""
     off = str(hdr.get("inv_off", "") or "")
     opted = {c for c in str(hdr.get("inv_on", "") or "").split(",") if c}
     return {
@@ -1316,6 +1335,24 @@ def _inv_new(case_id, hdr):
         # cohort-ratio observer (invariant E), informational until the
         # contract is decided.
         "ratio": None,
+        # Violations of the advisory kinds (INV_ADVISORY): recorded like
+        # viol, reported, never failed.
+        "advisory": {},
+        # Invariant L (pairable capacity, advisory). The floor's inputs: the
+        # replica counts and maxUnavailable budgets, the header's floor_slack,
+        # the Instances the case's own fault broke (refreshed every tick where
+        # a handler ctx exists) and the Components seen at or above their
+        # floor once (a dip before that is the service still coming up).
+        "l_on": off != "all",
+        "l_seen": False,          # ≥1 armed Component was judged against its floor
+        "l_routing_seen": False,  # ≥1 routed Service observed: rotation membership was counted
+        "l_ticks": 0,             # ticks on which an armed Component was judged
+        "floor": {"N": N if N is not None else {}, "max_unavail": max_unavail if max_unavail is not None else {},
+                  "slack": _floor_slack({"hdr": hdr}), "allowance": {}, "armed": set()},
+        # Invariant M (traffic backed by pods, advisory).
+        "m_on": off != "all",
+        "m_seen": False,          # ≥1 weighted traffic target was judged
+        "m_ticks": 0,             # ticks on which a weighted target was judged
     }
 
 
@@ -1330,16 +1367,23 @@ def _instance_rows(ir_status):
 
 def _inv_hit(inv, hits, streak_key, viol_key, sustain, now, detail):
     """One tick's observation of a violating condition. Fires (records a
-    violation) only once the streak reaches `sustain` consecutive ticks."""
+    violation) only once the streak reaches `sustain` consecutive ticks. An
+    advisory kind (INV_ADVISORY) records under inv["advisory"] instead of
+    inv["viol"]: reported, never failed."""
     hits.add(streak_key)
     n = inv["streaks"].get(streak_key, 0) + 1
     inv["streaks"][streak_key] = n
     if n < sustain:
         return
-    v = inv["viol"].get(viol_key)
+    advisory = (viol_key[0], viol_key[1]) in INV_ADVISORY
+    store = inv.setdefault("advisory", {}) if advisory else inv["viol"]
+    v = store.get(viol_key)
     if v is None:
-        inv["viol"][viol_key] = {"first": now, "last": now, "n": 1, "detail": detail}
-        print(f"    ✗ INVARIANT {viol_key[0]} ({viol_key[1]}): {detail}")
+        store[viol_key] = {"first": now, "last": now, "n": 1, "detail": detail}
+        if advisory:
+            print(f"    ⚠ INVARIANT {viol_key[0]} ({viol_key[1]}, advisory): {detail}")
+        else:
+            print(f"    ✗ INVARIANT {viol_key[0]} ({viol_key[1]}): {detail}")
     else:
         v["last"] = now
         v["n"] += 1
@@ -1403,6 +1447,18 @@ def _inv_check_status_truth(inv, pod_state, pods_per_inst, ir_items, hits, now):
             if phase in INV_TRANSIENT_PHASES:
                 continue   # transitional phases are exempt from all A-checks
             pods = existing.get((comp, idx), [])
+            if "servingPodCount" in ist:
+                # Serving-count drift (advisory): the row's serving pod count
+                # against the watcher's alive, Ready, serving pods of the
+                # Instance. The settle window absorbs the controller's status
+                # write after a pod's serving gate flips.
+                claimed = int(ist.get("servingPodCount") or 0)
+                seen = sum(1 for p in pods if p["alive"] and p["ready"] and p.get("serving"))
+                if seen != claimed:
+                    key = ("A", "serving-count-drift", comp, idx)
+                    _inv_hit(inv, hits, key, key, INV_SUSTAIN_SETTLE, now,
+                             f"{comp}/{idx} row claims servingPodCount={claimed} while the watcher sees "
+                             f"{seen} alive, Ready, serving pod(s)")
             if phase == "Failed":
                 # Failed-while-serving: the Instance claims Failed while its
                 # FULL pod set is alive, Ready and in the serving rotation.
@@ -1566,6 +1622,66 @@ def _inv_check_pair_alive(inv, pod_state, hits, now):
     _inv_hit(inv, hits, key, key, INV_SUSTAIN_C, now,
              f"no pairable serving engine+decoder pair during {st['frm']!r}→{st['to']!r} "
              f"(engine serves {eng_p}, decoder serves {dec_p})")
+
+
+def _inv_check_pairable_capacity(inv, pod_state, routing, hits, now):
+    """Invariant L, one tick, advisory: per Component, the Instances with a
+    pod that is alive, Ready, serving, in rotation (a Ready endpoint of a
+    routed per-revision Service, as invariant B reads it) and pairable stay
+    at or above the capacity floor — N minus maxUnavailable, minus the
+    Instances the case's own fault broke and the header's floor_slack.
+    Pairable: no pairing-protocol transition is in flight, or the pod's
+    protocol label is empty, or a serving pod of the other pairing Component
+    carries the same label or an empty one; the router pairs with nothing.
+    A Component arms on the first tick it stands at or above its floor (a
+    dip before that is the service still coming up); a dip then fires once
+    it has lasted FLOOR_SUSTAIN_S, like the capacity floor. Without a routed
+    Service the rotation half is not required."""
+    fl = inv["floor"]
+    comps = [c for c, n in fl["N"].items() if n]
+    if not comps:
+        return
+    in_rotation = _rotation_uids(routing, pod_state)
+    if in_rotation is not None:
+        inv["l_routing_seen"] = True
+    serving = [p for p in pod_state.values() if p and p["alive"] and p["ready"] and p.get("serving")]
+    labels = defaultdict(set)   # pairing Component → protocol labels its serving pods carry
+    for p in serving:
+        labels[p["comp"]].add(p.get("pairing", ""))
+    peer = {"engine": "decoder", "decoder": "engine"}
+    transition = bool(inv.get("pairing"))
+    counted = defaultdict(set)   # Component → Instance indices with a pairable pod in rotation
+    for p in serving:
+        if in_rotation is not None and p.get("uid") not in in_rotation:
+            continue
+        label = p.get("pairing", "")
+        if transition and p["comp"] in peer and label != "":
+            peers = labels.get(peer[p["comp"]], set())
+            if label not in peers and "" not in peers:
+                continue
+        counted[p["comp"]].add(p.get("inst", "0"))
+    judged = False
+    for c in comps:
+        n = int(fl["N"][c])
+        mu = resolve_max_unavailable(fl["max_unavail"].get(c, 0), n)
+        broken, slack = int(fl["allowance"].get(c, 0)), int(fl["slack"])
+        floor = n - mu - broken - slack
+        have = len(counted.get(c, ()))
+        if have >= floor:
+            fl["armed"].add(c)
+        if c not in fl["armed"]:
+            continue
+        judged = True
+        inv["l_seen"] = True
+        if have >= floor:
+            continue
+        basis = (f"N {n} - maxUnavailable {mu}" + (f" - {broken} broken" if broken else "")
+                 + (f" - {slack} slack" if slack else ""))
+        key = ("L", "pairable-capacity", c)
+        _inv_hit(inv, hits, key, key, INV_SUSTAIN_L, now,
+                 f"{c} has {have} Instance(s) with a pairable pod in rotation, below the floor {floor} ({basis})")
+    if judged:
+        inv["l_ticks"] += 1
 
 
 INV_SUSTAIN_E = 2    # cohort-ratio ticks (10 s): a skew this long is not a startup transient
@@ -1849,6 +1965,34 @@ def _inv_check_superseded(inv, pod_state, ir_items, isvc_status, hits, now):
                 _inv_hit(inv, hits, key, key, INV_SUSTAIN_SETTLE, now,
                          f"{comp}/{p.get('inst', '0')} pod {pname} carries {REV_LABEL}={p['hash']} "
                          f"after the rollout reported done on {want}")
+
+
+def _inv_check_traffic_backed(inv, pod_state, isvc_status, hits, now):
+    """Invariant M, one tick, advisory: for every Component in the ISVC
+    status traffic list, every target that carries weight names a revision
+    with at least one alive, Ready, serving pod of that Component. The
+    canary handler's traffic-gap reading, run on every handler and every
+    Component; a None snapshot makes no observation."""
+    if isvc_status is None:
+        return
+    known = {p["hash"] for p in pod_state.values() if p and p.get("hash")}
+    served = defaultdict(lambda: defaultdict(int))   # Component → revision hash → serving pods
+    for p in pod_state.values():
+        if p and p["alive"] and p["ready"] and p.get("serving") and p.get("hash"):
+            served[p["comp"]][p["hash"]] += 1
+    judged = False
+    for comp, cst in (isvc_status.get("components") or {}).items():
+        traffic = (cst or {}).get("traffic") or []
+        if any(isinstance(t, dict) and int(t.get("percent") or 0) > 0 for t in traffic):
+            judged = True
+            inv["m_seen"] = True
+        for rev, t in _traffic_unbacked(traffic, served.get(comp, {}), known):
+            key = ("M", "traffic-backed", comp, rev)
+            _inv_hit(inv, hits, key, key, INV_SUSTAIN_M, now,
+                     f"{comp}: {t.get('percent')}% of traffic names {t.get('revisionName')} "
+                     f"with no alive, Ready, serving {comp} pod on it")
+    if judged:
+        inv["m_ticks"] += 1
 
 
 def _list_podgroups(case_id):
@@ -2141,11 +2285,13 @@ def _inv_check_operation_progress(inv, pod_state, ir_items, isvc_status, lifecyc
     the Component's readiness window with no pod of the Instance (or of the
     surge replacement it names) changing. I4: a persisted rollout hold names
     only Instances that still exist. I3, the Terminating pod on a stopped
-    node, is _inv_check_terminating_sweep. A None snapshot makes no
-    observation. The exemptions, each with its reason inline: a row waiting
-    on an external authority, a paused InferenceReplica, a rollout phase
-    held at a gate, a manager the case's own fault has down, and an Instance
-    with a pod on the node the case stopped."""
+    node, is _inv_check_terminating_sweep. I5, advisory: a step deadline
+    that passed comes with a reason (_inv_check_deadline_reason). A None
+    snapshot makes no observation. The exemptions, each with its reason
+    inline: a row waiting on an external authority, a paused
+    InferenceReplica, a rollout phase held at a gate, a manager the case's
+    own fault has down, and an Instance with a pod on the node the case
+    stopped."""
     if ir_items is None:
         return
     by_inst = defaultdict(list)
@@ -2197,10 +2343,13 @@ def _inv_check_operation_progress(inv, pod_state, ir_items, isvc_status, lifecyc
                 since = inv["i_since"].setdefault(key, now)
                 _inv_hit(inv, hits, key, key, INV_SUSTAIN_I_NO_POD, now,
                          f"operation without a pod set: {comp}/{idx} holds {kind} with no live pod for {now - since:.0f}s")
-            if gate_held or window is None:
+            if gate_held:
                 continue
             if stopped_node and any(p.get("node") == stopped_node for p in records):
                 continue   # the case's node loss owns this Instance's wait; I3 reads its Terminating pod against the policy
+            _inv_check_deadline_reason(inv, comp, idx, kind, op, st, hits, now)
+            if window is None:
+                continue
             op_since = _event_epoch(op.get("startedAt"))
             if op_since is None:
                 op_since = inv["i_op_seen"].setdefault((comp, idx, str(op.get("id") or kind)), now)
@@ -2216,6 +2365,23 @@ def _inv_check_operation_progress(inv, pod_state, ir_items, isvc_status, lifecyc
             _inv_check_hold_names(inv, comp, st, rows, by_inst, hits, now)
     for key in [k for k in inv["i_since"] if k not in live_keys]:
         del inv["i_since"][key]
+
+
+def _inv_check_deadline_reason(inv, comp, idx, kind, op, ir_status, hits, now):
+    """Invariant I5, one row, advisory: a step deadline that passed more
+    than a tick ago comes with a reason — a waiting token on the row (an
+    external authority holds it) or a rollout hold on the InferenceReplica.
+    A parked step (no deadline) has no clock."""
+    deadline = _event_epoch(op.get("deadline"))
+    if deadline is None or now - deadline <= INV_TICK_S:
+        return
+    hold = ir_status.get("rolloutHold")
+    if op.get("waiting") or (isinstance(hold, dict) and hold):
+        return
+    key = ("I", "deadline-without-reason", comp, idx)
+    _inv_hit(inv, hits, key, key, INV_SUSTAIN_I_CLOCK, now,
+             f"deadline passed without a reason: {comp}/{idx} {kind} step {op.get('step') or '?'} passed its deadline "
+             f"{now - deadline:.0f}s ago with no waiting token on the row and no rollout hold on the Component")
 
 
 def _inv_check_hold_names(inv, comp, ir_status, rows, by_inst, hits, now):
@@ -2270,24 +2436,29 @@ def _inv_check_terminating_sweep(inv, pod_state, lifecycle, hits, now):
 
 
 def _inv_any_on(inv):
-    return any(inv.get(k) for k in ("a_on", "b_on", "c_on", "d_on", "f_on", "g_on", "h_on", "i_on", "j_on", "k_on", "ratio"))
+    return any(inv.get(k) for k in ("a_on", "b_on", "c_on", "d_on", "f_on", "g_on", "h_on", "i_on", "j_on", "k_on",
+                                    "l_on", "m_on", "ratio"))
 
 
-def _inv_tick(inv, pod_state, pods_per_inst):
+def _inv_tick(inv, pod_state, pods_per_inst, floor_allowance=None):
     """One invariant observation, self-rate-limited to INV_TICK_S. Called from
     every watch loop each iteration; a no-op between ticks and when every
     invariant is opted out. Reads the cluster once per tick and hands the
-    snapshots to _inv_observe."""
+    snapshots to _inv_observe. floor_allowance is the handler's record of
+    the Instances the case's own fault broke, per Component, which lowers
+    invariant L's floor the way it lowers the capacity floor."""
     if not inv or not _inv_any_on(inv):
         return
+    if floor_allowance is not None:
+        inv["floor"]["allowance"] = floor_allowance
     now = time.time()
     if now - inv["last"] < INV_TICK_S:
         return
     inv["last"] = now
     case_id = inv["case_id"]
     ir_items = _inv_fetch_ir_items(case_id) if (inv["a_on"] or inv["g_on"] or inv["h_on"] or inv.get("i_on")) else None
-    routing = _inv_fetch_routing(case_id) if (inv["b_on"] or inv["g_on"]) else None
-    isvc_status = fetch_status(case_id) if (inv["h_on"] or inv.get("i_on")) else None
+    routing = _inv_fetch_routing(case_id) if (inv["b_on"] or inv["g_on"] or inv.get("l_on")) else None
+    isvc_status = fetch_status(case_id) if (inv["h_on"] or inv.get("i_on") or inv.get("m_on")) else None
     revisions = (_inv_fetch_revisions(case_id)
                  if inv["f_on"] and _inv_revisions_wanted(inv, pod_state) else None)
     ledger = _inv_fetch_ledger(case_id) if inv.get("j_on") else None
@@ -2310,6 +2481,8 @@ def _inv_observe(inv, pod_state, pods_per_inst, now, ir_items=None, routing=None
         _inv_check_endpoints(inv, pod_state, routing, hits, now)
     if inv["c_on"]:
         _inv_check_pair_alive(inv, pod_state, hits, now)
+    if inv.get("l_on"):
+        _inv_check_pairable_capacity(inv, pod_state, routing, hits, now)
     if inv.get("d_on"):
         _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now)
     if inv.get("ratio"):
@@ -2322,6 +2495,8 @@ def _inv_observe(inv, pod_state, pods_per_inst, now, ir_items=None, routing=None
         _inv_check_ready_serving(inv, pod_state, pods_per_inst, ir_items, routing, hits, now)
     if inv["h_on"]:
         _inv_check_superseded(inv, pod_state, ir_items, isvc_status, hits, now)
+    if inv.get("m_on"):
+        _inv_check_traffic_backed(inv, pod_state, isvc_status, hits, now)
     if inv.get("j_on"):
         _inv_check_auto_recover(inv, ledger, hits, now)
     if inv.get("k_on"):
@@ -2386,6 +2561,26 @@ def invariant_checks(inv, verdict, notes, checks):
             checks.append(f"  ⓘ invariant E (cohort ratio, informational): the canary cohort stayed within {tol_pct}% of the fleet ratio across {ratio['samples']} tick(s)")
         else:
             checks.append(f"  ⚠ invariant E (cohort ratio, informational): {ratio['excursions']} sustained excursion(s) beyond {tol_pct}%, worst {int(round(ratio['worst'] * 100))}% — {ratio['worst_detail']}")
+
+    def span_of(v):
+        first = time.strftime("%H:%M:%S", time.localtime(v["first"]))
+        last = time.strftime("%H:%M:%S", time.localtime(v["last"]))
+        return f"[first {first}, last {last}, {v['n']} tick(s)]"
+
+    # The advisory readings (INV_ADVISORY): their lines never move the verdict.
+    advisory = inv.get("advisory") or {}
+    if inv.get("l_on") and not inv.get("l_seen"):
+        checks.append("  ⓘ invariant L (pairable-capacity, advisory) never saw a Component at or above its pairable floor — vacuous (no reading made)")
+    elif inv.get("l_on") and not inv.get("l_routing_seen"):
+        checks.append("  ⓘ invariant L: no routed Service observed — pairable capacity counted the serving gate, not rotation membership")
+    if inv.get("m_on") and not inv.get("m_seen"):
+        checks.append("  ⓘ invariant M (traffic-backed, advisory) never saw a weighted traffic target — vacuous (no reading made)")
+    for x, seen, ticks, held in (("L", inv.get("l_seen"), inv.get("l_ticks", 0), "pairable capacity stayed at or above its floor"),
+                                 ("M", inv.get("m_seen"), inv.get("m_ticks", 0), "every weighted traffic target had a serving pod on its revision")):
+        if inv.get(f"{x.lower()}_on") and seen and not any(k[0] == x for k in advisory):
+            checks.append(f"  ⓘ invariant {x} ({INV_NAMES[x]}, advisory): {held} across {ticks} tick(s)")
+    for key, v in sorted(advisory.items()):
+        checks.append(f"  ⚠ invariant {key[0]} ({key[1]}, advisory — reported, not failed): {v['detail']} {span_of(v)}")
     if not inv["viol"]:
         active = [x for x, on in (("A", inv["a_on"] and inv["ir_seen"]),
                                   ("B", inv["b_on"] and inv["b_seen"]),
@@ -2405,9 +2600,7 @@ def invariant_checks(inv, verdict, notes, checks):
     ref = f"#{inv['xfail_issue']}" if inv.get("xfail_issue") else "UNLINKED"
     expected_hits = 0
     for key, v in sorted(inv["viol"].items()):
-        first = time.strftime("%H:%M:%S", time.localtime(v["first"]))
-        last = time.strftime("%H:%M:%S", time.localtime(v["last"]))
-        span = f"[first {first}, last {last}, {v['n']} tick(s)]"
+        span = span_of(v)
         if scope == "all" or key[0] == scope:
             expected_hits += 1
             notes.append(f"invariant {key[0]} {key[1]} (known bug: {ref}): {v['detail']}")
@@ -17888,7 +18081,7 @@ def _read_one(ctx, timeout=1.0):
     _fault_tick(ctx)
     # Continuous invariants: one observation per INV_TICK_S (self-rate-limited),
     # for the whole case duration — INIT through the handler's last watch read.
-    _inv_tick(ctx.get("inv"), ctx["pod_state"], ctx["pods_per_inst"])
+    _inv_tick(ctx.get("inv"), ctx["pod_state"], ctx["pods_per_inst"], floor_allowance=ctx.get("floor_allowance"))
     # A handler's own per-read sampler, over the same pod_state the watch
     # loops it shares (the crashloop:new watches) read.
     on_read = ctx.get("on_read")
@@ -18096,7 +18289,7 @@ def _setup_and_ready(case_id, yaml_file, hdr, tick=None):
         "pod_state": {}, "peaks": {"engine": 0, "decoder": 0, "router": 0}, "agg": {},
         "buf": "", "closed": False, "old_hashes": None, "old_uids": {}, "old_nodes": {}, "seen_hashes": set(),
         "trigger_ts": None, "converged_at": None, "watcher": start_watcher(case_id),
-        "inv": _inv_new(case_id, hdr),
+        "inv": _inv_new(case_id, hdr, N=N, max_unavail=info.get("max_unavail")),
         "fault": _fault_new(case_id, hdr),
     }
     budget = min(MAX_BUDGET_S, INIT_BASE_S + INIT_PER_POD_S * sum(N[c] for c in configured))
@@ -24118,6 +24311,21 @@ def _traffic_revision_hash(revision_name, known_hashes):
     return next((h for h in sorted(known_hashes) if h.startswith(tail) or tail.startswith(h)), tail)
 
 
+def _traffic_unbacked(traffic, served, known_hashes):
+    """The weighted traffic targets whose revision has no serving pod, as
+    [(revision hash, target)]: `served` maps a revision hash to its serving
+    pod count, and a target's hash is read through its per-revision Service
+    name."""
+    out = []
+    for t in traffic or []:
+        if not isinstance(t, dict) or int(t.get("percent") or 0) <= 0:
+            continue
+        rev = _traffic_revision_hash(t.get("revisionName"), known_hashes) or str(t.get("revisionName") or "")
+        if not served.get(rev, 0):
+            out.append((rev, t))
+    return out
+
+
 def _traffic_gap_track(track, traffic, pod_state, primary, known_hashes, now_rel):
     """Fold one status sample: a weighted target whose revision has no
     serving pod of the primary extends that revision's streak, and a streak
@@ -24127,12 +24335,7 @@ def _traffic_gap_track(track, traffic, pod_state, primary, known_hashes, now_rel
         if p and p["alive"] and p.get("serving") and p.get("comp") == primary and p.get("hash"):
             serving[p["hash"]] += 1
     empty = set()
-    for t in traffic or []:
-        if not isinstance(t, dict) or int(t.get("percent") or 0) <= 0:
-            continue
-        rev = _traffic_revision_hash(t.get("revisionName"), known_hashes) or str(t.get("revisionName") or "")
-        if serving.get(rev, 0):
-            continue
+    for rev, t in _traffic_unbacked(traffic, serving, known_hashes):
         empty.add(rev)
         track["streak"][rev] = track["streak"].get(rev, 0) + 1
         if track["streak"][rev] == TRAFFIC_GAP_POLLS:
@@ -26132,7 +26335,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     info = get_spec_info(case_id)
     pods_per_inst = {c: 1 + info["workers"].get(c, 0) for c in COMPS}
     surge_modes = {c: "surge" for c in configured}
-    inv = _inv_new(case_id, hdr)     # continuous invariants (status-truth + endpoints)
+    # The pairable-capacity floor keeps min(start, target) as its basis, like Check C.
+    inv = _inv_new(case_id, hdr, N={c: min(N[c], target[c]) for c in COMPS}, max_unavail=info.get("max_unavail"))
     fault = _fault_new(case_id, hdr)  # optional fault=<kind>:<param> plumbing
     if fault and fault["kind"] == "podkill":
         fault["truth_wanted"] = True   # the first deletion's replacement is held to its revision label
@@ -26680,7 +26884,7 @@ def run_case(case_id):
 
     # State machine.
     state = "INIT"
-    inv = _inv_new(case_id, hdr)     # continuous invariants (status-truth + endpoints)
+    inv = _inv_new(case_id, hdr, N=N, max_unavail=info.get("max_unavail"))   # continuous invariants (status-truth + endpoints)
     fault = _fault_new(case_id, hdr)  # optional fault=<kind>:<param> plumbing
     medit = _midroll_new(hdr)        # optional edit=strategy:|restartPolicy: at during=settling|rotating
     rb_wait = None                   # the controller-rows wait last printed after a rollback

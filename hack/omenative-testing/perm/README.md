@@ -2763,7 +2763,10 @@ Instance and the two values that disagree. The classes: **A status-truth**
 and **B endpoints-membership** (the parking paragraph above), **C pair-alive**
 (*Pairing protocol*), **D gang-scheduling** (*Scheduler dimension*), **E
 cohort ratio** (the informational PD observer under *PD knobs*), and the
-four below (F, G, H, I):
+four below (F, G, H, I). Two more readings, **L pairable-capacity** and
+**M traffic-backed**, plus one extra kind each inside A and I, are advisory
+for now (*Advisory readings*, after I): they print a `⚠` line and never
+move the verdict.
 
 **F label-truth** — every live pod runs the template its
 `ome.io/revision-hash` label names. The reading is the ControllerRevision of
@@ -2879,6 +2882,53 @@ is whatever the lane configures, so on a lane whose controller default is
 long only Components that set their own `instanceReadyTimeout` are judged
 inside a case. Waived and parked like the others (`inv_off=I`,
 `inv_xfail=I`).
+
+**Advisory readings (L, M, and one kind each in A and I)** — four
+operator-level readings taken on every tick with the same sustain rules as
+the classes above. They record like the others and print `⚠ invariant …
+(advisory — reported, not failed)`, and they never move the verdict until a
+full round has shown their noise level (`INV_ADVISORY` in `run.py` is the
+switch; a reading that held is listed as `ⓘ invariant L … across N
+tick(s)`).
+
+**L pairable-capacity** — per Component, the Instances with a pod that is
+alive, Ready, serving, in rotation (a Ready endpoint of a routed
+per-revision Service, as B reads it) and pairable stay at or above the
+capacity floor: N minus maxUnavailable, minus the Instances the case's own
+fault broke and the header's `floor_slack`, the basis the capacity floor
+uses (a scale moves it the same way). Pairable: no pairing-protocol
+transition is in flight, or the pod's protocol label is empty, or some
+serving pod of the other pairing Component (engine against decoder; the
+router pairs with nothing) carries the same label or an empty one. A
+Component arms on the first tick it stands at or above its floor, so the
+service coming up is not a dip, and a dip then counts once it has lasted
+`FLOOR_SUSTAIN_S`, like the floor. A reading: `invariant L
+(pairable-capacity, advisory — reported, not failed): engine has 1
+Instance(s) with a pairable pod in rotation, below the floor 2 (N 2 -
+maxUnavailable 0)`. Limits: it reads the gate, the endpoints and the
+labels, not the request path; without a routed Service it counts the gate
+alone and says so; the ready-Instance floor and invariant C are unchanged.
+
+**M traffic-backed** — on every tick, for every Component in the ISVC
+status traffic list, every target with a weight above zero names a
+revision with at least one alive, Ready, serving pod of that Component. It
+is the canary handler's traffic-gap reading run on every handler and every
+Component, sustained two ticks; the canary handler's own check is
+unchanged. A reading: `invariant M (traffic-backed, advisory — reported,
+not failed): engine: 10% of traffic names <isvc>-engine-rev-<hash> with no
+alive, Ready, serving engine pod on it`.
+
+**A serving-count-drift** — a row that publishes `servingPodCount` agrees
+with the watcher's count of alive, Ready, serving pods of its Instance.
+Rows in a transient phase are skipped like the rest of A, and the settle
+window absorbs the controller's status write after a serving flip.
+
+**I deadline-without-reason** — a row whose `operation.deadline` passed
+more than a tick ago comes with a reason: a `waiting` token on the row or a
+`rolloutHold` on the InferenceReplica. Read under the quiet windows I keeps
+(manager down, webhook cut, a paused InferenceReplica, a rollout phase held
+at a gate, a pod on the stopped node); a parked step (null deadline) has no
+clock.
 
 Two classes are opt-in, selected per case with `inv_on=J,K` (both, or one),
 because their claim is a story's, not every case's: a node loss expects the

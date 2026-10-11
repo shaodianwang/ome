@@ -1719,6 +1719,62 @@ class OperationProgressInvariantTest(unittest.TestCase):
         rec = watcher_record(pod_object("engine-0", "engine", 0, self.REV, "img:1", "v1"))
         self.assertEqual(("Running", "", True, None), (rec["phase"], rec["deleted_at"], rec["alive"], rec["grace"]))
 
+    def test_a_deadline_passed_with_no_reason_is_reported_not_failed(self):
+        """The advisory kind: a step deadline more than a tick in the past,
+        no waiting token on the row, no rollout hold on the InferenceReplica.
+        It records under advisory and leaves the verdict alone."""
+        inv = run._inv_new("p1", {})
+        ir = self._ir([(0, "Ready", self.REV), (1, "Updating", self.REV)], timeout="10m",
+                      ops={1: self._op("Update", self.T0 - 100, deadline=self._iso(self.T0 - 30))})
+        pods = self._pods(("engine-0", 0), ("engine-1", 1))
+        t = observe_ticks(inv, pods, run.INV_SUSTAIN_I_CLOCK - 1, start=self.T0, **self._snap(ir))
+        self.assertEqual({}, inv["advisory"], "one observation is not a reading")
+        observe_ticks(inv, pods, 1, start=t, **self._snap(ir))
+        key = ("I", "deadline-without-reason", "engine", "1")
+        self.assertEqual({key}, set(inv["advisory"]))
+        self.assertEqual({}, inv["viol"])
+        self.assertIn("deadline passed without a reason: engine/1 Update step WaitReady passed its deadline",
+                      inv["advisory"][key]["detail"])
+        self.assertIn("with no waiting token on the row and no rollout hold on the Component", inv["advisory"][key]["detail"])
+        checks, notes = [], []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("⚠ invariant I (deadline-without-reason, advisory — reported, not failed)" in c for c in checks), checks)
+
+    def test_a_passed_deadline_with_a_reason_or_inside_a_quiet_window_is_not_reported(self):
+        rows = [(0, "Ready", self.REV), (1, "Updating", self.REV)]
+        late = {"deadline": self._iso(self.T0 - 30)}
+        hold = {"gate": "Held", "since": self._iso(self.T0 - 100), "reason": "update held after 3 failed attempt(s)"}
+        plain = self._pods(("engine-0", 0), ("engine-1", 1))
+        on_stopped = self._pods(("engine-0", 0, {"node": "worker-1"}), ("engine-1", 1, {"node": "worker-2"}))
+        manager_down = {"kind": "ctrlrestart", "fired": True, "fired_ts": self.T0, "cycles": [], "infra_fail": None}
+        cases = (
+            ("the row waits on an external authority",
+             self._ir(rows, timeout="10m", ops={1: self._op("Update", self.T0 - 100, waiting="QuotaExceeded", **late)}), plain, {}, None),
+            ("the Component holds a rollout hold",
+             self._ir(rows, timeout="10m", ops={1: self._op("Update", self.T0 - 100, **late)}, hold=hold), plain, {}, None),
+            ("the deadline is ahead",
+             self._ir(rows, timeout="10m", ops={1: self._op("Update", self.T0 - 100, deadline=self._iso(self.T0 + 1000))}), plain, {}, None),
+            ("a parked step has no deadline",
+             self._ir(rows, timeout="10m", ops={1: self._op("Update", self.T0 - 100, deadline=None)}), plain, {}, None),
+            ("the rollout phase is held at a gate",
+             self._ir(rows, timeout="10m", ops={1: self._op("Update", self.T0 - 100, **late)}), plain,
+             {"isvc_status": {"components": {"engine": {"rolloutPhase": "Paused"}}}}, None),
+            ("the InferenceReplica is paused",
+             self._ir(rows, timeout="10m", ops={1: self._op("Update", self.T0 - 100, **late)}, paused=True), plain, {}, None),
+            ("the manager is down",
+             self._ir(rows, timeout="10m", ops={1: self._op("Update", self.T0 - 100, **late)}), plain, {}, manager_down),
+            ("a pod of the Instance sits on the stopped node",
+             self._ir(rows, timeout="10m", ops={1: self._op("Update", self.T0 - 100, **late)}), on_stopped, {}, self._node_fault()),
+        )
+        for label, ir, pods, over, fault in cases:
+            inv = run._inv_new("p1", {})
+            if fault:
+                run._inv_bind_fault(inv, fault)
+            observe_ticks(inv, pods, run.INV_SUSTAIN_I_CLOCK + 2, start=self.T0, **self._snap(ir, **over))
+            self.assertEqual({}, inv["advisory"], label)
+            self.assertEqual({}, inv["viol"], label)
+
 
 class GangSchedulingInvariantTest(unittest.TestCase):
     """Invariant D's gang half: a forming gang must bind as a unit, while a
@@ -1855,6 +1911,363 @@ class InvariantTickTest(unittest.TestCase):
         self.assertEqual("revision", inv["revisions"][(self.REV, "pod")]["src"])
         self.assertEqual({}, inv["viol"])
         self.assertTrue(inv["ir_seen"] and inv["b_seen"] and inv["g_seen"] and inv["h_seen"])
+
+    def test_the_tick_takes_the_handlers_floor_allowance(self):
+        """The Instances a fault broke lower invariant L's floor the way they
+        lower the capacity floor: the ctx loop hands them to every tick."""
+        calls = []
+        pods = {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, self.REV, "img:1", "v1"))}
+        inv = run._inv_new("p1", {}, N={"engine": 1}, max_unavail={"engine": 0})
+        with mock.patch.object(run, "kubectl", self._fake_kubectl(calls)), \
+                mock.patch.object(run.time, "time", side_effect=[100.0]):
+            run._inv_tick(inv, pods, {"engine": 1}, floor_allowance={"engine": 1})
+        self.assertEqual({"engine": 1}, inv["floor"]["allowance"])
+        self.assertTrue(inv["l_seen"] and inv["l_routing_seen"])
+        self.assertEqual({}, inv["advisory"])
+        self.assertEqual({}, inv["viol"])
+
+
+class PairableCapacityInvariantTest(unittest.TestCase):
+    """Invariant L (advisory): per Component, the Instances with a pod that
+    is alive, Ready, serving, in rotation and pairable stay at or above the
+    capacity floor. A sustained dip is reported, never failed."""
+
+    REV = "a1b2c3d4"
+
+    def _pod(self, comp, index, *, ready=True, serving=True, pairing="", alive=True):
+        """A watcher record with the fields L reads; the uid is what a routed
+        Service's endpoints name."""
+        return {"comp": comp, "inst": str(index), "runner": "default", "ord": "0", "alive": alive,
+                "ready": ready, "serving": serving, "hash": self.REV, "pairing": pairing,
+                "uid": f"uid-{comp}-{index}"}
+
+    def _inv(self, N, mu=None, hdr=None):
+        return run._inv_new("p1", hdr or {}, N=N, max_unavail=mu or {})
+
+    def test_a_sustained_dip_below_the_floor_is_reported_not_failed(self):
+        inv = self._inv({"engine": 2})
+        full = {"engine-0": self._pod("engine", 0), "engine-1": self._pod("engine", 1)}
+        t = observe_ticks(inv, full, 2)
+        self.assertEqual({"engine"}, inv["floor"]["armed"])
+        self.assertTrue(inv["l_seen"])
+        dipped = dict(full, **{"engine-1": self._pod("engine", 1, serving=False)})
+        t = observe_ticks(inv, dipped, run.INV_SUSTAIN_L - 1, start=t)
+        self.assertEqual({}, inv["advisory"], "a dip shorter than the floor debounce is a flap")
+        observe_ticks(inv, dipped, 1, start=t)
+        key = ("L", "pairable-capacity", "engine")
+        self.assertEqual({key}, set(inv["advisory"]))
+        self.assertEqual({}, inv["viol"])
+        self.assertEqual("engine has 1 Instance(s) with a pairable pod in rotation, below the floor 2 (N 2 - maxUnavailable 0)",
+                         inv["advisory"][key]["detail"])
+        checks, notes = [], []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("⚠ invariant L (pairable-capacity, advisory — reported, not failed): engine has 1 Instance(s)" in c
+                            for c in checks), checks)
+        self.assertFalse(any("invariant L (pairable-capacity, advisory): pairable capacity stayed" in c for c in checks), checks)
+
+    def test_a_short_dip_resets_and_a_held_floor_is_listed(self):
+        inv = self._inv({"engine": 2})
+        full = {"engine-0": self._pod("engine", 0), "engine-1": self._pod("engine", 1)}
+        dipped = dict(full, **{"engine-1": self._pod("engine", 1, ready=False, serving=False)})
+        t = observe_ticks(inv, full, 1)
+        for _ in range(3):   # a flap every other tick never spans the debounce
+            t = observe_ticks(inv, dipped, run.INV_SUSTAIN_L - 1, start=t)
+            t = observe_ticks(inv, full, 1, start=t)
+        self.assertEqual({}, inv["advisory"])
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("ⓘ invariant L (pairable-capacity, advisory): pairable capacity stayed at or above its floor across" in c
+                            for c in checks), checks)
+
+    def test_the_service_coming_up_is_not_a_dip(self):
+        """Before a Component ever stood at its floor nothing is read: the
+        pods are still arriving. Without replica counts L reads nothing."""
+        inv = self._inv({"engine": 2})
+        half = {"engine-0": self._pod("engine", 0)}
+        observe_ticks(inv, half, run.INV_SUSTAIN_L + 3)
+        self.assertEqual(set(), inv["floor"]["armed"])
+        self.assertFalse(inv["l_seen"])
+        self.assertEqual({}, inv["advisory"])
+        checks = []
+        run.invariant_checks(inv, "PASS", [], checks)
+        self.assertTrue(any("ⓘ invariant L (pairable-capacity, advisory) never saw a Component at or above its pairable floor" in c
+                            for c in checks), checks)
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, {}, run.INV_SUSTAIN_L + 1)
+        self.assertFalse(inv["l_seen"])
+
+    def test_the_floor_takes_max_unavailable_broken_instances_and_slack(self):
+        full = {f"engine-{i}": self._pod("engine", i) for i in range(4)}
+        three = {k: v for k, v in full.items() if v["inst"] != "3"}
+        two = {k: v for k, v in three.items() if v["inst"] != "2"}
+        # maxUnavailable 25% of 4 is one Instance: three hold, two do not.
+        inv = self._inv({"engine": 4}, {"engine": "25%"})
+        t = observe_ticks(inv, full, 1)
+        t = observe_ticks(inv, three, run.INV_SUSTAIN_L + 1, start=t)
+        self.assertEqual({}, inv["advisory"])
+        observe_ticks(inv, two, run.INV_SUSTAIN_L, start=t)
+        key = ("L", "pairable-capacity", "engine")
+        self.assertIn("below the floor 3 (N 4 - maxUnavailable 1)", inv["advisory"][key]["detail"])
+        # A broken Instance the handler recorded and the header's floor_slack
+        # each lower the floor by one more, and the detail names them.
+        inv = self._inv({"engine": 4}, {"engine": "25%"}, hdr={"floor_slack": 1})
+        inv["floor"]["allowance"] = {"engine": 1}
+        t = observe_ticks(inv, full, 1)
+        t = observe_ticks(inv, {"engine-0": self._pod("engine", 0)}, run.INV_SUSTAIN_L, start=t)
+        self.assertEqual({}, inv["advisory"], "one Instance is the floor: 4 - 1 - 1 broken - 1 slack")
+        observe_ticks(inv, {}, run.INV_SUSTAIN_L, start=t)
+        self.assertIn("below the floor 1 (N 4 - maxUnavailable 1 - 1 broken - 1 slack)", inv["advisory"][key]["detail"])
+
+    def test_the_floor_follows_the_handlers_replica_counts(self):
+        """A scale-down moves the capacity floor's basis in place; L reads the
+        same dict and follows it."""
+        N = {"engine": 4, "decoder": 0, "router": 0}
+        inv = run._inv_new("p1", {}, N=N, max_unavail={"engine": 0})
+        four = {f"engine-{i}": self._pod("engine", i) for i in range(4)}
+        t = observe_ticks(inv, four, 1)
+        N["engine"] = 2
+        two = {k: v for k, v in four.items() if v["inst"] in ("0", "1")}
+        observe_ticks(inv, two, run.INV_SUSTAIN_L + 1, start=t)
+        self.assertEqual({}, inv["advisory"])
+        self.assertEqual({"engine"}, inv["floor"]["armed"], "a Component with no replicas is never judged")
+
+    def test_a_serving_pod_outside_the_ready_endpoints_does_not_count_once_routing_is_visible(self):
+        inv = self._inv({"engine": 2})
+        pods = {"engine-0": self._pod("engine", 0), "engine-1": self._pod("engine", 1)}
+        both = routing_of(routed_service("p1", "engine", self.REV, "uid-engine-0", "uid-engine-1"))
+        one = routing_of(routed_service("p1", "engine", self.REV, "uid-engine-0"))
+        t = observe_ticks(inv, pods, 1, routing=both)
+        self.assertTrue(inv["l_routing_seen"])
+        observe_ticks(inv, pods, run.INV_SUSTAIN_L, start=t, routing=one)
+        key = ("L", "pairable-capacity", "engine")
+        self.assertIn(key, inv["advisory"])
+        self.assertIn("engine has 1 Instance(s) with a pairable pod in rotation", inv["advisory"][key]["detail"])
+        # Without a routed Service the serving gate alone is counted, and the
+        # verdict says so.
+        inv = self._inv({"engine": 2})
+        observe_ticks(inv, pods, run.INV_SUSTAIN_L + 1)
+        self.assertEqual({}, inv["advisory"])
+        self.assertFalse(inv["l_routing_seen"])
+        checks = []
+        run.invariant_checks(inv, "PASS", [], checks)
+        self.assertTrue(any("ⓘ invariant L: no routed Service observed" in c for c in checks), checks)
+
+    def test_during_a_protocol_transition_only_a_matched_or_unlabelled_pod_is_pairable(self):
+        """Pair-alive (C) is waived here so what fires is L alone."""
+        hdr = {"inv_off": "C"}
+        paired = {"engine-0": self._pod("engine", 0, pairing="v1"), "engine-1": self._pod("engine", 1, pairing="v1"),
+                  "decoder-0": self._pod("decoder", 0, pairing="v1")}
+        split = dict(paired, **{"decoder-0": self._pod("decoder", 0, pairing="v2")})
+        unlabelled = dict(paired, **{"decoder-0": self._pod("decoder", 0, pairing="")})
+        transition = {"frm": "v1", "to": "v2", "armed": False, "seen": False, "drain_first": False}
+        # The decoder moved to v2 mid-transition: no engine pod pairs with it
+        # and it pairs with no engine pod, so both sides read empty.
+        inv = self._inv({"engine": 2, "decoder": 1}, hdr=hdr)
+        inv["pairing"] = dict(transition)
+        t = observe_ticks(inv, paired, 1)
+        observe_ticks(inv, split, run.INV_SUSTAIN_L, start=t)
+        self.assertEqual({("L", "pairable-capacity", "engine"), ("L", "pairable-capacity", "decoder")}, set(inv["advisory"]))
+        self.assertEqual({}, inv["viol"])
+        # An empty label pairs with anything.
+        inv = self._inv({"engine": 2, "decoder": 1}, hdr=hdr)
+        inv["pairing"] = dict(transition)
+        t = observe_ticks(inv, paired, 1)
+        observe_ticks(inv, unlabelled, run.INV_SUSTAIN_L + 1, start=t)
+        self.assertEqual({}, inv["advisory"])
+        # With no transition in flight the labels are not read.
+        inv = self._inv({"engine": 2, "decoder": 1}, hdr=hdr)
+        t = observe_ticks(inv, paired, 1)
+        observe_ticks(inv, split, run.INV_SUSTAIN_L + 1, start=t)
+        self.assertEqual({}, inv["advisory"])
+        # The router pairs with nothing and is never constrained by a label.
+        inv = self._inv({"engine": 1, "decoder": 1, "router": 1}, hdr=hdr)
+        inv["pairing"] = dict(transition)
+        with_router = dict(paired, **{"router-0": self._pod("router", 0, pairing="v9")})
+        observe_ticks(inv, with_router, run.INV_SUSTAIN_L + 1)
+        self.assertEqual({}, inv["advisory"])
+
+    def test_inv_off_all_waives_l_and_m(self):
+        inv = run._inv_new("p1", {"inv_off": "all"}, N={"engine": 1})
+        self.assertFalse(inv["l_on"] or inv["m_on"])
+        self.assertFalse(run._inv_any_on(inv))
+        inv = run._inv_new("p1", {"inv_off": "A"}, N={"engine": 1})
+        self.assertTrue(inv["l_on"] and inv["m_on"])
+
+
+class TrafficBackedInvariantTest(unittest.TestCase):
+    """Invariant M (advisory): every weighted traffic target of every
+    Component names a revision with an alive, Ready, serving pod of that
+    Component — the canary handler's traffic-gap reading on every handler."""
+
+    OLD, NEW = "a1b2c3d4", "e5f6a7b8"
+
+    def _status(self, **by_comp):
+        """An ISVC status whose Components carry traffic targets, given as
+        [(revision hash, percent)] per Component."""
+        return {"components": {c: {"traffic": [{"revisionName": f"p1-{c}-rev-{rev}", "percent": pct}
+                                               for rev, pct in targets]}
+                               for c, targets in by_comp.items()}}
+
+    def _pods(self, *specs):
+        """Pods as (name, component, index, revision[, pod_object overrides])."""
+        out = {}
+        for spec in specs:
+            name, comp, index, rev = spec[:4]
+            kw = dict(spec[4]) if len(spec) > 4 else {}
+            out[name] = watcher_record(pod_object(name, comp, index, rev, "img:1", "v1", **kw))
+        return out
+
+    def test_a_weighted_target_with_no_serving_pod_is_reported_not_failed(self):
+        inv = run._inv_new("p1", {})
+        pods = self._pods(("engine-0", "engine", 0, self.OLD), ("engine-1", "engine", 1, self.NEW, {"serving": False}))
+        status = self._status(engine=[(self.OLD, 90), (self.NEW, 10)])
+        t = observe_ticks(inv, pods, run.INV_SUSTAIN_M - 1, isvc_status=status)
+        self.assertEqual({}, inv["advisory"], "one reconcile of lag is not a gap")
+        observe_ticks(inv, pods, 1, start=t, isvc_status=status)
+        key = ("M", "traffic-backed", "engine", self.NEW)
+        self.assertEqual({key}, set(inv["advisory"]))
+        self.assertEqual({}, inv["viol"])
+        self.assertEqual(f"engine: 10% of traffic names p1-engine-rev-{self.NEW} with no alive, Ready, serving engine pod on it",
+                         inv["advisory"][key]["detail"])
+        self.assertTrue(inv["m_seen"])
+        checks, notes = [], []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("⚠ invariant M (traffic-backed, advisory — reported, not failed): engine: 10%" in c for c in checks), checks)
+
+    def test_a_backed_target_holds_and_a_weightless_one_is_not_judged(self):
+        inv = run._inv_new("p1", {})
+        pods = self._pods(("engine-0", "engine", 0, self.OLD))
+        status = self._status(engine=[(self.OLD, 100), (self.NEW, 0)])
+        observe_ticks(inv, pods, run.INV_SUSTAIN_M + 2, isvc_status=status)
+        self.assertEqual({}, inv["advisory"])
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("ⓘ invariant M (traffic-backed, advisory): every weighted traffic target had a serving pod on its revision across"
+                            in c for c in checks), checks)
+        # No weighted target at all: vacuous, and a status that could not be
+        # read makes no observation.
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, pods, 3, isvc_status=self._status(engine=[(self.NEW, 0)]))
+        observe_ticks(inv, pods, 3, isvc_status=None)
+        self.assertFalse(inv["m_seen"])
+        checks = []
+        run.invariant_checks(inv, "PASS", [], checks)
+        self.assertTrue(any("ⓘ invariant M (traffic-backed, advisory) never saw a weighted traffic target" in c for c in checks), checks)
+
+    def test_a_pod_must_be_ready_and_serving_and_of_the_targets_component(self):
+        status = self._status(engine=[(self.NEW, 100)], decoder=[(self.NEW, 100)])
+        # A serving pod that is not Ready does not back the target (stricter
+        # than the canary handler's own reading, which takes the gate alone).
+        inv = run._inv_new("p1", {})
+        pods = self._pods(("engine-0", "engine", 0, self.NEW, {"ready": False}), ("decoder-0", "decoder", 0, self.NEW))
+        observe_ticks(inv, pods, run.INV_SUSTAIN_M, isvc_status=status)
+        self.assertEqual({("M", "traffic-backed", "engine", self.NEW)}, set(inv["advisory"]))
+        # A pod of another Component on the revision does not back it either.
+        inv = run._inv_new("p1", {})
+        pods = self._pods(("engine-0", "engine", 0, self.NEW), ("decoder-0", "decoder", 0, self.OLD))
+        observe_ticks(inv, pods, run.INV_SUSTAIN_M, isvc_status=status)
+        self.assertEqual({("M", "traffic-backed", "decoder", self.NEW)}, set(inv["advisory"]))
+        # A target whose revision was never seen on a pod is read by its name.
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, {}, run.INV_SUSTAIN_M, isvc_status=self._status(engine=[("deadbeef", 100)]))
+        self.assertEqual({("M", "traffic-backed", "engine", "deadbeef")}, set(inv["advisory"]))
+
+    def test_the_canary_handler_and_m_read_the_same_targets(self):
+        traffic = [{"revisionName": "p9-engine-rev-new", "percent": 10}, {"revisionName": "p9-engine-rev-old", "percent": 90},
+                   {"revisionName": "p9-engine-rev-zero", "percent": 0}, "not a target"]
+        unbacked = run._traffic_unbacked(traffic, {"old": 1}, {"old", "new", "zero"})
+        self.assertEqual([("new", traffic[0])], unbacked)
+        self.assertEqual([], run._traffic_unbacked(traffic, {"old": 1, "new": 2}, {"old", "new"}))
+        self.assertEqual([], run._traffic_unbacked(None, {}, set()))
+
+
+class ServingCountDriftTest(unittest.TestCase):
+    """Invariant A's advisory kind: a row that publishes servingPodCount
+    agrees with the watcher's alive, Ready, serving pods of its Instance."""
+
+    REV = "a1b2c3d4"
+
+    def _ir(self, rows):
+        """Engine rows as (index, phase, servingPodCount or None when the row
+        does not publish one)."""
+        item = ir_item("p1", "engine", [(i, phase, self.REV) for i, phase, _s in rows], current=self.REV)
+        for row, (_i, _phase, serving) in zip(item["status"]["instanceStatuses"], rows):
+            if serving is not None:
+                row["servingPodCount"] = serving
+        return [item]
+
+    def _pod(self, name, index, **kw):
+        return watcher_record(pod_object(name, "engine", index, self.REV, "img:1", "v1", **kw))
+
+    def test_a_sustained_drift_is_reported_not_failed(self):
+        """Ready-serving (G) is waived so what fires is the drift alone."""
+        inv = run._inv_new("p1", {"inv_off": "G"})
+        pods = {"engine-0": self._pod("engine-0", 0, serving=False)}
+        ir = self._ir([(0, "Ready", 1)])
+        t = observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE - 1, ir_items=ir)
+        self.assertEqual({}, inv["advisory"], "inside the settle window")
+        observe_ticks(inv, pods, 1, start=t, ir_items=ir)
+        key = ("A", "serving-count-drift", "engine", "0")
+        self.assertEqual({key}, set(inv["advisory"]))
+        self.assertEqual({}, inv["viol"])
+        self.assertEqual("engine/0 row claims servingPodCount=1 while the watcher sees 0 alive, Ready, serving pod(s)",
+                         inv["advisory"][key]["detail"])
+        checks, notes = [], []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("⚠ invariant A (serving-count-drift, advisory — reported, not failed)" in c for c in checks), checks)
+        self.assertTrue(any("✓ continuous invariants held" in c and "status-truth" in c for c in checks), checks)
+
+    def test_a_matching_count_a_transient_row_and_a_row_without_the_field_hold(self):
+        serving = {"engine-0": self._pod("engine-0", 0), "engine-1": self._pod("engine-1", 1, serving=False),
+                   "engine-2": self._pod("engine-2", 2, serving=False)}
+        ir = self._ir([(0, "Ready", 1), (1, "Updating", 1), (2, "Ready", None)])
+        inv = run._inv_new("p1", {"inv_off": "G"})
+        observe_ticks(inv, serving, run.INV_SUSTAIN_SETTLE + 2, ir_items=ir)
+        self.assertEqual({}, inv["advisory"])
+        self.assertEqual({}, inv["viol"])
+        # A pod that left the rotation and came back inside the settle window
+        # is the controller's write catching up, not a drift.
+        inv = run._inv_new("p1", {"inv_off": "G"})
+        gone = dict(serving, **{"engine-0": self._pod("engine-0", 0, serving=False)})
+        t = observe_ticks(inv, gone, run.INV_SUSTAIN_SETTLE - 1, ir_items=ir)
+        observe_ticks(inv, serving, 2, start=t, ir_items=ir)
+        self.assertEqual({}, inv["advisory"])
+
+
+class AdvisoryInvariantVerdictTest(unittest.TestCase):
+    """An advisory record never moves the verdict, parked or not, and the
+    advisory kinds are the four named ones."""
+
+    def test_an_advisory_record_is_a_warning_line_only(self):
+        hdr = {"notimpl": 1, "issue": 4242, "inv_xfail": "I"}
+        inv = run._inv_new("p1", hdr)
+        inv["advisory"][("I", "deadline-without-reason", "engine", "1")] = {"first": 1.0, "last": 6.0, "n": 2, "detail": "late"}
+        checks, notes = [], []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", notes, checks))
+        self.assertEqual([], notes, "an advisory reading is not a note on the result")
+        self.assertTrue(any(c.startswith("  ⚠ invariant I (deadline-without-reason, advisory — reported, not failed): late [first ")
+                            for c in checks), checks)
+        self.assertFalse(any("tracked bug this case is parked on" in c for c in checks), checks)
+        # A hard violation of the same class beside it still parks as before.
+        inv["viol"][("I", "operation-without-pods", "engine", "1")] = {"first": 1.0, "last": 6.0, "n": 2, "detail": "no pod"}
+        checks, notes = [], []
+        self.assertEqual("XFAIL (known bug: #4242)", run.invariant_checks(inv, "PASS", notes, checks))
+
+    def test_hit_routes_an_advisory_kind_to_its_own_store(self):
+        inv = run._inv_new("p1", {})
+        hits = set()
+        key = ("L", "pairable-capacity", "engine")
+        for tick in range(run.INV_SUSTAIN_L):
+            run._inv_hit(inv, hits, key, key, run.INV_SUSTAIN_L, 5.0 * tick, "dip")
+        self.assertEqual({key}, set(inv["advisory"]))
+        self.assertEqual({}, inv["viol"])
+        self.assertEqual({("L", "pairable-capacity"), ("M", "traffic-backed"),
+                          ("A", "serving-count-drift"), ("I", "deadline-without-reason")}, run.INV_ADVISORY)
+        self.assertEqual(("pairable-capacity", "traffic-backed"), (run.INV_NAMES["L"], run.INV_NAMES["M"]))
+        self.assertFalse({"L", "M"} & run.INV_CLASSES, "advisory classes cannot be parked or waived by letter")
 
 
 class LabelTruthInvariantTest(unittest.TestCase):
@@ -3454,7 +3867,7 @@ class DeleteUnderTheOutageTest(unittest.TestCase):
         info = {"workers": {}, "strat": {}, "policy": None}
         with mock.patch.multiple(run, apply_runtime_fixtures=lambda: None,
                                  apply_case=lambda y: subprocess.CompletedProcess((), 0, "", ""),
-                                 get_spec_info=lambda c: info, start_watcher=lambda c: None, _inv_new=lambda c, h: None,
+                                 get_spec_info=lambda c: info, start_watcher=lambda c: None, _inv_new=lambda c, h, **kw: None,
                                  _fault_new=lambda c, h: None, _once_start_tick=lambda f, s: None, _read_one=lambda c: {}), \
                 contextlib.redirect_stdout(io.StringIO()):
             ctx, err = run._setup_and_ready("p999", "case.yaml", {"Ne": 1}, tick=lambda c: "read as it stands")
