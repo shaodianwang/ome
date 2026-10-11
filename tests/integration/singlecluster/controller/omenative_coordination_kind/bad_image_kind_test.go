@@ -13,18 +13,23 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// bad-image failure → Phase=Failed, v1 capacity preserved.
+// bad-image failure: the attempt fails, the Instance keeps serving v1.
 //
 // Operators rely on the "no auto-rollback" principle: a failed
 // rollout freezes; v1 keeps serving; the operator decides what to do
 // next. Real kubelet handles the failure naturally — non-existent
-// image tags hit ErrImagePull / ImagePullBackOff, the pod never
-// reaches ContainersReady, the controller's InstanceReadyTimeout
-// fires, and the coordination layer transitions to Failed.
+// image tags hit ErrImagePull / ImagePullBackOff, the replacement never
+// reaches ContainersReady, and the controller's InstanceReadyTimeout
+// ends the attempt. The attempt is counted on the revision's retry
+// ladder, which holds the revision, and stays on the Instance's record.
+// The Instance itself reads Ready: its v1 pod never stopped serving, so
+// the published phase follows that pod, not the replacement that
+// failed. The coordination group reads the roll as in flight and held
+// rather than Failed.
 //
 // InstanceReadyTimeout is set short (45s) so the test fits the suite
-// budget; the invariant (Phase=Failed, v1 serving preserved) is
-// independent of the value.
+// budget; the invariant (the failed attempt on the record, the revision
+// held, v1 serving preserved) is independent of the value.
 var _ = ginkgo.Describe("behavior — bad-image failure", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -36,7 +41,7 @@ var _ = ginkgo.Describe("behavior — bad-image failure", ginkgo.Ordered, func()
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("bad-image bump times out → Failed phase; v1 capacity preserved", func() {
+	ginkgo.It("bad-image bump times out → the attempt is held on the record; v1 capacity preserved", func() {
 		// 2-replica engine + 1-replica decoder, BlueGreen,
 		// MaxUnavailable=1. With MaxUnavailable=1 the rollout takes
 		// one v1 pod offline per cycle; if the v2 image never reaches
@@ -95,16 +100,46 @@ var _ = ginkgo.Describe("behavior — bad-image failure", ginkgo.Ordered, func()
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Wait for Phase=Failed. Budget = InstanceReadyTimeout (45s) +
+		// Wait for the attempt to end. Budget = InstanceReadyTimeout (45s) +
 		// kubelet pull-retry backoff (~1 min worst case) + reconcile
-		// + status flush headroom. 3 minutes is comfortable.
+		// + status flush headroom. 3 minutes is comfortable. The Instance
+		// the roll reached keeps publishing Ready: its v1 pod serves, the
+		// replacement's failure sits on its record with the revision the
+		// attempt was for, the ladder holds that revision and the hold
+		// says so. The other Instance is never started.
 		Eventually(func(g Gomega) {
+			ir := freshInferenceReplica(g, ns.Name, "badimg-x1", v1beta1.EngineComponent)
+			badRev := ir.Status.UpdateRevision
+			g.Expect(badRev).NotTo(BeEmpty())
+			g.Expect(badRev).NotTo(Equal(ir.Status.CurrentRevision), "the roll must still be in flight")
+			block := findRetryBlock(ir.Status.RetryBlocks, badRev)
+			g.Expect(block).NotTo(BeNil(), "the failed attempt must count on the bad revision's retry ladder")
+			g.Expect(block.State).To(Equal(v1beta1.RetryBlockHeld), "with no retry policy the first failure holds the revision")
+			g.Expect(block.Reason).NotTo(BeEmpty())
+			g.Expect(ir.Status.RolloutHold).NotTo(BeNil(), "status.rolloutHold must say why the roll stopped")
+			g.Expect(ir.Status.RolloutHold.Gate).To(Equal(v1beta1.RolloutHoldGateHeld))
+			g.Expect(ir.Status.RolloutHold.Target).To(Equal(badRev))
+			rows := decodedInstanceStatuses(g, ir)
+			g.Expect(rows).To(HaveLen(2))
+			attempted := 0
+			for _, row := range rows {
+				g.Expect(row.Phase).To(Equal(v1beta1.OMENativeInstanceReady),
+					"instance %d serves on v1 and reads Ready whether or not its replacement failed", row.Index)
+				g.Expect(row.Operation).To(BeNil(), "instance %d: no attempt stays open at a held revision", row.Index)
+				g.Expect(row.RunningRevision).To(Equal(ir.Status.CurrentRevision), "instance %d must still run v1", row.Index)
+				if row.TargetRevision == badRev {
+					attempted++
+					g.Expect(row.LastFailure).NotTo(BeNil(), "instance %d: the failed attempt must stay on the record", row.Index)
+					g.Expect(row.LastFailure.Reason).NotTo(BeEmpty())
+				}
+			}
+			g.Expect(attempted).To(Equal(1), "exactly one Instance carries the failed attempt; the other was never started")
 			c := freshISVC(g, ns.Name, "badimg-x1")
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
 			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
 			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
-				To(Equal(v1beta1.CoordinationPhaseFailed),
-					"coordination layer must mark group Failed after the per-Instance timeout")
+				To(Equal(v1beta1.CoordinationPhaseSurging),
+					"the group reads a roll in flight and held, not Failed: the Instance it reached still serves")
 		}).WithTimeout(3 * time.Minute).WithPolling(kindPollInterval).Should(Succeed())
 		stop()
 	})

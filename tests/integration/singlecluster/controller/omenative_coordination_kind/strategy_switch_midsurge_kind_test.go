@@ -255,12 +255,33 @@ var _ = ginkgo.Describe("behavior — update strategy edited mid-surge", ginkgo.
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("waiting for both attempts at the broken revision to be disposed")
+		// The rebuilt Instance has no serving pod left: it reads Failed with
+		// its attempt parked. The surged Instance keeps serving its source:
+		// it reads Ready with the failed attempt on its record. Neither has
+		// an attempt in flight.
 		Eventually(func(g Gomega) {
-			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			brokenRev := ir.Status.UpdateRevision
+			g.Expect(brokenRev).NotTo(BeEmpty())
+			g.Expect(brokenRev).NotTo(Equal(startRevision))
+			insts := decodedInstanceStatuses(g, ir)
 			g.Expect(insts).To(HaveLen(replicas))
 			for _, inst := range insts {
-				g.Expect(inst.Phase).To(Equal(v1beta1.OMENativeInstanceFailed),
-					"Instance %d must be disposed at the broken revision", inst.Index)
+				expectNoAttemptInFlight(g, inst, brokenRev)
+				g.Expect(inst.LastFailure).NotTo(BeNil(),
+					"Instance %d must record its failed attempt at the broken revision", inst.Index)
+				switch inst.Phase {
+				case v1beta1.OMENativeInstanceFailed:
+				case v1beta1.OMENativeInstanceReady:
+					g.Expect(inst.Operation).To(BeNil(), "Instance %d: a Ready row carries no parked attempt", inst.Index)
+					g.Expect(inst.RunningRevision).To(Equal(startRevision),
+						"Instance %d reads Ready only on its serving source", inst.Index)
+					g.Expect(inst.TargetRevision).To(Equal(brokenRev),
+						"Instance %d: the revision the failed attempt was for stays on the row", inst.Index)
+				default:
+					g.Expect(inst.Phase).To(BeElementOf(v1beta1.OMENativeInstanceFailed, v1beta1.OMENativeInstanceReady),
+						"Instance %d must be disposed at the broken revision", inst.Index)
+				}
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 

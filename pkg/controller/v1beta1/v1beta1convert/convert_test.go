@@ -416,6 +416,49 @@ func TestInstanceStatusToWorkload_PublishedRestartingReadsReady(t *testing.T) {
 	}
 }
 
+// The status publication writes Ready over a settled Failed row that still
+// runs a revision and records a spent attempt at another while the pods it
+// runs serve. The engine reads that row as Failed: no promote leaves a Ready
+// row off its running revision, so the shape is the publication's. The
+// record, the revisions and the anchor come through untouched. A Ready row
+// with no target revision, one whose target is the revision it runs, one
+// that never ran a revision, and one carrying an operation read as they are.
+func TestInstanceStatusToWorkload_PublishedReadyOffRunningRevisionReadsFailed(t *testing.T) {
+	readySince := metav1.NewTime(time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC))
+	failedAt := metav1.NewTime(readySince.Add(10 * time.Minute))
+	published := v1beta1.OMENativeInstanceStatus{
+		Index: 2, Incarnation: 3, Phase: v1beta1.OMENativeInstanceReady,
+		RunningRevision: "rev-1", TargetRevision: "rev-2", PodCount: 2, ReadySince: &readySince,
+		LastFailure: &v1beta1.InstanceTermination{PodName: "p-2-1", Reason: "CrashLoopBackOff", Time: failedAt},
+	}
+	got := InstanceStatusToWorkload(published)
+	if got.Phase != workloadtypes.InstancePhaseFailed || got.Operation != nil {
+		t.Fatalf("published Ready off its running revision read as phase %s operation %+v, want Failed with no operation", got.Phase, got.Operation)
+	}
+	if got.RunningRevision != "rev-1" || got.TargetRevision != "rev-2" || got.Incarnation != 3 ||
+		got.ReadySince == nil || !got.ReadySince.Equal(&readySince) ||
+		got.LastFailure == nil || got.LastFailure.PodName != "p-2-1" || !got.LastFailure.Time.Equal(&failedAt) {
+		t.Fatalf("row = %+v, want revisions, anchor, incarnation and record kept", got)
+	}
+	back := InstanceStatusFromWorkload(got)
+	if back.Phase != v1beta1.OMENativeInstanceFailed {
+		t.Fatalf("the engine's shape encodes as %s, want Failed: only the publication writes Ready over it", back.Phase)
+	}
+
+	asIs := map[string]v1beta1.OMENativeInstanceStatus{
+		"no target revision":        {Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-1"},
+		"target is the running one": {Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-1", TargetRevision: "rev-1"},
+		"never ran a revision":      {Phase: v1beta1.OMENativeInstanceReady, TargetRevision: "rev-2"},
+		"an operation owns the row": {Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-1", TargetRevision: "rev-2",
+			Operation: &v1beta1.InstanceOperation{ID: "update-2", Type: v1beta1.InstanceOperationUpdate, Step: "Surge"}},
+	}
+	for name, row := range asIs {
+		if got := InstanceStatusToWorkload(row); got.Phase != workloadtypes.InstancePhaseReady {
+			t.Errorf("%s: read as %s, want Ready", name, got.Phase)
+		}
+	}
+}
+
 func TestInstanceStatusRoundtrip_NodesOccupiedDeepCopy(t *testing.T) {
 	in := v1beta1.OMENativeInstanceStatus{
 		Index:         3,

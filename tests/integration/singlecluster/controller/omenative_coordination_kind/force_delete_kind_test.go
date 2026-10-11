@@ -307,11 +307,12 @@ var _ = ginkgo.Describe("OMENative force-delete escalation (KIND)", ginkgo.Order
 	})
 
 	// A drained pod no operation waits on. A roll to an image that never
-	// pulls parks the Instance at Failed; its node is paused; the image is
+	// pulls ends the attempt with the Instance still Ready on its serving
+	// pod and the failure on its record; its node is paused; the image is
 	// rolled back, so the wreckage sweep drains and deletes the wedged
 	// replacement, which its frozen kubelet never finishes, and the
-	// Instance returns to Ready on its serving pod with no operation left
-	// to re-read the Terminating pod. The Component pass still
+	// Instance is Ready on its serving pod with no operation left to
+	// re-read the Terminating pod. The Component pass still
 	// force-deletes it once the node has been unreachable for the
 	// threshold and the pod is past its own deadline plus the slack, with
 	// the event and the ledger row, and the serving pod is never touched.
@@ -344,7 +345,7 @@ var _ = ginkgo.Describe("OMENative force-delete escalation (KIND)", ginkgo.Order
 		source := aliveEnginePodForInstance(Default, ns.Name, isvcName, 0)
 		Expect(source.Spec.NodeName).NotTo(BeEmpty(), "serving pod must be scheduled")
 
-		ginkgo.By("rolling to an image that never pulls, so the replacement wedges and the row fails")
+		ginkgo.By("rolling to an image that never pulls, so the replacement wedges and the attempt fails")
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, isvcName)
 			cur.Spec.Engine.PodSpec.Containers[0].Image = unpullableImage
@@ -360,9 +361,18 @@ var _ = ginkgo.Describe("OMENative force-delete escalation (KIND)", ginkgo.Order
 				}
 			}
 			g.Expect(wedged).NotTo(BeNil(), "the replacement must be bound to a node")
-			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			badRev := ir.Status.UpdateRevision
+			g.Expect(badRev).NotTo(Equal(ir.Status.CurrentRevision), "the roll must still be in flight")
+			g.Expect(findRetryBlock(ir.Status.RetryBlocks, badRev)).NotTo(BeNil(),
+				"the failed attempt must count on the unpullable revision's retry ladder")
+			insts := decodedInstanceStatuses(g, ir)
 			g.Expect(insts).To(HaveLen(1))
-			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceFailed))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
+				"the Instance serves on its source and reads Ready; the replacement is the attempt that failed")
+			g.Expect(insts[0].Operation).To(BeNil(), "the ended attempt leaves no operation on the row")
+			g.Expect(insts[0].TargetRevision).To(Equal(badRev), "the revision the failed attempt was for stays on the row")
+			g.Expect(insts[0].LastFailure).NotTo(BeNil(), "the failed attempt must stay on the record")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		Expect(wedged.Spec.NodeName).NotTo(Equal(source.Spec.NodeName), "the replacement must sit on its own node")
 		node := wedged.Spec.NodeName

@@ -16,13 +16,16 @@ import (
 
 // Sequential earlier-Component failure holds the later Component.
 //
-// The ordered-group contract: a failed earlier Component prevents later
-// Components from starting. Both images are bumped in one generation with
-// Order=[decoder, engine], but the decoder's new image does not exist —
-// real kubelet hits ErrImagePull, the decoder's surge pod never reaches
-// ContainersReady, the InstanceReadyTimeout escalates the group to
-// Failed. Throughout that window the engine must stay entirely on v1: no
-// v2 engine pod may ever exist, and the v1 engine pod must keep its UID.
+// The ordered-group contract: an earlier Component whose roll failed
+// prevents later Components from starting. Both images are bumped in one
+// generation with Order=[decoder, engine], but the decoder's new image
+// does not exist — real kubelet hits ErrImagePull, the decoder's surge pod
+// never reaches ContainersReady, and the InstanceReadyTimeout ends the
+// attempt: the bad revision is held on its retry ladder, the decoder
+// Instance keeps serving v1 and reads Ready with the failure on its
+// record, and the group reads the decoder's roll as in flight and held.
+// Throughout that window the engine must stay entirely on v1: no v2
+// engine pod may ever exist, and the v1 engine pod must keep its UID.
 //
 // The recovery half: publishing a corrected decoder revision (a spec
 // roll-forward, no group-level latch to clear) must resume the chain —
@@ -50,7 +53,7 @@ var _ = ginkgo.Describe("behavior — Sequential earlier-Component failure hold"
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("holds the engine on v1 while the decoder is Failed; a corrected revision resumes the chain", func() {
+	ginkgo.It("holds the engine on v1 while the decoder's roll is held; a corrected revision resumes the chain", func() {
 		maxUnavail := intstr.FromInt(1)
 		shortTimeout := metav1.Duration{Duration: 45 * time.Second}
 		fix := newCoordFixture(ns.Name, WithISVCName(name),
@@ -64,8 +67,8 @@ var _ = ginkgo.Describe("behavior — Sequential earlier-Component failure hold"
 			}),
 			WithEngineImage(goodImage))
 		// Short per-Instance Ready timeout so the decoder's bad-image surge
-		// escalates to Failed inside the suite budget; the hold invariant is
-		// independent of the value.
+		// ends inside the suite budget; the hold invariant is independent of
+		// the value.
 		fix.ISVC.Spec.Decoder.Lifecycle = &v1beta1.LifecycleSpec{
 			InstanceReadyTimeout: &shortTimeout,
 		}
@@ -143,26 +146,60 @@ var _ = ginkgo.Describe("behavior — Sequential earlier-Component failure hold"
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// The decoder's failure must surface as the group-level Failed
-		// rollup. Budget = InstanceReadyTimeout (45s) + kubelet pull-retry
-		// backoff + reconcile + status flush headroom.
+		// The decoder's attempt ends on the InstanceReadyTimeout: the bad
+		// revision is held on its retry ladder, the decoder Instance keeps
+		// publishing Ready on v1 (its v1 pod never stopped serving) with the
+		// failed attempt on its record, the group reads the decoder's roll
+		// as in flight and held rather than Failed, and the engine's own
+		// hold names the Sequential gate. Budget = InstanceReadyTimeout
+		// (45s) + kubelet pull-retry backoff + reconcile + status flush
+		// headroom.
 		Eventually(func(g Gomega) {
+			decoder := freshInferenceReplica(g, ns.Name, name, v1beta1.DecoderComponent)
+			badRev := decoder.Status.UpdateRevision
+			g.Expect(badRev).NotTo(BeEmpty())
+			g.Expect(badRev).NotTo(Equal(v1DecoderRev), "the decoder must be rolling toward the bad revision")
+			block := findRetryBlock(decoder.Status.RetryBlocks, badRev)
+			g.Expect(block).NotTo(BeNil(), "the failed attempt must count on the bad revision's retry ladder")
+			g.Expect(block.State).To(Equal(v1beta1.RetryBlockHeld), "with no retry policy the first failure holds the revision")
+			g.Expect(decoder.Status.RolloutHold).NotTo(BeNil(), "the decoder's status.rolloutHold must say why its roll stopped")
+			g.Expect(decoder.Status.RolloutHold.Gate).To(Equal(v1beta1.RolloutHoldGateHeld))
+			g.Expect(decoder.Status.RolloutHold.Target).To(Equal(badRev))
+			rows := decodedInstanceStatuses(g, decoder)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
+				"the decoder Instance serves on v1 and reads Ready; its replacement failed, it did not")
+			g.Expect(rows[0].Operation).To(BeNil(), "no attempt stays open at a held revision")
+			g.Expect(rows[0].RunningRevision).To(Equal(v1DecoderRev))
+			g.Expect(rows[0].TargetRevision).To(Equal(badRev), "the revision the failed attempt was for stays on the row")
+			g.Expect(rows[0].LastFailure).NotTo(BeNil(), "the failed attempt must stay on the record")
+			g.Expect(rows[0].LastFailure.Reason).NotTo(BeEmpty())
+
+			engine := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
+			g.Expect(engine.Status.RolloutHold).NotTo(BeNil(), "the engine's status.rolloutHold must name the Sequential gate")
+			g.Expect(engine.Status.RolloutHold.Gate).To(Equal(v1beta1.RolloutHoldGateSequential))
+			g.Expect(engine.Status.RolloutHold.Reason).To(ContainSubstring(string(v1beta1.DecoderComponent)),
+				"the engine waits on the decoder, first in Order")
+
 			c := freshISVC(g, ns.Name, name)
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
 			g.Expect(c.Status.RolloutCoordination.Groups).NotTo(BeEmpty())
-			g.Expect(c.Status.RolloutCoordination.Groups[0].Phase).
-				To(Equal(v1beta1.CoordinationPhaseFailed),
-					"group must roll up Failed while the first Component in Order is wedged")
+			group := c.Status.RolloutCoordination.Groups[0]
+			g.Expect(group.Phase).To(Equal(v1beta1.CoordinationPhaseSurging),
+				"the group reads the decoder's roll as in flight and held, not Failed")
+			g.Expect(group.CurrentComponent).To(Equal(v1beta1.DecoderComponent),
+				"the decoder, first in Order, stays the active Component")
 		}).WithTimeout(3 * time.Minute).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Soak in the Failed state: the engine hold (enforced continuously
-		// by the sampler) must persist — Failed is not a release.
+		// Soak in the held state: the engine hold (enforced continuously by
+		// the sampler) must persist — a held earlier Component is not a
+		// release.
 		Consistently(func(g Gomega) {
 			c := freshISVC(g, ns.Name, name)
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle).NotTo(BeNil())
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].Lifecycle.CurrentRevision).
 				To(Equal(v1EngineRev),
-					"engine CurrentRevision must not advance while the decoder is Failed")
+					"engine CurrentRevision must not advance while the decoder's roll is held")
 		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		stop()
 

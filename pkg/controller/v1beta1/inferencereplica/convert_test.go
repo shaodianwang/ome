@@ -1338,6 +1338,64 @@ func TestBuildMutateInstance_KeepsPublishedPhaseWhenMutationLeavesIt(t *testing.
 	})
 }
 
+// The status publication writes Ready over a settled Failed row that still
+// runs a revision and records a spent attempt at another, while the pods it
+// runs serve. A mutation reads that row as Failed; one that leaves the phase
+// as it read it keeps the published Ready in the write, and one that opens
+// the next attempt writes the phase it chose.
+func TestBuildMutateInstance_KeepsPublishedReadyOverAFailedAttempt(t *testing.T) {
+	readySince := metav1.NewTime(time.Unix(1700000000, 0))
+	failedAt := metav1.NewTime(time.Unix(1700000600, 0))
+	published := func() *v1beta1.InferenceReplica {
+		ir := baselineIR("llama-engine", "prod", 1)
+		ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+			Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+			RunningRevision: "rev-a", TargetRevision: "rev-b", PodCount: 2, ReadySince: &readySince,
+			LastFailure: &v1beta1.InstanceTermination{PodName: "llama-engine-0-default-1", Reason: "CrashLoopBackOff", Time: failedAt},
+		}}
+		return ir
+	}
+	read := func(t *testing.T, c client.Client, ir *v1beta1.InferenceReplica) v1beta1.OMENativeInstanceStatus {
+		t.Helper()
+		got := &v1beta1.InferenceReplica{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), got); err != nil {
+			t.Fatalf("get IR: %v", err)
+		}
+		return got.Status.InstanceStatuses[0]
+	}
+
+	t.Run("a mutation that leaves the phase keeps Ready", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ir := published()
+		r, c := newReconciler(t, ir)
+		var seen workloadtypes.InstancePhase
+		err := buildMutateInstance(r.statusWriter(), r.Client, ir)(context.Background(), 0, func(s *workloadtypes.InstanceStatus) bool {
+			seen = s.Phase
+			s.LastFailure.Message = "back-off restarting the failed container"
+			return true
+		})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(seen).To(gomega.Equal(workloadtypes.InstancePhaseFailed), "the engine reads the published row as Failed")
+		row := read(t, c, ir)
+		g.Expect(row.Phase).To(gomega.Equal(v1beta1.OMENativeInstanceReady))
+		g.Expect(row.TargetRevision).To(gomega.Equal("rev-b"))
+		g.Expect(row.LastFailure.Message).To(gomega.Equal("back-off restarting the failed container"))
+	})
+
+	t.Run("the next attempt writes its own phase", func(t *testing.T) {
+		g := gomega.NewWithT(t)
+		ir := published()
+		r, c := newReconciler(t, ir)
+		err := buildMutateInstance(r.statusWriter(), r.Client, ir)(context.Background(), 0, func(s *workloadtypes.InstanceStatus) bool {
+			s.Phase = workloadtypes.InstancePhaseUpdating
+			s.Operation = &workloadtypes.InstanceOperation{ID: "update-0", Type: workloadtypes.InstanceOperationUpdate, Step: workloadtypes.UpdateStepSurge, TargetRevision: "rev-b"}
+			return true
+		})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(read(t, c, ir).Phase).To(gomega.Equal(v1beta1.OMENativeInstanceUpdating))
+	})
+}
+
 func TestBuildApplyInstanceMutations_SameNameReplacementAborts(t *testing.T) {
 	g := gomega.NewWithT(t)
 	original := baselineIR("llama-engine", "prod", 1)

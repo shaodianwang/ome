@@ -160,10 +160,12 @@ const (
 // aggregateAndWriteStatus publishes cached Pod and EndpointSlice facts over
 // freshly read lifecycle rows, then computes the IR summaries and conditions.
 // Lifecycle fields and CurrentRevision retain their dedicated writers, with
-// one exception the publication owns: the phase of a settled Ready row
-// (workloadstatus.DemotableReady) follows the pods published beside it,
-// Pending with no pods and Restarting while the set serves nothing, so the
-// phase never contradicts the counters. A nil target leaves revision
+// one exception the publication owns: the phase of a settled row follows
+// the pods published beside it, so the phase never contradicts the
+// counters. A Ready row (workloadstatus.DemotableReady) reads Pending with
+// no pods and Restarting while its set serves nothing; a Failed row off the
+// revision it runs (workloadtypes.FailedOffRunningRevision) reads Ready
+// while the pods on that revision serve. A nil target leaves revision
 // pointers untouched while counters still publish.
 //
 // holdObserved/hold carry this pass's Update-pass rollout-hold verdict
