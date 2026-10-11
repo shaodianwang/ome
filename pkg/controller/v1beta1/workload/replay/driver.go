@@ -956,7 +956,7 @@ func (d *driver) runTick(ctx context.Context, tick Tick) error {
 		return fmt.Errorf("replay: tick %d: api.conflict armed for status write %v, but the pass made no such write", tick.Tick, unfired)
 	}
 	d.stalePass = false
-	if err := d.observe(ctx, tick.Tick, desired); err != nil {
+	if err := d.observe(ctx, tick.Tick, desired, input.StuckPodGrace); err != nil {
 		return err
 	}
 	return d.refreshStaleCache(ctx, tick.Tick)
@@ -964,8 +964,9 @@ func (d *driver) runTick(ctx context.Context, tick Tick) error {
 
 // observe hands the tick's end state to the observer, when one is set. Pods
 // and rotation are read live, as the next pass will list them; the rows
-// carry the pod counts the publication after this pass wrote.
-func (d *driver) observe(ctx context.Context, tick int, desired types.WorkloadDesiredSpec) error {
+// carry the pod counts the publication after this pass wrote; the grace is
+// the one the pass's readers received.
+func (d *driver) observe(ctx context.Context, tick int, desired types.WorkloadDesiredSpec, stuckPodGrace time.Duration) error {
 	if d.opts.Observer == nil {
 		return nil
 	}
@@ -977,24 +978,41 @@ func (d *driver) observe(ctx context.Context, tick int, desired types.WorkloadDe
 	if err != nil {
 		return err
 	}
-	spec := TickSpec{Replicas: desired.Replicas, Paused: desired.Paused, Teardown: d.teardown}
+	spec := TickSpec{
+		Replicas:        desired.Replicas,
+		PodsPerInstance: podsPerInstance(desired),
+		MinReadySeconds: desired.MinReadySeconds,
+		Paused:          desired.Paused,
+		Teardown:        d.teardown,
+	}
 	if strategy := desired.Lifecycle.UpdateStrategy; strategy != nil && strategy.RollingUpdate != nil {
 		spec.MaxUnavailable = strategy.RollingUpdate.MaxUnavailable
 		spec.MaxSurge = strategy.RollingUpdate.MaxSurge
 		spec.Partition = strategy.RollingUpdate.Partition
 	}
 	d.opts.Observer(TickView{
-		Tick:        tick,
-		Now:         d.clock.Now(),
-		Rows:        d.overlayPublished(d.store.Rows()),
-		RetryBlocks: d.store.RetryBlocks(),
-		Pods:        pods,
-		Routed:      routed,
-		Holds:       append([]types.RolloutHold(nil), d.tickHolds...),
-		Commits:     append([]RowCommit(nil), d.tickCommits...),
-		Spec:        spec,
+		Tick:          tick,
+		Now:           d.clock.Now(),
+		Rows:          d.overlayPublished(d.store.Rows()),
+		RetryBlocks:   d.store.RetryBlocks(),
+		Pods:          pods,
+		Routed:        routed,
+		Holds:         append([]types.RolloutHold(nil), d.tickHolds...),
+		Commits:       append([]RowCommit(nil), d.tickCommits...),
+		Spec:          spec,
+		StuckPodGrace: stuckPodGrace,
 	})
 	return nil
+}
+
+// podsPerInstance is the pod count one Instance of the desired spec runs:
+// the sizes of its runners added up.
+func podsPerInstance(desired types.WorkloadDesiredSpec) int32 {
+	var n int32
+	for _, runner := range desired.Runners {
+		n += runner.Size
+	}
+	return n
 }
 
 // teardownOverdue reports whether the deleted owner has held its finalizer

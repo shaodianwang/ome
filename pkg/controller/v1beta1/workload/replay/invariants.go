@@ -45,11 +45,21 @@ type TickView struct {
 	Commits []RowCommit
 	// Spec is the desired spec the pass ran against.
 	Spec TickSpec
+	// StuckPodGrace is the configured grace a pod may fail its readiness
+	// for before the engine reads it as out of service.
+	StuckPodGrace time.Duration
 }
 
-// TickSpec is the part of the desired spec the invariants read.
+// TickSpec is the part of the desired spec the invariants and the reading
+// comparison read.
 type TickSpec struct {
 	Replicas int32
+	// PodsPerInstance is the pod count one Instance is expected to run:
+	// one, or the leader plus the workers of a gang.
+	PodsPerInstance int32
+	// MinReadySeconds is how long a pod holds PodReady before it counts
+	// as available.
+	MinReadySeconds int32
 	// MaxUnavailable, MaxSurge and Partition are the rolling-update knobs
 	// as the engine receives them; nil is unset.
 	MaxUnavailable *intstr.IntOrString

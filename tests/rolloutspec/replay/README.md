@@ -20,7 +20,7 @@ go test ./tests/rolloutspec/replay/... -count=1 -timeout 300s
 go test ./tests/rolloutspec/replay/... -run TestReplayMatchesGolden -update   # rewrite goldens
 ```
 
-Five gates run here:
+Six gates run here:
 
 | test | proves |
 |---|---|
@@ -29,6 +29,7 @@ Five gates run here:
 | `TestArrowCoverage` | every cited arrow exists and is workload-lane; reports how much of the table is driven |
 | `TestCellCitationsResolve` | every cited cell is a key of the expanded grid |
 | `TestOperatorInvariantsOverTheCorpus` | the operator invariants (capacity, bounded waits, status truth, single owner) hold on every tick of every scenario, up to the recorded advisory classes |
+| `TestReadingBesideTodaysReadersOverTheCorpus` | the one reading of an Instance's pods (`workload/reading`) and the readers the passes use today answer alike on every tick of every scenario, up to the recorded advisory classes of disagreement |
 
 A scenario is loaded through `tests/rolloutspec`, so an event, variant,
 arrow or cell the instance table does not declare fails the load. The
