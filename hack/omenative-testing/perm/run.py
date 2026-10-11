@@ -7929,23 +7929,41 @@ def _fault_configkey_fire(f, pod_state, old_hashes):
     print(f"    ⚡ {f['notes'][-1]}")
 
 
-def _ir_row_phase(case_id, comp, inst):
-    """Phase of one Instance's row in its Component's InferenceReplica status
-    ("" when the row or the object cannot be read)."""
+def _ir_row(case_id, comp, inst):
+    """One Instance's decoded row in its Component's InferenceReplica status
+    (None when the row or the object cannot be read)."""
     r = kubectl("-n", NS, "get", "inferencereplicas", "-l", f"ome.io/inferenceservice={case_id}", "-o", "json")
     if r.returncode != 0:
-        return ""
+        return None
     try:
         items = json.loads(r.stdout).get("items", []) or []
     except Exception:
-        return ""
+        return None
     for it in items:
         if (it.get("spec") or {}).get("component") != comp:
             continue
         for row in _instance_rows(it.get("status") or {}):
             if str(row.get("index")) == str(inst):
-                return str(row.get("phase") or "")
-    return ""
+                return row
+    return None
+
+
+def _ir_row_phase(case_id, comp, inst):
+    """Phase of one Instance's row in its Component's InferenceReplica status
+    ("" when the row or the object cannot be read)."""
+    return str((_ir_row(case_id, comp, inst) or {}).get("phase") or "")
+
+
+def _row_names_repair(row):
+    """True when a row says the engine is rebuilding the Instance: phase
+    Restarting under an operation of type Restart. The status publication
+    writes Restarting with no operation over a settled row whose pods are
+    present but serve nothing, so the phase word alone says the set is
+    down, not that a repair is open; only a repair the engine opened
+    carries the operation."""
+    if not row or str(row.get("phase") or "") != "Restarting":
+        return False
+    return str((row.get("operation") or {}).get("type") or "") == "Restart"
 
 
 def _ir_rows(case_id):
@@ -8840,9 +8858,10 @@ def _wait_break_bitten(ctx, f, budget_s):
 def _break_reacted(case_id, f, since_epoch):
     """{(component, instance): how} for every victim of a break the status
     has reacted to since since_epoch: its repair is open (a RestartTriggered
-    event names its Instance, or its row reads Restarting or carries an
-    operation) or the product has said it holds the repair (a RepairHeld
-    event names it)."""
+    event names its Instance, or its row carries an operation) or the
+    product has said it holds the repair (a RepairHeld event names it). A
+    row the publication reads Restarting with no operation is the set
+    down, not a repair (_row_names_repair), and counts for nothing."""
     snapshot = _ir_snapshot(case_id)
     events = _isvc_events_since(case_id, since_epoch)
     out = {}
@@ -8854,8 +8873,6 @@ def _break_reacted(case_id, f, since_epoch):
             out[(comp, inst)] = "a RestartTriggered event names it"
         elif row.get("operation") is not None:
             out[(comp, inst)] = f"its row reads {row.get('phase')} with an operation open"
-        elif str(row.get("phase")) == "Restarting":
-            out[(comp, inst)] = "its row reads Restarting"
         elif "RepairHeld" in reasons:
             out[(comp, inst)] = "a RepairHeld event names it"
     return out
@@ -12440,13 +12457,16 @@ def _idle_fault(case_id, yaml_file, desc, hdr):
 
 
 # ── A pause or a freeze around a repair (pauseat=) ───────────────────────────
-def _repair_open(pods, pre_uids, expected, row_phase, named):
+def _repair_open(pods, pre_uids, expected, row, named):
     """True while the broken Instance's repair is under way: the product has
-    named it (a RestartTriggered event, a Restarting row) or its pod set
-    has started to change (a pod gone or replaced), and the Instance is not
-    rebuilt and serving yet."""
+    named it (a RestartTriggered event, or its row Restarting under an open
+    operation, _row_names_repair) or its pod set has started to change (a
+    pod gone or replaced), and the Instance is not rebuilt and serving yet.
+    A row the publication reads Restarting with no operation names no
+    repair: the set is down, and whether a repair opens is the engine's to
+    say."""
     changed = len(pods) < max(1, expected) or any(p.get("uid") and p["uid"] not in pre_uids for _n, p in pods)
-    signalled = named or row_phase == "Restarting" or changed
+    signalled = named or _row_names_repair(row) or changed
     return signalled and not _instance_rebuilt_whole(pods, pre_uids, expected)
 
 
@@ -12707,12 +12727,14 @@ def _pause_repair(case_id, yaml_file, desc, hdr):
         want = "the repair to open" if moment == "during" else "the repair to finish"
         print(f"  Phase 4: waiting for {want} on {comp} Instance {inst} (≤{budget}s)")
         reached, stable, last_read, row, named, held = False, None, 0.0, "", False, []
+        row_read = None
         while time.time() - fault_ts < budget and not ctx["closed"]:
             _read_one(ctx)
             now = time.time()
             if now - last_read >= 2.0:
                 last_read = now
-                row = _ir_row_phase(case_id, comp, inst)
+                row_read = _ir_row(case_id, comp, inst)
+                row = str((row_read or {}).get("phase") or "")
                 repairs, held = _victim_events(case_id, fault_ts, comp, inst)
                 named = bool(repairs)
                 if _repair_declared_held(repairs, held):
@@ -12720,7 +12742,7 @@ def _pause_repair(case_id, yaml_file, desc, hdr):
             pods = victim_pods()
             whole = _instance_rebuilt_whole(pods, pre_uids, expected_pods)
             if moment == "during":
-                if whole or _repair_open(pods, pre_uids, expected_pods, row, named):
+                if whole or _repair_open(pods, pre_uids, expected_pods, row_read, named):
                     reached, out["repair_done_at_pause"] = True, whole
                     break
             elif whole:
@@ -19616,15 +19638,17 @@ def _runtimerev_during(case_id, yaml_file, desc, hdr, csr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
-def _repair_in_flight(events, row_phase, pods, pre_uids):
+def _repair_in_flight(events, row, pods, pre_uids):
     """Why the repair of an Instance counts as open: a RestartTriggered event
-    names it, its row reads Restarting, or a pod the fault never hit has
-    appeared for its index. "" while none of these holds. `events` are the
-    Instance's (reason, message) pairs since the fault."""
+    names it, its row reads Restarting under an open operation, or a pod
+    the fault never hit has appeared for its index. "" while none of these
+    holds; a row the publication reads Restarting with no operation is the
+    set down, not a repair (_row_names_repair). `events` are the Instance's
+    (reason, message) pairs since the fault."""
     if any(reason == "RestartTriggered" for reason, _m in events):
         return "a RestartTriggered event names it"
-    if row_phase == "Restarting":
-        return "its row reads Restarting"
+    if _row_names_repair(row):
+        return "its row reads Restarting with an operation open"
     if any(p.get("uid") and p["uid"] not in pre_uids for _n, p in pods):
         return "a new pod appeared for its index"
     return ""
@@ -19703,8 +19727,9 @@ def _break_after_roll_checks(ctx, pre_final, since_ts, verdict, notes, checks):
 def _runtimerev_repair(case_id, yaml_file, desc, hdr, csr):
     """Edit the runtime while the repair of a broken Instance is in flight.
     The break fires on the settled service; once the product has opened the
-    repair (an event names it, the row reads Restarting, or a rebuilt pod
-    appears) the runtime is edited, so the edit lands on an open repair. The
+    repair (an event names it, the row carries a Restart operation, or a
+    rebuilt pod appears) the runtime is edited, so the edit lands on an open
+    repair. The
     last change wins: every Instance, the repaired one included, ends on the
     post-edit revision serving; after the edit the repaired Instance is
     rebuilt at most once and no repair is recorded for it; no row is left
@@ -19747,13 +19772,13 @@ def _runtimerev_repair(case_id, yaml_file, desc, hdr, csr):
             continue
         last_poll = now
         named = [(r, m) for r, m in _isvc_events_since(case_id, fault_ts) if key in m]
-        opened = _repair_in_flight(named, _ir_row_phase(case_id, comp, inst), victim_pods(), pre_uids)
+        opened = _repair_in_flight(named, _ir_row(case_id, comp, inst), victim_pods(), pre_uids)
         if opened:
             opened_at = now - fault_ts
             print(f"    repair of {comp} Instance {inst} opened at {opened_at:.0f}s ({opened})")
     verdict, notes, checks = "PASS", [], []
     if not rebuilding:
-        how = f"it opened at {opened_at:.0f}s ({opened}) but" if opened else "no RestartTriggered event, no Restarting row, and"
+        how = f"it opened at {opened_at:.0f}s ({opened}) but" if opened else "no RestartTriggered event, no row under a Restart operation, and"
         notes.append(f"the repair of {comp} Instance {inst} never rebuilt it within {budget}s; the edit was not applied")
         checks.append(f"  ✗ {f['kind']}: {how} no replacement pod for {comp} Instance {inst} appeared within {budget}s "
                       f"— nothing for the edit to land on")
@@ -22651,9 +22676,9 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
     print(f"  Phase 2: {f['kind']} break on the settled service; the scale lands once the status reports it")
     # The pods of every Instance as the fault finds them: the broken
     # Instance counts as rebuilt once none of these is left. Read before the
-    # break, not at the scale: the scale lands when the row reads Restarting,
-    # which is when the repair has already deleted the old pod and may have
-    # created the rebuilt one.
+    # break, not at the scale: the scale lands once the status reports the
+    # repair (an event or the row's operation), when the repair has already
+    # deleted the old pod and may have created the rebuilt one.
     pods_before_break = {c: _pods_by_instance(ctx, c) for c in configured}
     report = _broken_fire_and_report(ctx, hdr)
     if f["infra_fail"]:

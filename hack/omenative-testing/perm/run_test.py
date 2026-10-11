@@ -1021,10 +1021,13 @@ class BreakRegistersItsPodTest(unittest.TestCase):
             return {"engine": {"hold": None, "rows": [dict(index=i, **p) for i, p in enumerate(phases)]}}
         ready = rows({"phase": "Ready"}, {"phase": "Ready"})
         named = "OMENative component=engine instance=1 restart triggered: pod e1 CrashLoopBackOff (incarnation=2)"
+        repairing = {"phase": "Restarting", "operation": {"type": "Restart", "step": "DeletePods"}}
         cases = [
             ("nothing", [], ready, {}),
             ("event", [("RestartTriggered", named)], ready, {("engine", "1"): "a RestartTriggered event names it"}),
-            ("row", [], rows({"phase": "Ready"}, {"phase": "Restarting"}), {("engine", "1"): "its row reads Restarting"}),
+            ("repair row", [], rows({"phase": "Ready"}, repairing),
+             {("engine", "1"): "its row reads Restarting with an operation open"}),
+            ("published row: the set down, no repair", [], rows({"phase": "Ready"}, {"phase": "Restarting", "servingPodCount": 0}), {}),
             ("operation", [], rows({"phase": "Ready"}, {"phase": "Updating", "operation": {"type": "Restart"}}),
              {("engine", "1"): "its row reads Updating with an operation open"}),
             ("held", [("RepairHeld", "OMENative component=engine instance=1 repair held: retry budget")], ready,
@@ -1032,8 +1035,9 @@ class BreakRegistersItsPodTest(unittest.TestCase):
             ("elsewhere", [("RestartTriggered", "OMENative component=engine instance=12 restart triggered: x"),
                            ("RestartTriggered", "OMENative component=decoder instance=1 restart triggered: x")], ready, {}),
             ("each victim", [("RestartTriggered", "OMENative component=engine instance=0 restart triggered: x")],
-             rows({"phase": "Ready"}, {"phase": "Restarting"}),
-             {("engine", "0"): "a RestartTriggered event names it", ("engine", "1"): "its row reads Restarting"}),
+             rows({"phase": "Ready"}, repairing),
+             {("engine", "0"): "a RestartTriggered event names it",
+              ("engine", "1"): "its row reads Restarting with an operation open"}),
         ]
         for name, events, snapshot, want in cases:
             with mock.patch.object(run, "_isvc_events_since", lambda cid, since, _e=events, **kw: _e), \
@@ -1051,7 +1055,7 @@ class BreakRegistersItsPodTest(unittest.TestCase):
 
         def reacted(cid, f_, since):
             reads.append(since)
-            shown = {("engine", "1"): "its row reads Restarting"}
+            shown = {("engine", "1"): "its row reads Restarting with an operation open"}
             if len(reads) >= 3:
                 shown[("engine", "0")] = "a RestartTriggered event names it"
             return shown
@@ -1064,7 +1068,7 @@ class BreakRegistersItsPodTest(unittest.TestCase):
             self.assertEqual(5.0, waited, "the third read, two ROW_POLL_S after the first, showed every victim")
             self.assertEqual([90.0] * 3, reads, "the status is read since the fault fired")
             self.assertEqual("once the status showed the break (engine Instance 0: a RestartTriggered event names it; "
-                             "engine Instance 1: its row reads Restarting), 5s after it bit", how)
+                             "engine Instance 1: its row reads Restarting with an operation open), 5s after it bit", how)
             reads.clear()
             clock[0] = 100.0
             waited, how = run._wait_break_reacted(dict(base, hdr={"restart": "None"}), f, 60)
@@ -1073,7 +1077,8 @@ class BreakRegistersItsPodTest(unittest.TestCase):
             self.assertEqual("once the break had been visible for 5s (restart policy None: no repair answers a broken pod)", how)
             reads.clear()
             clock[0] = 100.0
-            with mock.patch.object(run, "_break_reacted", lambda cid, f_, since: {("engine", "1"): "its row reads Restarting"}):
+            with mock.patch.object(run, "_break_reacted",
+                                   lambda cid, f_, since: {("engine", "1"): "its row reads Restarting with an operation open"}):
                 waited, how = run._wait_break_reacted(ctx, f, 6)
             self.assertIsNone(waited, "the budget ran out with one victim never shown")
             self.assertEqual("the status had not shown the break (no repair open or declared held for engine Instance 0)", how)
@@ -7445,13 +7450,19 @@ class RuntimeEditRepairTest(unittest.TestCase):
 
     def test_repair_counts_as_open_on_event_row_or_rebuilt_pod(self):
         pods = [("e2", {"uid": "u-old", "alive": True})]
-        self.assertEqual("", run._repair_in_flight([], "Ready", pods, {"u-old"}))
-        self.assertEqual("", run._repair_in_flight([("RepairHeld", "component=engine instance=2")], "Ready", pods, {"u-old"}))
+        ready = {"index": 2, "phase": "Ready"}
+        repairing = {"index": 2, "phase": "Restarting", "operation": {"type": "Restart", "step": "DeletePods"}}
+        published = {"index": 2, "phase": "Restarting", "servingPodCount": 0}
+        self.assertEqual("", run._repair_in_flight([], ready, pods, {"u-old"}))
+        self.assertEqual("", run._repair_in_flight([("RepairHeld", "component=engine instance=2")], ready, pods, {"u-old"}))
         self.assertEqual("a RestartTriggered event names it",
-                         run._repair_in_flight([("RestartTriggered", "component=engine instance=2")], "Ready", pods, {"u-old"}))
-        self.assertEqual("its row reads Restarting", run._repair_in_flight([], "Restarting", pods, {"u-old"}))
+                         run._repair_in_flight([("RestartTriggered", "component=engine instance=2")], ready, pods, {"u-old"}))
+        self.assertEqual("its row reads Restarting with an operation open", run._repair_in_flight([], repairing, pods, {"u-old"}))
+        self.assertEqual("", run._repair_in_flight([], published, pods, {"u-old"}),
+                         "the publication's Restarting row, no operation, is the set down and names no repair")
+        self.assertEqual("", run._repair_in_flight([], None, pods, {"u-old"}), "no row read yet")
         rebuilt = pods + [("e2b", {"uid": "u-new", "alive": True})]
-        self.assertEqual("a new pod appeared for its index", run._repair_in_flight([], "Ready", rebuilt, {"u-old"}))
+        self.assertEqual("a new pod appeared for its index", run._repair_in_flight([], ready, rebuilt, {"u-old"}))
 
     def test_rebuild_count_allows_one_new_pod_per_slot(self):
         f = {"crash_comp": "engine", "crash_inst": "2", "kind": "crashloop"}
@@ -13065,15 +13076,51 @@ class PauseRepairTest(unittest.TestCase):
     def test_repair_open_reads_the_product_or_the_pod_set(self):
         old = {"e1": {"alive": True, "ready": True, "serving": True, "uid": "u-old"}}
         pods = sorted(old.items())
-        self.assertFalse(run._repair_open(pods, {"u-old"}, 1, "Ready", False))
-        self.assertTrue(run._repair_open(pods, {"u-old"}, 1, "Restarting", False), "a Restarting row names the repair")
-        self.assertTrue(run._repair_open(pods, {"u-old"}, 1, "Ready", True), "so does the event")
-        self.assertTrue(run._repair_open([], {"u-old"}, 1, "", False), "a pod gone is the repair's first move")
+        ready = {"index": 1, "phase": "Ready"}
+        repairing = {"index": 1, "phase": "Restarting", "operation": {"type": "Restart", "step": "DeletePods"}}
+        published = {"index": 1, "phase": "Restarting", "servingPodCount": 0}
+        self.assertFalse(run._repair_open(pods, {"u-old"}, 1, ready, False))
+        self.assertTrue(run._repair_open(pods, {"u-old"}, 1, repairing, False),
+                        "a Restarting row under a Restart operation names the repair")
+        self.assertFalse(run._repair_open(pods, {"u-old"}, 1, published, False),
+                         "the publication's Restarting row, no operation, is the set down and names no repair")
+        self.assertTrue(run._repair_open(pods, {"u-old"}, 1, ready, True), "so does the event")
+        self.assertTrue(run._repair_open([], {"u-old"}, 1, None, False), "a pod gone is the repair's first move")
         half = [("e1", {"alive": True, "ready": True, "serving": True, "uid": "u-new"})]
-        self.assertTrue(run._repair_open(half, {"u-old", "u-old-w"}, 2, "", False), "a gang half rebuilt is still open")
-        self.assertFalse(run._repair_open(half, {"u-old"}, 1, "Restarting", True), "rebuilt and serving is not open")
+        self.assertTrue(run._repair_open(half, {"u-old", "u-old-w"}, 2, None, False), "a gang half rebuilt is still open")
+        self.assertFalse(run._repair_open(half, {"u-old"}, 1, repairing, True), "rebuilt and serving is not open")
         self.assertTrue(run._instance_rebuilt_whole(half, {"u-old"}, 1))
         self.assertFalse(run._instance_rebuilt_whole(half, {"u-old"}, 2))
+
+    def test_row_names_repair_reads_the_operation_not_the_phase_word(self):
+        """The status publication writes Restarting with no operation over a
+        settled row whose pods serve nothing; only a repair the engine
+        opened carries the operation, so only that row names a repair."""
+        self.assertFalse(run._row_names_repair(None))
+        self.assertFalse(run._row_names_repair({}))
+        self.assertFalse(run._row_names_repair({"index": 3, "phase": "Ready"}))
+        self.assertFalse(run._row_names_repair({"index": 3, "phase": "Restarting", "servingPodCount": 0}),
+                         "the publication's reading of a set that is down")
+        self.assertTrue(run._row_names_repair({"index": 3, "phase": "Restarting",
+                                               "operation": {"type": "Restart", "step": "DeletePods"}}))
+        self.assertFalse(run._row_names_repair({"index": 3, "phase": "Failed", "operation": {"type": "Restart"}}),
+                         "a repair parked Failed is held, not under way")
+        self.assertFalse(run._row_names_repair({"index": 3, "phase": "Restarting", "operation": {"type": "Update"}}),
+                         "only a Restart operation is a repair")
+
+    def test_ir_row_reads_one_instance_row_through_kubectl(self):
+        rows = [{"index": 0, "phase": "Ready"},
+                {"index": 3, "phase": "Restarting", "operation": {"type": "Restart", "step": "DeletePods"}}]
+        reads = _kubectl_with([(lambda a: a[2:4] == ("get", "inferencereplicas"), _ir_items("engine", rows))])
+        with mock.patch.object(run, "kubectl", reads):
+            self.assertEqual("Restart", (run._ir_row("p999", "engine", "3") or {}).get("operation", {}).get("type"))
+            self.assertEqual("Restarting", run._ir_row_phase("p999", "engine", "3"))
+            self.assertEqual("Ready", run._ir_row_phase("p999", "engine", 0), "the index is matched as text")
+            self.assertIsNone(run._ir_row("p999", "engine", "7"), "no such row")
+            self.assertIsNone(run._ir_row("p999", "decoder", "3"), "no such Component")
+        with mock.patch.object(run, "kubectl", lambda *a, **k: _Resp("", 1, "no cluster")):
+            self.assertIsNone(run._ir_row("p999", "engine", "3"))
+            self.assertEqual("", run._ir_row_phase("p999", "engine", "3"))
 
     def test_paused_changes_split_the_victim_from_everyone_else(self):
         state = {
@@ -14504,6 +14551,78 @@ class HandlerSmokeTest(unittest.TestCase):
         self.assertEqual({"engine-1-default-old": "p999-engine-1-0"}, ctx["inv"]["mutated_uids"],
                          "the rebuilt pod (a new UID) is not recorded: it is judged")
         self.assertEqual("CONVERGED", out["state"], out["checks"])
+
+    def test_pause_repair_freeze_lands_on_the_repair_the_engine_opened(self):
+        """A freeze timed during the repair waits for the engine to open the
+        repair, not for the phase word. After the break the status publishes
+        the row Restarting with no operation at once (the set is down); the
+        engine opens the repair a moment later, and a freeze that lands
+        first forbids it for the length of the hold. The freeze must land
+        on the open repair, which then finishes while frozen."""
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 2, "ceil_d": 0, "ceil_r": 0, "fault": "crashloop:old",
+               "form": "start", "during": "idle", "expect": "repaired", "victimcomp": "engine",
+               "pause": "freeze", "pauseat": "during", "topo": "engine"}
+        pods = {f"p999-engine-{i}-0": _rec("engine", i, "old") for i in range(2)}
+        ctx = _ctx_for(hdr, pods)
+        victim = "p999-engine-1-0"
+        engine = {"fired_at": None, "opened_at": None, "rebuilt_at": None, "frozen_first": False,
+                  "frozen_at": None, "unpaused_at": None, "pauses": []}
+
+        def victim_row():
+            if engine["fired_at"] is None or engine["rebuilt_at"] is not None:
+                return {"index": 1, "phase": "Ready"}
+            if engine["opened_at"] is None:
+                return {"index": 1, "phase": "Restarting", "servingPodCount": 0}   # the publication's reading
+            return {"index": 1, "phase": "Restarting", "operation": {"type": "Restart", "step": "DeletePods"}}
+
+        def kubectl(*a, **k):
+            if a[2:4] == ("patch", "pod") and engine["fired_at"] is None:
+                engine["fired_at"] = time.time()
+            if a[2:4] == ("get", "inferencereplicas"):
+                return _Resp(_ir_items("engine", [{"index": 0, "phase": "Ready"}, victim_row()]))
+            return _Resp('{"items": []}')
+
+        def tick(ctx_, n):
+            now = time.time()
+            if engine["fired_at"] is None:
+                return
+            pod = ctx_["pod_state"][victim]
+            if engine["opened_at"] is None:
+                pod["ready"] = pod["serving"] = False   # crash-looping at start; the kubelet restarts it
+                # The engine opens the repair a moment after the break, unless a
+                # freeze landed first: a freeze starts no repair, so then only
+                # once the freeze is lifted.
+                since = engine["unpaused_at"] if engine["frozen_first"] else engine["fired_at"]
+                if since is not None and now - since >= 0.3:
+                    engine["opened_at"] = now
+                    pod["alive"] = False
+            elif engine["rebuilt_at"] is None and now - engine["opened_at"] >= 0.3:
+                engine["rebuilt_at"] = now
+                ctx_["pod_state"][victim] = _rec("engine", 1, "old", uid="rebuilt-1", created="9")
+
+        def pause(case_id, value, settle=True):
+            engine["pauses"].append(value)
+            if value == "freeze":
+                engine["frozen_at"] = time.time()
+                engine["frozen_first"] = engine["opened_at"] is None
+            elif value == "":
+                engine["unpaused_at"] = time.time()
+
+        def events(case_id, since, comp, inst):
+            opened = engine["opened_at"]
+            if opened is None or opened < since:
+                return [], []
+            return [f"OMENative component=engine instance=1 restart triggered: pod {victim} crashed"], []
+
+        out = self._run(run._pause_repair, ctx, _FakeFleet(ctx, tick),
+                        {"kubectl": kubectl, "_pause_annotation": pause, "_victim_events": events,
+                         "_fetch_initial_ir_items": lambda *a: [], "_wait_rows_settled": lambda *a, **k: (True, ""),
+                         "_isvc_pause_value": lambda *a: ""})
+        self.assertEqual(["freeze", ""], engine["pauses"])
+        self.assertIsNotNone(engine["opened_at"], "the engine opened the repair")
+        self.assertFalse(engine["frozen_first"], "the freeze landed on the open repair, not on the published phase word")
+        self.assertEqual("PASS", out["verdict"], out["checks"])
+        self.assertTrue(any("rebuilt, Ready and serving" in c for c in out["checks"]), out["checks"])
 
     def test_runtime_edit_repair_break_records_the_pod(self):
         """The break that precedes a runtime edit re-points the highest
