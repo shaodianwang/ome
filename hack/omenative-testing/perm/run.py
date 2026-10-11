@@ -13776,8 +13776,8 @@ def _preempt_cycle_reset(f, cycle):
     else:
         return False
     f.update(fillers=[], fillers_dropped=False, tainted=[], cycle=cycle, pre_alive=None, crash_pod=None, crash_comp=None,
-             crash_inst=None, press_pod=None, fire_ts=None, preempted=[], not_victim=set(), fired=False,
-             cp_pods=None, cp_polled=0.0)
+             crash_inst=None, press_pod=None, fire_ts=None, preempted=[], taken={}, floor_granted=set(), not_victim=set(),
+             fired=False, cp_pods=None, cp_polled=0.0)
     return True
 
 
@@ -13917,7 +13917,7 @@ def _preempt_fill(f, target, node, pod_state):
         return
     f.update(aim_pod=target, aim_node=node, victim_cpu=victim_cpu, fire_ts=time.time(),
              cause="the filler pods holding every node's spare CPU and the pending taint on every node",
-             not_victim=set(), preempted=[])
+             not_victim=set(), preempted=[], taken={}, floor_granted=set())
     for other in nodes:
         if other == node:
             continue
@@ -14031,12 +14031,14 @@ def _preempt_apparatus_hit(f):
 def _preempt_victim(f, pod_state):
     """The case pods the scheduler preempted: alive at the fire or placed
     after it (the roll's surge under the press; the scheduler picks its
-    own victim among the case's pods on the node, not always the aimed
-    one); gone, deleting or back under the same name with another UID
-    now, confirmed by the scheduler's own record (a pod the roll drained
-    has none). The first one is the fault's victim, its serving state
-    recorded. None, with the apparatus failure recorded, once a
-    control-plane pod went instead."""
+    own victims among the case's pods on the node, not always the aimed
+    one, and more than one when the room the press needs has grown);
+    gone, deleting or back under the same name with another UID now,
+    confirmed by the scheduler's own record (a pod the roll drained has
+    none). Every one is kept in `taken` with the serving state it had and
+    announced with the running count; the first is the fault's victim.
+    None, with the apparatus failure recorded, once a control-plane pod
+    went instead."""
     if _preempt_apparatus_hit(f):
         return None
     if not f.get("pre_alive"):
@@ -14060,13 +14062,39 @@ def _preempt_victim(f, pod_state):
             f["not_victim"].add(name)
             continue
         f["preempted"].append(name)
+        f.setdefault("taken", {})[name] = {"comp": was["comp"], "inst": was["inst"], "serving": was["serving"]}
         if not f.get("crash_pod"):
             f.update(crash_pod=name, crash_comp=was["comp"], crash_inst=was["inst"], victim_comp=was["comp"],
                      victim_was_serving=was["serving"])
             f["notes"].append(f"fault bit: the scheduler preempted {name} ({was['comp']} instance {was['inst']}) "
                               f"for the filler on {f.get('aim_node')}")
-            print(f"    ⚡ {f['notes'][-1]}")
+        else:
+            f["notes"].append(f"fault bit: the scheduler also preempted {name} ({was['comp']} instance {was['inst']}) "
+                              f"for the filler on {f.get('aim_node')}; the press took {len(f['preempted'])} pods")
+        print(f"    ⚡ {f['notes'][-1]}")
     return f.get("crash_pod")
+
+
+def _press_took(f):
+    """{Component: serving Instances the press took}: every pod the scheduler
+    preempted for the filler that was serving when it went. Each lowers its
+    own Component's capacity floor by one; a pod taken before it ever
+    served lowers nothing."""
+    took = {}
+    for was in (f.get("taken") or {}).values():
+        if was.get("serving"):
+            took[was["comp"]] = took.get(was["comp"], 0) + 1
+    return took
+
+
+def _press_allowance(f, allowance):
+    """The floor allowance with the press's own toll added: a serving
+    Instance the scheduler took for the filler is not the product taking
+    anything down, whichever Component it belonged to."""
+    for c, took in _press_took(f).items():
+        if c in allowance:
+            allowance[c] += took
+    return allowance
 
 
 def _preempt_lift(f):
@@ -14220,20 +14248,23 @@ def _wait_new_bound(ctx, comps, done, budget):
     return None, f"no replacement of the new revision was bound within {budget}s"
 
 
-def _pending_watch(ctx, f, comps, lift, done, budget, inst=None, landed=None):
+def _pending_watch(ctx, f, comps, lift, done, budget, inst=None, landed=None, floor_comps=None):
     """Watch an operation whose pod the cluster cannot place or admit: the
-    wait the product reports on the Instance row, any row that reads Failed
-    meanwhile, the lift once the wait has held LIFT_SETTLE_S (lift=after-settle)
-    and done() sustained after it, or the hold across IDLE_HOLD_S (lift=never).
-    done() before any wait, or after one with the cause still in place, means
-    the cause never bound — once a done reading can mean that: not while the
-    landed rollback or edit (`landed`) has not fired, nor before a press has
-    taken a pod. The ready readings up to the lift (ready_reads, per
-    Component) are the window the press floor is judged over; a serving
-    Instance the press took lowers the capacity floor from the moment it
-    is known, as an evicted one does. Returns (state, observations)."""
+    wait the product reports on the Instance row of `comps`, any row of
+    theirs that reads Failed meanwhile, the lift once the wait has held
+    LIFT_SETTLE_S (lift=after-settle) and done() sustained after it, or the
+    hold across IDLE_HOLD_S (lift=never). done() before any wait, or after
+    one with the cause still in place, means the cause never bound — once a
+    done reading can mean that: not while the landed rollback or edit
+    (`landed`) has not fired, nor before a press has taken a pod. The ready
+    readings up to the lift (ready_reads, per Component of `floor_comps`,
+    `comps` by default) are the window the press floor is judged over, so
+    every Component the verdict judges must be read here; every serving
+    Instance the press took lowers its Component's capacity floor from the
+    moment it is known, as an evicted one does. Returns (state, observations)."""
     case_id, t0 = ctx["case_id"], ctx["trigger_ts"]
     tokens = PENDING_TOKENS[f["kind"]]
+    floor_comps = comps if floor_comps is None else floor_comps
     out = {"bitten_at": None, "token": "", "row": None, "message": "", "failed": [], "lifted_at": None,
            "done_at": None, "held_s": None, "waiting_at_end": False, "escaped_at": None, "unbound_at": None,
            "ready_reads": {}}
@@ -14242,14 +14273,17 @@ def _pending_watch(ctx, f, comps, lift, done, budget, inst=None, landed=None):
         _read_one(ctx)
         now = time.time()
         if lifted_ts is None and ctx.get("agg") is not None:
-            for c in comps:
+            for c in floor_comps:
                 out["ready_reads"].setdefault(c, []).append((now - t0, ctx["agg"].get(c, (0, 0, 0))[1]))
         if f["kind"] == "preempt" and f.get("fire_ts") and not f.get("crash_pod"):
             _preempt_victim(f, ctx["pod_state"])
-        if f["kind"] == "preempt" and f.get("crash_pod") and f.get("victim_was_serving") and not f.get("floor_granted"):
-            f["floor_granted"] = True
-            allowance = ctx.setdefault("floor_allowance", {})
-            allowance[f["crash_comp"]] = allowance.get(f["crash_comp"], 0) + 1   # the press took a serving Instance
+        if f["kind"] == "preempt":
+            granted = f.setdefault("floor_granted", set())
+            for name, was in (f.get("taken") or {}).items():
+                if was.get("serving") and name not in granted:   # a serving Instance the press took, credited once
+                    granted.add(name)
+                    allowance = ctx.setdefault("floor_allowance", {})
+                    allowance[was["comp"]] = allowance.get(was["comp"], 0) + 1
         if now - last_poll >= ROW_POLL_S:
             last_poll = now
             if f["kind"] == "preempt":
@@ -14323,13 +14357,14 @@ def _floor_dip(reads, floor):
 def _pending_checks(f, lift, state, out, ctx, comps, allowance, verdict, notes, checks):
     """The pending verdict. The product must name the wait on the Instance
     row; while the cause holds no row may read Failed and no Component may
-    drop below N minus its allowance (the budget's and the fault's own
-    Instance) — nothing is taken down to make room. The drop is read over
-    the window's own readings up to the lift with the capacity floor's
-    debounce (a shorter dip is a flap); with no readings the case-wide
-    minimum stands. Then lift=after-settle needs the cause gone and the
-    operation done; lift=never needs the wait still reported at the end of
-    the hold."""
+    drop below N minus its allowance (the budget's Instances and every
+    serving one the fault itself took) — nothing is taken down to make
+    room. The drop is read over the window's own readings up to the lift
+    with the capacity floor's debounce (a shorter dip is a flap); a
+    Component the window never read is recorded as unread, never judged on
+    a minimum from outside the window. Then lift=after-settle needs the
+    cause gone and the operation done; lift=never needs the wait still
+    reported at the end of the hold."""
     kind, cause, tokens = f["kind"], f.get("cause") or "the cause", sorted(PENDING_TOKENS[f["kind"]])
     if f.get("infra_fail"):
         return verdict   # the apparatus broke; _fault_finalize records it as INFRA-FAIL
@@ -14362,25 +14397,29 @@ def _pending_checks(f, lift, state, out, ctx, comps, allowance, verdict, notes, 
                       f"a failure inside the configured grace")
     else:
         checks.append(f"  ✓ {kind}: no Instance read Failed while {cause} held")
-    min_ready, reads = ctx.get("min_ready") or {}, out.get("ready_reads") or {}
+    taken = f.get("taken") or {}
+    if kind == "preempt" and len(taken) > 1:
+        pods = ", ".join(f"{was['comp']}/{was['inst']}" for was in taken.values())
+        checks.append(f"  ⓘ {kind}: the press took {len(taken)} pods ({pods}); each serving Instance among them lowers "
+                      f"its own Component's floor by one")
+    reads = out.get("ready_reads") or {}
     for c in comps:
         n = ctx["N"].get(c, 0)
         if not n:
             continue
         floor = n - allowance.get(c, 0)
         low, sust = _floor_dip(reads.get(c) or [], floor)
-        windowed = low is not None
-        mr = low if windowed else min_ready.get(c, n)
-        if mr >= floor:
-            checks.append(f"  ✓ {kind}: {c} kept {mr} serving Instance(s) while {cause} held (floor {floor})")
-        elif not windowed or sust >= FLOOR_SUSTAIN_S:
+        if low is None:
+            checks.append(f"  ⓘ {kind}: {c} serving Instances were not read while {cause} held — vacuous (no reading made)")
+        elif low >= floor:
+            checks.append(f"  ✓ {kind}: {c} kept {low} serving Instance(s) while {cause} held (floor {floor})")
+        elif sust >= FLOOR_SUSTAIN_S:
             verdict = "FAIL"
-            held = f", dip held {sust:.0f}s ≥ {FLOOR_SUSTAIN_S:.0f}s" if windowed else ""
-            notes.append(f"{c} dropped to {mr} serving while the wait held (floor {floor})")
-            checks.append(f"  ✗ {kind}: {c} dropped to {mr} serving Instance(s) while {cause} held (floor {floor}){held} — "
-                          f"something was taken down to make room")
+            notes.append(f"{c} dropped to {low} serving while the wait held (floor {floor})")
+            checks.append(f"  ✗ {kind}: {c} dropped to {low} serving Instance(s) while {cause} held (floor {floor}), "
+                          f"dip held {sust:.0f}s ≥ {FLOOR_SUSTAIN_S:.0f}s — something was taken down to make room")
         else:
-            checks.append(f"  ⚠ {kind}: {c} dipped to {mr} serving Instance(s) (floor {floor}) for <{FLOOR_SUSTAIN_S:.0f}s "
+            checks.append(f"  ⚠ {kind}: {c} dipped to {low} serving Instance(s) (floor {floor}) for <{FLOOR_SUSTAIN_S:.0f}s "
                           f"while {cause} held — debounced as a readiness flap")
     if lift == "after-settle":
         if out["lifted_at"] is None:
@@ -14459,10 +14498,8 @@ def _pending_roll(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} exceeded ceiling {ceil[c]} (surge budget violated)")
         else:
             checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {ceil[c]}")
-    allowance = {c: (resolve_max_unavailable(ctx["info"]["max_unavail"].get(c, 0), N[c]) if c in bumped else 0)
-                 for c in configured}
-    if f.get("crash_comp") in allowance and f.get("victim_was_serving"):
-        allowance[f["crash_comp"]] += 1   # the fault itself took a serving Instance down
+    allowance = _press_allowance(f, {c: (resolve_max_unavailable(ctx["info"]["max_unavail"].get(c, 0), N[c]) if c in bumped else 0)
+                                     for c in configured})
     verdict = _pending_checks(f, lift, state, out, ctx, sorted(configured), allowance, verdict, notes, checks)
     if lift == "after-settle" and state == "DONE":
         agg = ctx.get("agg") or {}
@@ -16025,10 +16062,8 @@ def _hook_op(case_id, yaml_file, desc, hdr):
     if kind == "preempt":
         print(f"  Phase 3: watching {what} wait on the press (≤{budget}s)")
         state, out = _pending_watch(ctx, f, sorted(configured), lift, done, budget)
-        allowance = {c: (resolve_max_unavailable(ctx["info"]["max_unavail"].get(c, 0), N0[c])
-                         if c in acting and op != "scale" else 0) for c in configured}
-        if f.get("crash_comp") in allowance and f.get("victim_was_serving"):
-            allowance[f["crash_comp"]] += 1   # the press itself took a serving Instance down
+        allowance = _press_allowance(f, {c: (resolve_max_unavailable(ctx["info"]["max_unavail"].get(c, 0), N0[c])
+                                             if c in acting and op != "scale" else 0) for c in configured})
         verdict = _pending_checks(f, lift, state, out, ctx, sorted(configured), allowance, verdict, notes, checks)
         completed = state == "DONE"
     elif kind == "node":
@@ -23383,6 +23418,8 @@ def _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktg
         window_start = window_start or ctx["trigger_ts"]
         exp = {"None": 1, "RecreateInstance": ppi[vcomp]}.get(policy, 1)
         ctx["floor_allowance"] = {vcomp: 1}   # the taken Instance itself
+        if via == "preempt":
+            pending["floor_granted"] = {kill_name}   # credited above; the watch credits any other pod the press took
         rec.update(victim_comp=vcomp, victim_inst=str(killed_inst), victim_uid=kill_pod.get("uid", ""),
                    fired=True, fired_ts=ctx["trigger_ts"])
         _repeat_record_fire(rec)
@@ -23398,7 +23435,9 @@ def _kill_repeat(case_id, desc, hdr, ctx, via, policy, lift, pending, kcomp, ktg
         state, stable, dipped, pout = "RECOVERING", None, False, {}
         if via == "preempt":
             print(f"  Phase 3 ({k}/{n}): watching the repair of {vcomp} Instance {killed_inst} wait on the fillers (lift={lift}, ≤{budget}s)")
-            pstate, pout = _pending_watch(ctx, pending, [vcomp], lift, recovered, budget, inst=killed_inst)
+            # The wait is read on the taken Instance's row; the floor over every Component the verdict judges.
+            pstate, pout = _pending_watch(ctx, pending, [vcomp], lift, recovered, budget, inst=killed_inst,
+                                          floor_comps=sorted(configured))
             _repeat_observe(rec, ctx["pod_state"])   # what the watch saw rebuilt is the window's
             allowance = {c: (1 if c == vcomp else 0) for c in configured}
             verdict = _pending_checks(pending, lift, pstate, pout, ctx, sorted(configured), allowance, verdict, notes, checks)
@@ -23593,7 +23632,9 @@ def _kill(case_id, yaml_file, desc, hdr):
 
         print(f"  Phase 3: watching the repair of {kcomp} Instance {killed_inst} wait on {pending.get('cause', pending['kind'])} "
               f"(lift={lift}, ≤{budget}s)")
-        pstate, pout = _pending_watch(ctx, pending, [kcomp], lift, recovered, budget, inst=killed_inst)
+        # The wait is read on the taken Instance's row; the floor over every Component the verdict judges.
+        pstate, pout = _pending_watch(ctx, pending, [kcomp], lift, recovered, budget, inst=killed_inst,
+                                      floor_comps=sorted(configured))
         allowance = {c: (1 if c == kcomp else 0) for c in configured}   # the killed Instance itself
         verdict = _pending_checks(pending, lift, pstate, pout, ctx, sorted(configured), allowance, verdict, notes, checks)
         verdict = _idle_peak_checks(ctx, verdict, notes, checks)

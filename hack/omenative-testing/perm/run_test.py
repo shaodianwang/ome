@@ -15250,6 +15250,31 @@ class PreemptFaultTest(unittest.TestCase):
         with mock.patch.object(run, "_pod_preempted", lambda n, **_k: self.fail("a recorded victim is not read again")):
             self.assertEqual("e0", run._preempt_victim(f, pod_state))
 
+    def test_every_pod_the_press_took_is_recorded_and_counted(self):
+        # The room the press needs can grow while it is sized (a roll landing a
+        # pod on the pressed node): the scheduler then takes more than one pod.
+        f = self._armed()
+        f.update(pre_alive={"d2": {"comp": "decoder", "inst": "2", "serving": True}, "r0": {"comp": "router", "inst": "0", "serving": True},
+                            "e1": {"comp": "engine", "inst": "1", "serving": True}, "r1": {"comp": "router", "inst": "1", "serving": False}},
+                 aim_node="kind-worker", fire_ts=1.0, not_victim=set(), preempted=[])
+        pod_state = {"d2": None, "r0": None, "e1": {"alive": True}, "r1": None}
+        with mock.patch.object(run, "_pod_preempted", lambda n, **_k: True), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual("d2", run._preempt_victim(f, pod_state))
+        self.assertEqual(["d2", "r0", "r1"], f["preempted"])
+        self.assertEqual(("d2", "decoder", "2", True), (f["crash_pod"], f["crash_comp"], f["crash_inst"], f["victim_was_serving"]),
+                         "the first pod taken is the fault's victim")
+        self.assertEqual({"d2": {"comp": "decoder", "inst": "2", "serving": True}, "r0": {"comp": "router", "inst": "0", "serving": True},
+                          "r1": {"comp": "router", "inst": "1", "serving": False}}, f["taken"])
+        self.assertEqual({"decoder": 1, "router": 1}, run._press_took(f), "a pod taken before it ever served lowers nothing")
+        self.assertEqual({"engine": 1, "decoder": 1, "router": 1}, run._press_allowance(f, {"engine": 1, "decoder": 0, "router": 0}))
+        self.assertEqual({"engine": 0}, run._press_allowance(f, {"engine": 0}), "a Component outside the verdict is not credited")
+        also = [n for n in f["notes"] if "also preempted" in n]
+        self.assertEqual(2, len(also), f["notes"])
+        self.assertIn("also preempted r0 (router instance 0)", also[0])
+        self.assertTrue(also[0].endswith("the press took 2 pods"), also[0])
+        self.assertTrue(also[1].endswith("the press took 3 pods"), also[1])
+        self.assertEqual({}, run._press_took(self._armed()), "nothing taken, nothing credited")
+
     def test_a_victim_back_under_its_name_is_read_by_uid(self):
         # The controller re-creates the preempted pod under the same name
         # within seconds: the name reads alive again, the UID does not.
@@ -15417,12 +15442,13 @@ class PendingHoldTest(unittest.TestCase):
     def _out(self, **kw):
         out = {"bitten_at": 12.0, "token": "Unschedulable", "row": ("engine", "1"), "message": "Insufficient cpu",
                "failed": [], "lifted_at": None, "done_at": None, "held_s": None, "waiting_at_end": False,
-               "escaped_at": None, "unbound_at": None}
+               "escaped_at": None, "unbound_at": None,
+               "ready_reads": {"engine": [(1.0, 3), (2.0, 3), (9.0, 3)]}}   # the window's own readings
         out.update(kw)
         return out
 
-    def _ctx(self, min_ready):
-        return {"N": {"engine": 4, "decoder": 0, "router": 0}, "min_ready": min_ready}
+    def _ctx(self, min_ready, N=None):
+        return {"N": N or {"engine": 4, "decoder": 0, "router": 0}, "min_ready": min_ready}
 
     def test_verdict_table(self):
         ctx, comps, allow = self._ctx({"engine": 3}), ["engine"], {"engine": 1}
@@ -15471,7 +15497,8 @@ class PendingHoldTest(unittest.TestCase):
                                                      self._ctx({"engine": 3}), ["engine"], allow, "PASS", notes, []))
         self.assertTrue(any("read Failed" in n for n in notes))
         notes = []
-        self.assertEqual("FAIL", run._pending_checks(self._f("never"), "never", "HELD", self._out(waiting_at_end=True),
+        lost = self._out(waiting_at_end=True, ready_reads={"engine": [(0.0, 2), (run.FLOOR_SUSTAIN_S, 2)]})
+        self.assertEqual("FAIL", run._pending_checks(self._f("never"), "never", "HELD", lost,
                                                      self._ctx({"engine": 2}), ["engine"], allow, "PASS", notes, []))
         self.assertTrue(any("dropped to 2 serving" in n for n in notes))
 
@@ -15501,11 +15528,45 @@ class PendingHoldTest(unittest.TestCase):
                                                      "PASS", notes, checks))
         self.assertTrue(any("dropped to 2 serving while the wait held (floor 3)" in n for n in notes), notes)
         self.assertTrue(any(f"dip held {run.FLOOR_SUSTAIN_S:.0f}s" in c for c in checks), checks)
-        # With no readings of its own the window falls back to the case-wide minimum.
-        notes = []
-        self.assertEqual("FAIL", run._pending_checks(self._f("never"), "never", "HELD", self._out(waiting_at_end=True), ctx,
-                                                     ["engine"], allow, "PASS", notes, []))
-        self.assertTrue(any("dropped to 2 serving" in n for n in notes), notes)
+        # With no readings of its own the window says so; the case-wide minimum
+        # below the floor is not borrowed in their place.
+        notes, checks = [], []
+        self.assertEqual("PASS", run._pending_checks(self._f("never"), "never", "HELD", self._out(waiting_at_end=True, ready_reads={}),
+                                                     ctx, ["engine"], allow, "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("engine serving Instances were not read" in c and "vacuous (no reading made)" in c for c in checks), checks)
+        self.assertFalse(any("dropped to" in c or "kept" in c for c in checks), checks)
+
+    def _pd_ctx(self):
+        # A second repetition: the first took a decoder (its floor was 3 then), this
+        # one takes a router; the case-wide minimum still carries the decoder's dip.
+        return self._ctx({"engine": 4, "decoder": 3, "router": 1}, N={"engine": 4, "decoder": 4, "router": 2})
+
+    def test_a_later_repetition_is_judged_on_its_own_window_not_the_case_wide_minimum(self):
+        ctx, comps, allow = self._pd_ctx(), ["decoder", "engine", "router"], {"engine": 0, "decoder": 0, "router": 1}
+        steady = {"decoder": [(1.0, 4), (10.0, 4), (20.0, 4)], "engine": [(1.0, 4), (20.0, 4)], "router": [(1.0, 1), (20.0, 1)]}
+        f, notes, checks = self._f("after-settle"), [], []
+        f.update(crash_pod="p999-router-0-default-0", crash_comp="router", crash_inst="0", victim_was_serving=True)
+        out = self._out(row=("router", "0"), lifted_at=24.0, done_at=18.0, ready_reads=steady)
+        self.assertEqual("PASS", run._pending_checks(f, "after-settle", "DONE", out, ctx, comps, allow, "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("decoder kept 4 serving Instance(s)" in c and "(floor 4)" in c for c in checks), checks)
+        self.assertTrue(any("engine kept 4 serving Instance(s)" in c and "(floor 4)" in c for c in checks), checks)
+        self.assertTrue(any("router kept 1 serving Instance(s)" in c and "(floor 1)" in c for c in checks), checks)
+        self.assertFalse(any("dropped to 3" in c for c in checks), "the earlier repetition's dip is not this window's")
+
+    def test_a_component_the_window_never_read_is_said_so_and_never_borrowed(self):
+        ctx, comps, allow = self._pd_ctx(), ["decoder", "engine", "router"], {"engine": 0, "decoder": 0, "router": 1}
+        f, notes, checks = self._f("after-settle"), [], []
+        out = self._out(row=("router", "0"), lifted_at=24.0, done_at=18.0, ready_reads={"router": [(1.0, 1), (20.0, 1)]})
+        self.assertEqual("PASS", run._pending_checks(f, "after-settle", "DONE", out, ctx, comps, allow, "PASS", notes, checks))
+        self.assertEqual([], notes)
+        unread = [c for c in checks if "vacuous (no reading made)" in c]
+        self.assertEqual(2, len(unread), checks)
+        self.assertTrue(any("decoder serving Instances were not read" in c for c in unread), unread)
+        self.assertTrue(any("engine serving Instances were not read" in c for c in unread), unread)
+        self.assertTrue(any("router kept 1 serving Instance(s)" in c for c in checks), checks)
+        self.assertFalse(any("dropped to" in c for c in checks), "the case-wide minimum stands in for nothing")
 
     def _watch_ctx(self):
         return {"case_id": "p999", "trigger_ts": time.time(), "closed": False, "pod_state": {}, "N": {"engine": 2}}
@@ -15562,28 +15623,97 @@ class PendingHoldTest(unittest.TestCase):
         self.assertEqual({2}, {rd for _t, rd in reads}, "a reading after the lift is not the window's")
         self.assertTrue(all(reads[i][0] <= reads[i + 1][0] for i in range(len(reads) - 1)))
 
-    def test_a_serving_victim_lowers_the_capacity_floor_too(self):
+    def test_watch_reads_the_floor_over_every_component_it_is_given(self):
+        f = self._f("after-settle")
+        waiting = {"on": True}
+        asked = []
+
+        def rows(case_id, comps):
+            asked.append(list(comps))
+            if not waiting["on"]:
+                return {("router", "0"): {"phase": "Ready"}}
+            return {("router", "0"): {"phase": "Creating", "operation": {"waiting": "Unschedulable"}}}
+
+        def read_one(c, timeout=1.0):
+            c["agg"] = {"engine": (4, 4, 0), "decoder": (4, 4, 0), "router": (2, 1 if waiting["on"] else 2, 0)}
+
+        def lift(ff):
+            waiting["on"] = False
+            return True
+        ctx = dict(self._watch_ctx(), N={"engine": 4, "decoder": 4, "router": 2})
+        with mock.patch.object(run, "_read_one", read_one), mock.patch.object(run, "_ir_rows_by_index", rows), \
+                mock.patch.object(run, "_pending_lift", lift), mock.patch.object(run, "LIFT_SETTLE_S", 0), \
+                mock.patch.object(run, "STABILITY_S", 0), mock.patch.object(run, "ROW_POLL_S", 0):
+            state, out = run._pending_watch(ctx, f, ["router"], "after-settle", lambda: not waiting["on"], 30, inst="0",
+                                            floor_comps=["decoder", "engine", "router"])
+        self.assertEqual("DONE", state)
+        self.assertTrue(asked and all(a == ["router"] for a in asked), (asked, "the wait is read on the taken Instance's Component alone"))
+        self.assertEqual({"decoder", "engine", "router"}, set(out["ready_reads"]), "every judged Component has the window's readings")
+        self.assertEqual({4}, {rd for _t, rd in out["ready_reads"]["decoder"]})
+        self.assertEqual({1}, {rd for _t, rd in out["ready_reads"]["router"]}, "a reading after the lift is not the window's")
+
+    def test_every_serving_instance_the_press_took_lowers_its_components_floor(self):
         waiting_rows = {("engine", "1"): {"phase": "Creating", "operation": {"waiting": "Unschedulable"}}}
 
-        def bite(serving):
+        def bite(taken):
             def victim(ff, pod_state):
-                ff.update(crash_pod="p999-engine-1-default-0", crash_comp="engine", crash_inst="1", victim_comp="engine",
-                          victim_was_serving=serving)
+                first = next(iter(taken))
+                ff.update(crash_pod=first, crash_comp=taken[first]["comp"], crash_inst=taken[first]["inst"],
+                          victim_comp=taken[first]["comp"], victim_was_serving=taken[first]["serving"],
+                          preempted=list(taken), taken=dict(taken))
                 return ff["crash_pod"]
             return victim
-        for serving, want in ((True, {"engine": 1}), (False, {})):
+        one = {"p999-engine-1-default-0": {"comp": "engine", "inst": "1", "serving": True}}
+        unserved = {"p999-engine-1-default-0": {"comp": "engine", "inst": "1", "serving": False}}
+        two = dict(one, **{"p999-router-0-default-0": {"comp": "router", "inst": "0", "serving": True}})
+        # (what the press took, what the driver credited already, what the watch credits)
+        for taken, granted, want in ((one, set(), {"engine": 1}), (unserved, set(), {}), (two, set(), {"engine": 1, "router": 1}),
+                                     (two, {"p999-engine-1-default-0"}, {"router": 1})):
             f = self._f("never")
             f.pop("crash_pod")
-            f["fire_ts"] = 1.0
+            f.update(fire_ts=1.0, floor_granted=set(granted))
             ctx = self._watch_ctx()
             with mock.patch.object(run, "_read_one", lambda c, timeout=1.0: None), \
                     mock.patch.object(run, "_ir_rows_by_index", lambda a, b: waiting_rows), \
-                    mock.patch.object(run, "_preempt_victim", bite(serving)), \
+                    mock.patch.object(run, "_preempt_victim", bite(taken)), \
                     mock.patch.object(run, "IDLE_HOLD_S", 0), mock.patch.object(run, "ROW_POLL_S", 0):
                 state, out = run._pending_watch(ctx, f, ["engine"], "never", lambda: False, 30)
             self.assertEqual("HELD", state)
-            self.assertEqual(want, ctx.get("floor_allowance") or {}, f"serving={serving}")
+            self.assertEqual(want, ctx.get("floor_allowance") or {}, f"taken={sorted(taken)} granted={sorted(granted)}")
             self.assertEqual(want.get("engine", 0), run._floor_allowance(ctx, "engine"))
+            self.assertEqual(set(taken) if any(w["serving"] for w in taken.values()) else set(granted), f["floor_granted"],
+                             "every serving pod the press took is credited exactly once")
+
+    def test_every_pod_the_press_took_lowers_its_own_components_floor(self):
+        # The press took a decoder and a router for the same filler: the router,
+        # down to 1 of 2 for as long as the fillers held, is within its floor.
+        ctx = self._ctx({}, N={"engine": 4, "decoder": 4, "router": 2})
+        f = self._f("after-settle")
+        f.update(crash_pod="p999-decoder-2-default-0", crash_comp="decoder", crash_inst="2", victim_was_serving=True,
+                 preempted=["p999-decoder-2-default-0", "p999-router-0-default-0"],
+                 taken={"p999-decoder-2-default-0": {"comp": "decoder", "inst": "2", "serving": True},
+                        "p999-router-0-default-0": {"comp": "router", "inst": "0", "serving": True}})
+        allow = run._press_allowance(f, {"engine": 1, "decoder": 0, "router": 0})   # the roll's budget on the engine
+        self.assertEqual({"engine": 1, "decoder": 1, "router": 1}, allow)
+        reads = {"engine": [(2.0, 3), (25.0, 3)], "decoder": [(2.0, 3), (25.0, 3)], "router": [(2.0, 1), (25.0, 1)]}
+        out = self._out(row=("decoder", "2"), lifted_at=25.0, done_at=39.0, ready_reads=reads)
+        notes, checks = [], []
+        self.assertEqual("PASS", run._pending_checks(f, "after-settle", "DONE", out, ctx, ["decoder", "engine", "router"], allow,
+                                                     "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("router kept 1 serving Instance(s)" in c and "(floor 1)" in c for c in checks), checks)
+        self.assertTrue(any("decoder kept 3 serving Instance(s)" in c and "(floor 3)" in c for c in checks), checks)
+        self.assertTrue(any("the press took 2 pods (decoder/2, router/0)" in c for c in checks), checks)
+        # Credited to the first pod alone, the router's dip reads as capacity taken to make room.
+        notes = []
+        self.assertEqual("FAIL", run._pending_checks(f, "after-settle", "DONE", out, ctx, ["decoder", "engine", "router"],
+                                                     {"engine": 1, "decoder": 1, "router": 0}, "PASS", notes, []))
+        self.assertTrue(any("router dropped to 1 serving while the wait held (floor 2)" in n for n in notes), notes)
+        # One pod taken: no count line.
+        f["taken"] = {"p999-decoder-2-default-0": f["taken"]["p999-decoder-2-default-0"]}
+        checks = []
+        run._pending_checks(f, "after-settle", "DONE", out, ctx, ["decoder"], allow, "PASS", [], checks)
+        self.assertFalse(any("the press took" in c for c in checks), checks)
 
     def test_watch_holds_to_the_end_and_reads_a_cause_that_never_bound(self):
         f = self._f("never")
@@ -18284,13 +18414,15 @@ class RepeatingFaultLoopTest(unittest.TestCase):
         self.assertEqual((None, None), run._kill_pick(pods, "router", ""))
 
     def test_fillers_are_named_per_repetition_and_the_reset_waits_for_the_old_ones(self):
-        f = {"case_id": "p1", "fillers": ["a"], "fillers_dropped": True, "crash_pod": "x", "preempted": ["x"]}
+        f = {"case_id": "p1", "fillers": ["a"], "fillers_dropped": True, "crash_pod": "x", "preempted": ["x"],
+             "taken": {"x": {"comp": "engine", "inst": "0", "serving": True}}, "floor_granted": {"x"}}
         self.assertEqual("perm-p1-press", run._filler_name(f, "press"))
         self.assertEqual("perm-p1-fill-n1-r2", run._filler_name(dict(f, cycle=2), "fill-n1"))
         with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "get" in a, _Resp(""))])), \
                 mock.patch.object(run, "LIFT_SETTLE_S", 1):
             self.assertTrue(run._preempt_cycle_reset(f, 2))
-        self.assertEqual(([], False, 2, None, []), (f["fillers"], f["fillers_dropped"], f["cycle"], f["crash_pod"], f["preempted"]))
+        self.assertEqual(([], False, 2, None, [], {}, set()),
+                         (f["fillers"], f["fillers_dropped"], f["cycle"], f["crash_pod"], f["preempted"], f["taken"], f["floor_granted"]))
         with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "get" in a, _Resp("pod/perm-p1-press\n"))])), \
                 mock.patch.object(run, "LIFT_SETTLE_S", 0.01), mock.patch.object(run.time, "sleep", lambda _s: None):
             self.assertFalse(run._preempt_cycle_reset(f, 3))
@@ -19702,8 +19834,11 @@ class KillRepeatFollowsTheVictimTest(unittest.TestCase):
         watched, allowed, finished, records = [], [], [], []
         victims = iter([("p1-router-0-default-0", "0")])
 
-        def watch(ctx_, f, comps, lift, done, budget, inst=None):
-            watched.append((list(comps), inst))
+        self.granted = []
+
+        def watch(ctx_, f, comps, lift, done, budget, inst=None, floor_comps=None):
+            watched.append((list(comps), inst, list(floor_comps or [])))
+            self.granted.append((set(f.get("floor_granted") or ()), dict(ctx_.get("floor_allowance") or {})))
             gone, comp, idx = f["crash_pod"], f["crash_comp"], f["crash_inst"]
             ctx_["pod_state"].pop(gone)
             ctx_["pod_state"][f"p1-{comp}-{idx}-default-1"] = dict(_rec(comp, idx, "old", uid=f"{comp}{idx}b"), node="n1")
@@ -19737,9 +19872,12 @@ class KillRepeatFollowsTheVictimTest(unittest.TestCase):
         pending = {"case_id": "p1", "kind": "preempt", "infra_fail": None, "notes": [], "fillers": [], "preempted": [],
                    "not_victim": set(), "crash_pod": "p1-router-1-default-0", "crash_comp": "router", "crash_inst": "1"}
         watched, allowed, (state, verdict, notes, checks), rec = self._run(ctx, pending, "DONE")
-        self.assertEqual([(["router"], "1"), (["router"], "0")], watched, "the wait is read on the router's row, the pod the scheduler took")
+        self.assertEqual([(["router"], "1", ["engine", "router"]), (["router"], "0", ["engine", "router"])], watched,
+                         "the wait is read on the router's row, the pod the scheduler took; the floor over every Component")
         self.assertEqual({"engine": 0, "router": 1}, allowed[0], "the allowance is the router's Instance")
         self.assertEqual({"router": 1}, ctx["floor_allowance"])
+        self.assertEqual([({"p1-router-1-default-0"}, {"router": 1}), ({"p1-router-0-default-0"}, {"router": 1})], self.granted,
+                         "the Instance the driver credited is marked, so the watch credits only what else the press took")
         self.assertEqual({("router", "1"), ("router", "0")}, rec["victim_insts"])
         self.assertEqual(["router", "router"], [c["comp"] for c in rec["cycles"]], "the record names the Component taken")
         self.assertEqual(("RECOVERED", "PASS", []), (state, verdict, notes), checks)
@@ -19752,7 +19890,7 @@ class KillRepeatFollowsTheVictimTest(unittest.TestCase):
         pending = {"case_id": "p1", "kind": "preempt", "infra_fail": None, "notes": [], "fillers": [], "preempted": [],
                    "not_victim": set(), "crash_pod": "p1-router-1-default-0", "crash_comp": "router", "crash_inst": "1"}
         watched, _allowed, (state, verdict, _notes, checks), _rec_ = self._run(ctx, pending, "WAIT_TIMEOUT")
-        self.assertEqual([(["router"], "1")], watched)
+        self.assertEqual([(["router"], "1", ["engine", "router"])], watched)
         self.assertEqual(("WAIT_TIMEOUT", "FAIL"), (state, verdict))
         self.assertTrue(any("1 pod(s) created across the window" in c for c in checks), checks)
 
