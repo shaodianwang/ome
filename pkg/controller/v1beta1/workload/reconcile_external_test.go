@@ -1286,7 +1286,7 @@ type recoveryHarness struct {
 	events   []string
 	// gate, when set, is the coordination UpdateGate the passes consult
 	// before a fresh start opens.
-	gate func(strategy workloadtypes.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workloadtypes.RolloutHoldGate, string)
+	gate func(_ string, strategy workloadtypes.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workloadtypes.RolloutHoldGate, string)
 	// planGate, when set, is the adapter's plan precondition the passes ask
 	// before any fresh start, the starts exempt from gate included.
 	planGate func() (bool, workloadtypes.RolloutHoldGate, string)
@@ -9746,7 +9746,7 @@ func TestMoveRequestedAsAGangPushLands_FollowsTheInstanceAndCompletes(t *testing
 			if story.grouped {
 				// A rolling group lets one surge of its Components be in
 				// flight at a time.
-				h.gate = func(_ workloadtypes.UpdateStrategyType, inFlightSurge, _ int32) (bool, workloadtypes.RolloutHoldGate, string) {
+				h.gate = func(_ string, _ workloadtypes.UpdateStrategyType, inFlightSurge, _ int32) (bool, workloadtypes.RolloutHoldGate, string) {
 					if inFlightSurge > 0 {
 						return false, workloadtypes.RolloutHoldGateBudget, "group surge budget 1 exhausted"
 					}

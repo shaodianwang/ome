@@ -1327,7 +1327,7 @@ func (d *driver) wrapCallbacks(input *types.ReconcileInput) {
 		d.trace.callback("migration uuid=%s append %s", d.norm.uid(rec.RequestUUID), d.migrationDiff(nil, &rec))
 		return nil
 	}
-	input.UpdateGate = func(strategy types.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, types.RolloutHoldGate, string) {
+	input.UpdateGate = func(_ string, strategy types.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, types.RolloutHoldGate, string) {
 		d.trace.callback("gate consult strategy=%s surge=%d unavail=%d verdict=allow", strategy, inFlightSurge, inFlightUnavail)
 		return true, "", ""
 	}
