@@ -390,6 +390,32 @@ func TestInstanceStatusRoundtrip_EmptyOperation(t *testing.T) {
 	}
 }
 
+// The status publication writes Restarting over a settled Ready row whose
+// pod set serves nothing. The engine reads that row as Ready: no operation
+// owns it, and its revision and ReadySince anchor are untouched. A
+// Restarting row that carries its Restart operation is a repair in flight
+// and reads as it is.
+func TestInstanceStatusToWorkload_PublishedRestartingReadsReady(t *testing.T) {
+	readySince := metav1.NewTime(time.Date(2026, 3, 1, 9, 0, 0, 0, time.UTC))
+	published := v1beta1.OMENativeInstanceStatus{
+		Index: 2, Incarnation: 3, Phase: v1beta1.OMENativeInstanceRestarting,
+		RunningRevision: "rev-1", PodCount: 1, ReadySince: &readySince,
+	}
+	got := InstanceStatusToWorkload(published)
+	if got.Phase != workloadtypes.InstancePhaseReady || got.Operation != nil {
+		t.Fatalf("published Restarting read as phase %s operation %+v, want Ready with no operation", got.Phase, got.Operation)
+	}
+	if got.RunningRevision != "rev-1" || got.ReadySince == nil || !got.ReadySince.Equal(&readySince) || got.Incarnation != 3 {
+		t.Fatalf("row = %+v, want revision, ReadySince and incarnation kept", got)
+	}
+
+	repairing := published
+	repairing.Operation = &v1beta1.InstanceOperation{ID: "restart-2", Type: v1beta1.InstanceOperationRestart, Step: "Drain"}
+	if got := InstanceStatusToWorkload(repairing); got.Phase != workloadtypes.InstancePhaseRestarting || got.Operation == nil {
+		t.Fatalf("repair in flight read as phase %s operation %+v, want Restarting with its operation", got.Phase, got.Operation)
+	}
+}
+
 func TestInstanceStatusRoundtrip_NodesOccupiedDeepCopy(t *testing.T) {
 	in := v1beta1.OMENativeInstanceStatus{
 		Index:         3,

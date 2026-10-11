@@ -133,8 +133,16 @@ var transitionWriteAllowlist = []allowedTransitionWrite{
 	{
 		file: "inferencereplica/status.go", fn: "aggregateAndWriteStatus", field: "Phase", count: 1,
 		why: "persists the phase the workload publication view returned (TakeInlineV1Publication " +
-			"demotes a settled Ready row with no pods to Pending by status.DemotableReady): a field " +
-			"copy from the publication row, like the counters beside it, not a second decision-maker",
+			"reads a settled Ready row by status.DemotableReady against its pods: Pending with no " +
+			"pods, Restarting while the set serves nothing): a field copy from the publication row, " +
+			"like the counters beside it, not a second decision-maker",
+	},
+	{
+		file: "inferencereplica/convert.go", fn: "encodeMutatedInstance", field: "Phase", count: 1,
+		why: "keeps the published phase on a row a mutation wrote without moving its phase: the " +
+			"publication's Restarting over a settled Ready row whose set serves nothing decodes as " +
+			"Ready for the engine, and a write that leaves the phase as it read it must not restate " +
+			"Ready over the publication's reading; not a decision",
 	},
 	{
 		file: "inferencereplica/status.go", fn: "mirrorInstanceCounters", field: "Phase", count: 1,

@@ -268,10 +268,18 @@ type ComponentCounters struct {
 // Only durable identity and revision fields participate from the stored rows.
 //
 // The one lifecycle field the publication writes is the phase of a settled
-// Ready row the observation finds no pods for: it publishes Pending, the
-// phase the truth pass moves such a row to, so the phase never contradicts
-// the zero pod count published beside it (status.DemotableReady). The
-// running revision stays on the row for the pass that rebuilds it.
+// Ready row (status.DemotableReady), read against the pods of its own pass
+// so the phase never contradicts the counters published beside it. A row
+// the observation finds no pods for publishes Pending, the phase the truth
+// pass moves such a row to; the running revision stays on the row for the
+// pass that rebuilds it. A row whose pods are present but serve nothing
+// publishes Restarting: no live pod of the set is ContainersReady with the
+// serving gate, the bar the promote path read when the row entered Ready,
+// so the set is down and the kubelet or the restart policy is bringing it
+// back. The row's revision and ReadySince stay, the engine keeps reading
+// the row as Ready (v1beta1convert.InstanceStatusToWorkload), and the row
+// publishes Ready again on its own once the set serves. A pod serving on
+// its containers before the kubelet folds the gate into PodReady serves.
 func (o *ComponentObservation) TakeInlineV1Publication(desiredByIdx map[int32]int32, targetRevName string) ([]types.InstanceStatus, ComponentCounters, error) {
 	var counters ComponentCounters
 	target := query.RevisionFromName(targetRevName)
@@ -298,8 +306,15 @@ func (o *ComponentObservation) TakeInlineV1Publication(desiredByIdx map[int32]in
 		return nil, ComponentCounters{}, err
 	}
 	for i := range statuses {
-		if statuses[i].PodCount == 0 && status.DemotableReady(&statuses[i]) {
-			statuses[i].Phase = types.InstancePhasePending
+		row := &statuses[i]
+		if !status.DemotableReady(row) {
+			continue
+		}
+		switch {
+		case row.PodCount == 0:
+			row.Phase = types.InstancePhasePending
+		case !query.PodSetFullyServing(o.pods.PodsForInstance(row.Index), status.DesiredFor(desiredByIdx, row.Index, row.PodCount)):
+			row.Phase = types.InstancePhaseRestarting
 		}
 	}
 	counters.Replicas = int32(len(statuses))

@@ -316,11 +316,19 @@ func InstanceTerminationFromWorkload(w *workloadtypes.InstanceTermination) *v1be
 // are deep-copied so the returned struct can be mutated independently
 // of the source. Operation is allocated via InstanceOperationToWorkload;
 // LastFailure via InstanceTerminationToWorkload.
+//
+// The phase is read as the engine holds it. The status publication writes
+// Restarting over a settled Ready row whose pod set serves nothing; no
+// operation owns such a row, and the engine's state of it is Ready.
 func InstanceStatusToWorkload(v v1beta1.OMENativeInstanceStatus) workloadtypes.InstanceStatus {
+	phase := InstancePhaseToWorkload(v.Phase)
+	if phase == workloadtypes.InstancePhaseRestarting && v.Operation == nil {
+		phase = workloadtypes.InstancePhaseReady
+	}
 	out := workloadtypes.InstanceStatus{
 		Index:             v.Index,
 		Incarnation:       v.Incarnation,
-		Phase:             InstancePhaseToWorkload(v.Phase),
+		Phase:             phase,
 		RunningRevision:   v.RunningRevision,
 		TargetRevision:    v.TargetRevision,
 		PodCount:          v.PodCount,
