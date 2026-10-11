@@ -224,7 +224,7 @@ MC_KIND_SPEC_GROUPS = (
         "trafficmap_gc", "capacity", "backend", "all_plan", "member_recreation",
     )),
     ("quota", "Multi-cluster Kueue quota", (
-        "admission", "split_quota", "queue_routing", "single_race", "single_move", "single_loss", "single_zero_floor", "all_zero_floor", "gang",
+        "admission", "split_quota", "queue_routing", "single_race", "single_move", "single_loss", "single_zero_floor", "all_zero_floor", "all_zero_floor_hold", "gang",
     )),
     ("scheduling", "Multi-cluster gang physical fit", ("scheduling",)),
 )
@@ -279,7 +279,7 @@ KIND_SPEC_GROUPS = (
     ("canary-lifecycle", "Canary lifecycle", (
         "canary_lifecycle_promote", "canary_lifecycle_pausefreeze",
         "canary_lifecycle_podloss", "canary_cutover_last_instance",
-        "projection_freeze",
+        "projection_freeze", "canary_status_rewrite",
     )),
     ("ratio-core", "RatioBalanced coordination", (
         "ratiobalanced", "ratio_n3", "ratio_pause_resume",
@@ -322,10 +322,11 @@ KIND_SPEC_GROUPS = (
     ("gang-surge-multipod", "Gang surge and multi-pod", (
         "concurrent_gang_surge", "gang_surge_floor", "multipod_inplace",
         "multipod_recreatepod", "multipod_surge_fallback", "topology_podgroup",
+        "gang_surge_drain_member_lost", "gang_surge_replacement_lost_rule",
     )),
     ("migration-relocation", "Migration and relocation", (
         "auto_migrate", "auto_migrate_multiinstance", "migrate", "interleave_extra",
-        "packed_pool_bad_push",
+        "packed_pool_bad_push", "migrate_mode_never_pair",
     )),
     ("migration-lifecycle", "Migration gang lifecycle", (
         "migration_gang",
@@ -346,7 +347,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("deletion-disruption", "Deletion and disruption", (
         "cleanup_lifecycle", "force_delete", "pdb_eviction", "teardown",
-        "partial_failure",
+        "partial_failure", "force_delete_gang",
     )),
 )
 

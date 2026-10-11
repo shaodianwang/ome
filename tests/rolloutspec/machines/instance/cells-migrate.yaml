@@ -594,7 +594,7 @@ cells:
       the record that owns the pair, serving under its pin on the revision it ran; only the
       record's completion or expiry may clear the pin, and the record's deadline ends the move
     placement: unit
-    coverage: {perm: [], unit: [TestCreate_MigrationPairStandsUnderModeNever], kind: [], replay: [migrate-surge-pending-mode-never]}
+    coverage: {perm: [], unit: [TestCreate_MigrationPairStandsUnderModeNever], kind: [migrate_mode_never_pair], replay: [migrate-surge-pending-mode-never]}
     status: decided
   - state: Migrate/CreateSurge
     event: config.changed
@@ -1382,7 +1382,7 @@ cells:
       record's deadline tears the index down, which is wrong because a serving surge is
       discarded for a knob meant to stop new requests, not the move already in flight
     placement: unit
-    coverage: {perm: [], unit: [TestCreate_MigrationPairStandsUnderModeNever], kind: [], replay: [migrate-surge-pending-mode-never]}
+    coverage: {perm: [], unit: [TestCreate_MigrationPairStandsUnderModeNever], kind: [migrate_mode_never_pair], replay: [migrate-surge-pending-mode-never]}
     status: decided
   - state: Migrate/SurgeTarget
     event: config.changed

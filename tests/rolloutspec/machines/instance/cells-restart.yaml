@@ -215,7 +215,7 @@ cells:
     outcome: defer
     note: an old pod the drain already deleted stays Terminating on a lost node and holds Phase A on the drain check; node-death evidence is read for it by the Component-wide force-delete sweep under a configured policy, and with no policy no node is read, so the row waits on the object until the operation deadline parks the repair. An old pod still Running when its kubelet stops reporting it is not drained at all; Phase A hands it to the same sweep, which frees it on proven node death under a configured policy or holds the drain of the set, so no graceful delete is ever issued on a node with no kubelet to honor it
     placement: kind
-    coverage: {perm: [], unit: [TestRepairDrainStuckTerminatingOnADeadNode_ParksAtTheDeadline, TestNodeLoss_WholeGangOnTheDeadNodeIsRebuiltElsewhere], kind: [], replay: [restart-drain-stuck-pod-swept-at-node-death, restart-old-pod-stuck-terminating]}
+    coverage: {perm: [], unit: [TestRepairDrainStuckTerminatingOnADeadNode_ParksAtTheDeadline, TestNodeLoss_WholeGangOnTheDeadNodeIsRebuiltElsewhere], kind: [force_delete_gang], replay: [restart-drain-stuck-pod-swept-at-node-death, restart-old-pod-stuck-terminating]}
     status: decided
   - state: Restart/Drain
     event: pod.schedulingGated
