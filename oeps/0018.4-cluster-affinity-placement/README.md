@@ -775,8 +775,12 @@ running forever. During the grace the home still counts as
 unknown: it does not make the source Ready, and allocation moves wait for it.
 Before a read counts as failed, `placement.memberReadRetry` can repeat it
 within the reconcile after a timeout, a dropped connection, throttling, or a
-server error. Each read has its own `placement.fanoutTimeout`, and the controller
-requeues no later than the end of the earliest grace.
+server error. It also repeats a read that finds no connection to a member the
+controller has not yet tried to connect since it started, which happens when a
+new leader starts reading before its member connections are up. A member whose
+connection the controller already tried and dropped is not read again. Each
+read has its own `placement.fanoutTimeout`, and the controller requeues no later
+than the end of the earliest grace.
 
 Compute satisfied floor per home as `min(assignedFloor, admittedReplicas)` using
 observations belonging to the applied plan. Extra autoscaled replicas on one
