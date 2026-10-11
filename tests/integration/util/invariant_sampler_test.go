@@ -149,69 +149,318 @@ func TestInvariantPairableCapacity(t *testing.T) {
 	})
 }
 
-func TestInvariantTrafficBacked(t *testing.T) {
-	traffic := func(targets ...v1beta1.ComponentTrafficTarget) *v1beta1.InferenceService {
-		isvc := &v1beta1.InferenceService{}
-		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-			v1beta1.EngineComponent: {Traffic: targets},
-		}
-		return isvc
+func TestInvariantBudgetPlusOne(t *testing.T) {
+	engine := v1beta1.EngineComponent
+	// Four engines under maxUnavailable 1: the floor is three serving pods.
+	budgets := map[v1beta1.ComponentType]ComponentBudget{engine: {Desired: 4, MaxUnavailable: 1}}
+	readyAt := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	promoted := func(index int32) v1beta1.OMENativeInstanceStatus {
+		return v1beta1.OMENativeInstanceStatus{Index: index, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1, ReadySince: &metav1.Time{Time: readyAt}}
 	}
+	serving := func(names ...string) []*corev1.Pod {
+		var out []*corev1.Pod
+		for i, name := range names {
+			out = append(out, invPod(name, engine, int32(i+1), "h2", "", true))
+		}
+		return out
+	}
+	cases := []struct {
+		name string
+		// e0 is instance 0's pod; the others serve on their own indexes.
+		e0          *corev1.Pod
+		others      []*corev1.Pod
+		row         v1beta1.OMENativeInstanceStatus
+		wantSubject string
+		wantDetail  string
+	}{
+		{
+			name:        "one short while a promoted pod restarted after Ready",
+			e0:          withLastTermination(invPod("e0", engine, 0, "h2", "", false), readyAt.Add(10*time.Second)),
+			others:      serving("e1", "e2"),
+			row:         promoted(0),
+			wantSubject: "engine (budget plus one while a promoted set is unproven)",
+			wantDetail:  "2 pairable serving pods, floor 3 (desired 4, maxUnavailable 1, serving 2); instance 0 was promoted and has not proven itself since",
+		},
+		{
+			name:   "one short while the row remembers a crash after Ready",
+			e0:     invPod("e0", engine, 0, "h2", "", false),
+			others: serving("e1", "e2"),
+			row: func() v1beta1.OMENativeInstanceStatus {
+				row := promoted(0)
+				row.LastFailure = &v1beta1.InstanceTermination{PodName: "e0", Reason: "Error", Time: metav1.NewTime(readyAt.Add(10 * time.Second))}
+				return row
+			}(),
+			wantSubject: "engine (budget plus one while a promoted set is unproven)",
+			wantDetail:  "instance 0 was promoted and has not proven itself since",
+		},
+		{
+			name:        "one short with no promoted set unproven",
+			e0:          invPod("e0", engine, 0, "h2", "", false),
+			others:      serving("e1", "e2"),
+			row:         promoted(0),
+			wantSubject: "engine",
+			wantDetail:  "2 pairable serving pods, floor 3 (desired 4, maxUnavailable 1, serving 2)",
+		},
+		{
+			name:        "a restart before Ready is boot, not a crash",
+			e0:          withLastTermination(invPod("e0", engine, 0, "h2", "", false), readyAt.Add(-10*time.Second)),
+			others:      serving("e1", "e2"),
+			row:         promoted(0),
+			wantSubject: "engine",
+			wantDetail:  "2 pairable serving pods, floor 3",
+		},
+		{
+			name:        "two short is the plain finding even with an unproven set",
+			e0:          withLastTermination(invPod("e0", engine, 0, "h2", "", false), readyAt.Add(10*time.Second)),
+			others:      serving("e1"),
+			row:         promoted(0),
+			wantSubject: "engine",
+			wantDetail:  "1 pairable serving pods, floor 3",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			obs := invObservation(budgets, append([]*corev1.Pod{tc.e0}, tc.others...)...)
+			obs.rows = map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{engine: {tc.row}}
+			got := evaluateTarget(obs, map[string]int32{"ns/svc/engine": 4})
+			expectOneFinding(t, got, InvariantPairableCapacity, tc.wantSubject, tc.wantDetail)
+		})
+	}
+}
 
-	t.Run("a serving pod on the revision backs the target", func(t *testing.T) {
-		obs := invObservation(nil, invPod("e0", v1beta1.EngineComponent, 0, "abc", "", true))
-		obs.isvc = traffic(v1beta1.ComponentTrafficTarget{RevisionName: "svc-engine-abc", Percent: 100})
-		expectNoFinding(t, evaluateTarget(obs, map[string]int32{}), InvariantTrafficBacked)
-	})
+func TestInvariantTrafficBacked(t *testing.T) {
+	target := func(revision string, percent int32) v1beta1.ComponentTrafficTarget {
+		return v1beta1.ComponentTrafficTarget{RevisionName: "svc-engine-" + revision, Percent: percent}
+	}
+	cases := []struct {
+		name    string
+		pods    []*corev1.Pod
+		targets []v1beta1.ComponentTrafficTarget
+		// wantSubject is the one expected finding's subject; empty wants none.
+		wantSubject, wantDetail string
+	}{
+		{
+			name:    "a serving pod on the revision backs the target",
+			pods:    []*corev1.Pod{invPod("e0", v1beta1.EngineComponent, 0, "abc", "", true)},
+			targets: []v1beta1.ComponentTrafficTarget{target("abc", 100)},
+		},
+		{
+			name:    "a zero-percent target asks for nothing",
+			pods:    []*corev1.Pod{invPod("e0", v1beta1.EngineComponent, 0, "abc", "", true)},
+			targets: []v1beta1.ComponentTrafficTarget{target("abc", 100), target("old", 0)},
+		},
+		{
+			name: "a Component with no serving pod at all is not the traffic check's",
+			pods: []*corev1.Pod{
+				invPod("e0", v1beta1.EngineComponent, 0, "abc", "", false),
+				invPod("e1", v1beta1.EngineComponent, 1, "def", "", false)},
+			targets: []v1beta1.ComponentTrafficTarget{target("abc", 100)},
+		},
+		{
+			name: "the revision has pods and none serves while another revision does",
+			pods: []*corev1.Pod{
+				invPod("e0", v1beta1.EngineComponent, 0, "def", "", true),
+				invPod("e1", v1beta1.EngineComponent, 1, "abc", "", false)},
+			targets:     []v1beta1.ComponentTrafficTarget{target("abc", 100)},
+			wantSubject: "engine svc-engine-abc (no pod serves)",
+			wantDetail:  "1 pods carry revision hash abc and none serves (revision pods: e1; serving pods: e0)",
+		},
+		{
+			name:        "the revision has no pod left and another revision serves",
+			pods:        []*corev1.Pod{invPod("e0", v1beta1.EngineComponent, 0, "def", "", true)},
+			targets:     []v1beta1.ComponentTrafficTarget{target("abc", 100)},
+			wantSubject: "engine svc-engine-abc (a pod of another revision serves)",
+			wantDetail:  "no pod carries revision hash abc, the serving pods are on other revisions (serving pods: e0)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			obs := invObservation(nil, tc.pods...)
+			obs.isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+				v1beta1.EngineComponent: {Traffic: tc.targets},
+			}
+			got := evaluateTarget(obs, map[string]int32{})
+			if tc.wantSubject == "" {
+				expectNoFinding(t, got, InvariantTrafficBacked)
+				return
+			}
+			expectOneFinding(t, got, InvariantTrafficBacked, tc.wantSubject, tc.wantDetail)
+		})
+	}
+}
 
-	t.Run("a target with no serving pod on its revision is unbacked", func(t *testing.T) {
-		obs := invObservation(nil,
-			invPod("e0", v1beta1.EngineComponent, 0, "def", "", true),
-			invPod("e1", v1beta1.EngineComponent, 1, "abc", "", false))
-		obs.isvc = traffic(
-			v1beta1.ComponentTrafficTarget{RevisionName: "svc-engine-abc", Percent: 100},
-			v1beta1.ComponentTrafficTarget{RevisionName: "svc-engine-old", Percent: 0})
-		got := evaluateTarget(obs, map[string]int32{})
-		// The zero-percent target asks for nothing; the live one has only a
-		// serving pod on another revision and a non-serving pod on its own.
-		expectOneFinding(t, got, InvariantTrafficBacked, "engine svc-engine-abc", "no serving pod carries revision hash abc")
+// withIncarnation stamps the incarnation label a recreate bumps, so a pod
+// can be placed in or out of a row's current set.
+func withIncarnation(pod *corev1.Pod, incarnation int64) *corev1.Pod {
+	pod.Labels[query.LabelInstanceIncarnation] = strconv.FormatInt(incarnation, 10)
+	return pod
+}
+
+// withRestarts gives the pod's main container a restart count.
+func withRestarts(pod *corev1.Pod, restarts int32) *corev1.Pod {
+	pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{Name: constants.MainContainerName, RestartCount: restarts})
+	return pod
+}
+
+// withLastTermination records that the pod's main container last exited at
+// finishedAt, the trace a restart leaves on the pod.
+func withLastTermination(pod *corev1.Pod, finishedAt time.Time) *corev1.Pod {
+	pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name:                 constants.MainContainerName,
+		RestartCount:         1,
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{FinishedAt: metav1.NewTime(finishedAt)}},
 	})
+	return pod
 }
 
 func TestInvariantStatusTruth(t *testing.T) {
-	rows := func(rs ...v1beta1.OMENativeInstanceStatus) map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus {
-		return map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.EngineComponent: rs}
+	engine := v1beta1.EngineComponent
+	failure := func(podName string) *v1beta1.InstanceTermination {
+		return &v1beta1.InstanceTermination{PodName: podName, Reason: "ImagePullBackOff"}
 	}
+	cases := []struct {
+		name string
+		// setSize is how many pods one Instance owns; zero reads as one.
+		setSize int32
+		pods    []*corev1.Pod
+		rows    []v1beta1.OMENativeInstanceStatus
+		// wantSubject is the one expected finding's subject; empty wants none.
+		wantSubject, wantDetail string
+	}{
+		{
+			name: "rows match the pods",
+			pods: []*corev1.Pod{
+				invPod("e0", engine, 0, "h1", "", true),
+				invPod("e1", engine, 1, "h1", "", false)},
+			rows: []v1beta1.OMENativeInstanceStatus{
+				{Index: 0, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1},
+				{Index: 1, Phase: v1beta1.OMENativeInstanceFailed, PodCount: 1}},
+		},
+		{
+			name:        "a Ready row whose pod crashed after it served",
+			pods:        []*corev1.Pod{withRestarts(invPod("e0", engine, 0, "h1", "", false), 3)},
+			rows:        []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1, ServingPodCount: 0}},
+			wantSubject: "engine instance 0",
+			wantDetail:  "row is Ready but 0 of 1 pods of its set serve (servingPodCount 0; restarts: e0=3; pods: e0)",
+		},
+		{
+			name:    "a Ready gang row with one pod of its set down",
+			setSize: 2,
+			pods: []*corev1.Pod{
+				invPod("e0-leader", engine, 0, "h1", "", true),
+				invPod("e0-worker", engine, 0, "h1", "", false)},
+			rows:        []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady, PodCount: 2, ServingPodCount: 1}},
+			wantSubject: "engine instance 0",
+			wantDetail:  "row is Ready but 1 of 2 pods of its set serve (servingPodCount 1; restarts: e0-leader=0,e0-worker=0; pods: e0-leader,e0-worker)",
+		},
+		{
+			name:    "a Ready gang row whose old set is still going away",
+			setSize: 2,
+			pods: []*corev1.Pod{
+				withIncarnation(invPod("e0-leader", engine, 0, "h1", "", true), 2),
+				withIncarnation(invPod("e0-worker", engine, 0, "h1", "", true), 2),
+				withIncarnation(invPod("e0-worker-old", engine, 0, "h1", "", false), 1)},
+			rows: []v1beta1.OMENativeInstanceStatus{{Index: 0, Incarnation: 2, Phase: v1beta1.OMENativeInstanceReady, PodCount: 3}},
+		},
+		{
+			name:    "a Ready single-pod row during its surge",
+			setSize: 1,
+			pods: []*corev1.Pod{
+				invPod("e0-0", engine, 0, "h1", "", false),
+				invPod("e0-1", engine, 0, "h2", "", true)},
+			rows: []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady, PodCount: 2}},
+		},
+		{
+			name:        "a Failed row whose only pod serves",
+			pods:        []*corev1.Pod{invPod("e0", engine, 0, "h1", "", true)},
+			rows:        []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceFailed, PodCount: 1}},
+			wantSubject: "engine instance 0",
+			wantDetail:  "row is Failed but every pod of its set serves (1 of 1, pods: e0; no failure record)",
+		},
+		{
+			name: "a Failed row whose replacement died beside the serving source",
+			pods: []*corev1.Pod{
+				invPod("e0-0", engine, 0, "h1", "", true),
+				invPod("e0-1", engine, 0, "h2", "", false)},
+			rows: []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceFailed, PodCount: 2, LastFailure: failure("e0-1")}},
+		},
+		{
+			name:        "a Failed row whose failure names the pod that serves",
+			pods:        []*corev1.Pod{invPod("e0", engine, 0, "h1", "", true)},
+			rows:        []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceFailed, PodCount: 1, LastFailure: failure("e0")}},
+			wantSubject: "engine instance 0",
+			wantDetail:  "failure record names pod e0 (ImagePullBackOff)",
+		},
+		{
+			name:    "a Failed gang row that remembers a crash of the set now serving",
+			setSize: 2,
+			pods: []*corev1.Pod{
+				withRestarts(invPod("e0-leader", engine, 0, "h1", "", true), 2),
+				invPod("e0-worker", engine, 0, "h1", "", true)},
+			rows: []v1beta1.OMENativeInstanceStatus{{
+				Index: 0, Phase: v1beta1.OMENativeInstanceFailed, PodCount: 2,
+				ReadySince:  &metav1.Time{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+				LastFailure: &v1beta1.InstanceTermination{PodName: "e0-leader", Reason: "Error", Time: metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC))},
+			}},
+			wantSubject: "engine instance 0 (Failed after promotion while the set restarts)",
+			wantDetail:  "failure record names pod e0-leader (Error) at 2026-01-01T00:00:30Z, after the row entered Ready at 2026-01-01T00:00:00Z (restarts: e0-leader=2,e0-worker=0; pods: e0-leader,e0-worker)",
+		},
+		{
+			name: "a Failed row whose failure predates its Ready is the plain finding",
+			pods: []*corev1.Pod{invPod("e0", engine, 0, "h1", "", true)},
+			rows: []v1beta1.OMENativeInstanceStatus{{
+				Index: 0, Phase: v1beta1.OMENativeInstanceFailed, PodCount: 1,
+				ReadySince:  &metav1.Time{Time: time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC)},
+				LastFailure: &v1beta1.InstanceTermination{PodName: "e0", Reason: "Error", Time: metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 30, 0, time.UTC))},
+			}},
+			wantSubject: "engine instance 0",
+			wantDetail:  "row is Failed but every pod of its set serves (1 of 1, pods: e0; failure record names pod e0 (Error))",
+		},
+		{
+			name:    "a Failed gang row with only part of its set serving",
+			setSize: 2,
+			pods: []*corev1.Pod{
+				invPod("e0-leader", engine, 0, "h1", "", false),
+				invPod("e0-worker", engine, 0, "h1", "", true)},
+			rows: []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceFailed, PodCount: 2}},
+		},
+		{
+			name: "podCount off the listed pods",
+			pods: []*corev1.Pod{
+				invPod("e0", engine, 0, "h1", "", true),
+				invPod("e0-surge", engine, 0, "h2", "", false)},
+			rows:        []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1}},
+			wantSubject: "engine instance 0 podCount",
+			wantDetail:  "the API lists 2 pods",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			obs := invObservation(nil, tc.pods...)
+			obs.rows = map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{engine: tc.rows}
+			obs.setSizes = map[v1beta1.ComponentType]int32{engine: tc.setSize}
+			got := evaluateTarget(obs, map[string]int32{})
+			if tc.wantSubject == "" {
+				expectNoFinding(t, got, InvariantStatusTruth)
+				return
+			}
+			expectOneFinding(t, got, InvariantStatusTruth, tc.wantSubject, tc.wantDetail)
+		})
+	}
+}
 
-	t.Run("rows match the pods", func(t *testing.T) {
-		obs := invObservation(nil,
-			invPod("e0", v1beta1.EngineComponent, 0, "h1", "", true),
-			invPod("e1", v1beta1.EngineComponent, 1, "h1", "", false))
-		obs.rows = rows(
-			v1beta1.OMENativeInstanceStatus{Index: 0, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1},
-			v1beta1.OMENativeInstanceStatus{Index: 1, Phase: v1beta1.OMENativeInstanceFailed, PodCount: 1})
-		expectNoFinding(t, evaluateTarget(obs, map[string]int32{}), InvariantStatusTruth)
-	})
-
-	t.Run("a Ready row without a serving pod", func(t *testing.T) {
-		obs := invObservation(nil, invPod("e0", v1beta1.EngineComponent, 0, "h1", "", false))
-		obs.rows = rows(v1beta1.OMENativeInstanceStatus{Index: 0, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1})
-		expectOneFinding(t, evaluateTarget(obs, map[string]int32{}), InvariantStatusTruth, "engine instance 0", "row is Ready but no pod")
-	})
-
-	t.Run("a Failed row with a serving pod", func(t *testing.T) {
-		obs := invObservation(nil, invPod("e0", v1beta1.EngineComponent, 0, "h1", "", true))
-		obs.rows = rows(v1beta1.OMENativeInstanceStatus{Index: 0, Phase: v1beta1.OMENativeInstanceFailed, PodCount: 1})
-		expectOneFinding(t, evaluateTarget(obs, map[string]int32{}), InvariantStatusTruth, "engine instance 0", "row is Failed but 1 pods")
-	})
-
-	t.Run("podCount off the listed pods", func(t *testing.T) {
-		obs := invObservation(nil,
-			invPod("e0", v1beta1.EngineComponent, 0, "h1", "", true),
-			invPod("e0-surge", v1beta1.EngineComponent, 0, "h2", "", false))
-		obs.rows = rows(v1beta1.OMENativeInstanceStatus{Index: 0, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1})
-		expectOneFinding(t, evaluateTarget(obs, map[string]int32{}), InvariantStatusTruth, "engine instance 0 podCount", "the API lists 2 pods")
-	})
+func TestInstanceSetSize(t *testing.T) {
+	ir := &v1beta1.InferenceReplica{}
+	if got := instanceSetSize(ir); got != 1 {
+		t.Fatalf("an InferenceReplica without runners is single-pod, got %d", got)
+	}
+	ir.Spec.Runners = []v1beta1.Runner{
+		{Name: v1beta1.RunnerNameLeader, Size: 1},
+		{Name: v1beta1.RunnerNameWorker, Size: 3},
+	}
+	if got := instanceSetSize(ir); got != 4 {
+		t.Fatalf("a gang owns every runner's pods, got %d", got)
+	}
 }
 
 func TestInvariantSustainDebounce(t *testing.T) {
@@ -252,6 +501,98 @@ func TestInvariantSustainDebounce(t *testing.T) {
 	}
 	if text := formatInvariantViolations(got); !strings.Contains(text, "I1 ns/svc engine") || !strings.Contains(text, "2 samples") {
 		t.Fatalf("report line must name the invariant, target, subject and count, got %q", text)
+	}
+}
+
+func TestInvariantFirstAndLastDetail(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	key := finding{invariant: InvariantTrafficBacked, target: "ns/svc", subject: "engine svc-engine-abc (a pod of another revision serves)"}
+	cases := []struct {
+		name string
+		// details is the finding's detail on each of six consecutive samples.
+		details        [6]string
+		wantFirst      string
+		wantLast       string
+		wantLineToHold []string
+	}{
+		{
+			name:           "a window that changes shape keeps both ends",
+			details:        [6]string{"serving pods: none", "serving pods: none", "serving pods: none", "serving pods: e1", "serving pods: e1", "serving pods: e1"},
+			wantFirst:      "serving pods: none",
+			wantLast:       "serving pods: e1",
+			wantLineToHold: []string{"first sample: serving pods: none; last sample: serving pods: e1"},
+		},
+		{
+			name:           "a window that does not change says so once",
+			details:        [6]string{"serving pods: e1", "serving pods: e1", "serving pods: e1", "serving pods: e1", "serving pods: e1", "serving pods: e1"},
+			wantFirst:      "serving pods: e1",
+			wantLast:       "serving pods: e1",
+			wantLineToHold: []string{"1 samples: serving pods: e1 (same at first and last sample)"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewInvariantSampler(nil, InvariantTarget{Namespace: "ns", Name: "svc"}, InvariantSamplerOptions{Sustain: 5 * time.Second})
+			for sec, detail := range tc.details {
+				f := key
+				f.detail = detail
+				s.foldLocked(t0.Add(time.Duration(sec)*time.Second), []finding{f})
+			}
+			// Samples 0 to 4 build the span; sample 5 reaches the window and
+			// is recorded with the first sample's detail beside its own.
+			got := s.Violations()
+			if len(got) != 1 || got[0].FirstDetail != tc.wantFirst || got[0].Detail != tc.wantLast {
+				t.Fatalf("want first %q and last %q, got %+v", tc.wantFirst, tc.wantLast, got)
+			}
+			text := formatInvariantViolations(got)
+			for _, part := range tc.wantLineToHold {
+				if !strings.Contains(text, part) {
+					t.Fatalf("report line must hold %q, got %q", part, text)
+				}
+			}
+		})
+	}
+}
+
+func TestInvariantPodCountTolerance(t *testing.T) {
+	obs := invObservation(nil,
+		invPod("e0", v1beta1.EngineComponent, 0, "h1", "", true),
+		invPod("e0-surge", v1beta1.EngineComponent, 0, "h2", "", false))
+	obs.rows = map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{v1beta1.EngineComponent: {
+		{Index: 0, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1},
+	}}
+	fs := findingsOf(t, evaluateTarget(obs, map[string]int32{}), InvariantStatusTruth)
+	if len(fs) != 1 || fs[0].window != InvariantPodCountTolerance {
+		t.Fatalf("the podCount finding must carry the tolerance as its window, got %+v", fs)
+	}
+	podCount := fs[0]
+
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		// pattern is one sample per second from t0: x failing, . clear.
+		pattern string
+		want    int
+	}{
+		{name: "a span inside the tolerance never counts", pattern: strings.Repeat("x", 15), want: 0},
+		{name: "a span reaching the tolerance counts", pattern: strings.Repeat("x", 16), want: 1},
+		{name: "a clear sample restarts the clock", pattern: "xxxxxxxxxx." + strings.Repeat("x", 15), want: 0},
+		{name: "the restarted clock reaches the tolerance on its own", pattern: "xxxxxxxxxx." + strings.Repeat("x", 16), want: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewInvariantSampler(nil, InvariantTarget{Namespace: "ns", Name: "svc"}, InvariantSamplerOptions{Sustain: 5 * time.Second})
+			for sec, state := range tc.pattern {
+				var fs []finding
+				if state == 'x' {
+					fs = []finding{podCount}
+				}
+				s.foldLocked(t0.Add(time.Duration(sec)*time.Second), fs)
+			}
+			if got := s.Violations(); len(got) != tc.want {
+				t.Fatalf("want %d violations, got %+v", tc.want, got)
+			}
+		})
 	}
 }
 

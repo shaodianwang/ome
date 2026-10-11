@@ -33,6 +33,10 @@ const (
 	InvariantSustainWindow = time.Duration(PairAliveSustainWindow * float64(time.Second))
 	// invariantReadTimeout bounds the apiserver reads of one sample.
 	invariantReadTimeout = 15 * time.Second
+	// InvariantPodCountTolerance is how long a row's podCount may differ from
+	// the pod list before it counts: the engine rewrites the counter when a
+	// step completes, not when a pod appears or disappears.
+	InvariantPodCountTolerance = 15 * time.Second
 
 	// The invariants by name: enough pairable pods keep serving (I1), every
 	// traffic share has a serving pod on its revision (I2), and each Instance
@@ -77,10 +81,12 @@ type InvariantViolation struct {
 	Target string
 	// Subject is the Component, traffic target or Instance row concerned.
 	Subject string
-	// Detail describes the latest failing sample in words.
-	Detail    string
-	FirstSeen time.Time
-	LastSeen  time.Time
+	// FirstDetail describes the first failing sample in words, Detail the
+	// latest one; the window between them may have changed shape.
+	FirstDetail string
+	Detail      string
+	FirstSeen   time.Time
+	LastSeen    time.Time
 	// Count is the number of samples that saw the violation past the window.
 	Count int
 }
@@ -121,13 +127,17 @@ type InvariantSampler struct {
 
 // openSpan is a violation seen on every sample since its first failing one.
 type openSpan struct {
-	since  time.Time
-	detail string
+	since time.Time
+	// first is the detail of the first failing sample, detail the latest.
+	first, detail string
 }
 
 // finding is one broken invariant in one sample.
 type finding struct {
 	invariant, target, subject, detail string
+	// window is how long the finding must stand before it counts; zero
+	// takes the sampler's sustain window.
+	window time.Duration
 }
 
 func (f finding) key() string { return f.invariant + "|" + f.target + "|" + f.subject }
@@ -259,13 +269,18 @@ func (s *InvariantSampler) Report(g gomega.Gomega) {
 	}
 }
 
-// formatInvariantViolations renders one line per violation.
+// formatInvariantViolations renders one line per violation, with the first
+// sample's message beside the last one's so the whole window is explained.
 func formatInvariantViolations(violations []InvariantViolation) string {
 	var b strings.Builder
 	for _, v := range violations {
+		detail := v.Detail + " (same at first and last sample)"
+		if v.FirstDetail != v.Detail {
+			detail = "first sample: " + v.FirstDetail + "; last sample: " + v.Detail
+		}
 		fmt.Fprintf(&b, "  %s %s %s: first %s, last %s, %d samples: %s\n",
 			v.Invariant, v.Target, v.Subject,
-			v.FirstSeen.UTC().Format(time.RFC3339), v.LastSeen.UTC().Format(time.RFC3339), v.Count, v.Detail)
+			v.FirstSeen.UTC().Format(time.RFC3339), v.LastSeen.UTC().Format(time.RFC3339), v.Count, detail)
 	}
 	return b.String()
 }
@@ -311,8 +326,9 @@ func (s *InvariantSampler) sample(ctx context.Context) {
 }
 
 // foldLocked advances the debounce by one sample taken at now: a finding
-// opens a span on its first sample, is recorded once the span reaches the
-// sustain window, and closes its span on the first sample without it.
+// opens a span on its first sample, is recorded once the span reaches its
+// window (the sustain window, or the finding's own when longer), and closes
+// its span on the first sample without it.
 func (s *InvariantSampler) foldLocked(now time.Time, findings []finding) {
 	s.samples++
 	seen := map[string]bool{}
@@ -321,16 +337,20 @@ func (s *InvariantSampler) foldLocked(now time.Time, findings []finding) {
 		seen[k] = true
 		span := s.open[k]
 		if span == nil {
-			span = &openSpan{since: now}
+			span = &openSpan{since: now, first: f.detail}
 			s.open[k] = span
 		}
 		span.detail = f.detail
-		if now.Sub(span.since) < s.opts.Sustain {
+		window := s.opts.Sustain
+		if f.window > window {
+			window = f.window
+		}
+		if now.Sub(span.since) < window {
 			continue
 		}
 		v := s.recorded[k]
 		if v == nil {
-			v = &InvariantViolation{Invariant: f.invariant, Target: f.target, Subject: f.subject, FirstSeen: span.since}
+			v = &InvariantViolation{Invariant: f.invariant, Target: f.target, Subject: f.subject, FirstDetail: span.first, FirstSeen: span.since}
 			s.recorded[k] = v
 		}
 		v.LastSeen = now
@@ -354,6 +374,9 @@ type targetObservation struct {
 	// rows are the decoded Instance rows per Component.
 	rows    map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus
 	budgets map[v1beta1.ComponentType]ComponentBudget
+	// setSizes is, per Component, how many pods one Instance owns: the sum
+	// of the runner sizes the InferenceReplica declares.
+	setSizes map[v1beta1.ComponentType]int32
 }
 
 // observeTarget reads the InferenceService, its OMENative pods and its
@@ -387,6 +410,7 @@ func observeTarget(ctx context.Context, reader client.Reader, t InvariantTarget)
 	}
 	replicas := map[v1beta1.ComponentType]*v1beta1.InferenceReplica{}
 	obs.rows = map[v1beta1.ComponentType][]v1beta1.OMENativeInstanceStatus{}
+	obs.setSizes = map[v1beta1.ComponentType]int32{}
 	for i := range irList.Items {
 		ir := &irList.Items[i]
 		if ir.ParentName() != t.Name {
@@ -402,6 +426,7 @@ func observeTarget(ctx context.Context, reader client.Reader, t InvariantTarget)
 			}
 			replicas[c] = ir
 			obs.rows[c] = rows
+			obs.setSizes[c] = instanceSetSize(ir)
 		}
 	}
 	obs.budgets = t.Budgets
@@ -454,10 +479,116 @@ func stricterBudget(a, b int32) int32 {
 	return a
 }
 
+// instanceSetSize is the number of pods one Instance of the InferenceReplica
+// owns: the sum of its runner sizes. An InferenceReplica that publishes no
+// runners is read as single-pod.
+func instanceSetSize(ir *v1beta1.InferenceReplica) int32 {
+	var n int32
+	for _, r := range ir.Spec.Runners {
+		n += r.Size
+	}
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// activeSetPods picks the pods of an Instance's current set: those carrying
+// the row's incarnation label, and any pod without the label.
+func activeSetPods(row v1beta1.OMENativeInstanceStatus, pods []*corev1.Pod) []*corev1.Pod {
+	var set []*corev1.Pod
+	for _, pod := range pods {
+		if inc, ok := query.InstanceIncarnationFromLabels(pod); ok && inc != row.Incarnation {
+			continue
+		}
+		set = append(set, pod)
+	}
+	return set
+}
+
+// failureNamesReplacement reports a Failed row whose failure record names a
+// pod other than the serving ones: a replacement attempt that died beside a
+// source still carrying traffic, which the row may call Failed.
+func failureNamesReplacement(row v1beta1.OMENativeInstanceStatus, serving []*corev1.Pod) bool {
+	if row.LastFailure == nil || row.LastFailure.PodName == "" {
+		return false
+	}
+	for _, pod := range serving {
+		if pod.Name == row.LastFailure.PodName {
+			return false
+		}
+	}
+	return true
+}
+
+// remembersCrash reports a row whose failure record is dated after the row
+// entered Ready: a failure of the set it promoted, not of one it replaced.
+func remembersCrash(row v1beta1.OMENativeInstanceStatus) bool {
+	return row.LastFailure != nil && row.ReadySince != nil && row.LastFailure.Time.After(row.ReadySince.Time)
+}
+
+// restartedSince reports a pod whose main container ran again after since:
+// its last run ended after that time, or its current run began after it.
+func restartedSince(pod *corev1.Pod, since time.Time) bool {
+	if pod.DeletionTimestamp != nil {
+		return false
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name != constants.MainContainerName {
+			continue
+		}
+		if t := cs.LastTerminationState.Terminated; t != nil && t.FinishedAt.After(since) {
+			return true
+		}
+		if r := cs.State.Running; r != nil && r.StartedAt.After(since) {
+			return true
+		}
+	}
+	return false
+}
+
+// unprovenPromotedInstance finds an Instance that was promoted and has not
+// proven itself since: its row remembers a crash after it entered Ready, or
+// a pod of its current set restarted after that time.
+func unprovenPromotedInstance(rows []v1beta1.OMENativeInstanceStatus, byIndex map[int32][]*corev1.Pod) (int32, bool) {
+	for _, row := range rows {
+		if row.ReadySince == nil || row.ReadySince.IsZero() {
+			continue
+		}
+		if remembersCrash(row) {
+			return row.Index, true
+		}
+		for _, pod := range activeSetPods(row, byIndex[row.Index]) {
+			if restartedSince(pod, row.ReadySince.Time) {
+				return row.Index, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// failureNote renders the row's failure record for a violation line.
+func failureNote(row v1beta1.OMENativeInstanceStatus) string {
+	if row.LastFailure == nil {
+		return "no failure record"
+	}
+	return fmt.Sprintf("failure record names pod %s (%s)", row.LastFailure.PodName, row.LastFailure.Reason)
+}
+
 // podInRotation reports a pod that carries traffic: not terminating, Ready,
 // and holding the controller's serving gate.
 func podInRotation(pod *corev1.Pod) bool {
 	return pod != nil && pod.DeletionTimestamp == nil && podreadiness.ReadyAndServing(pod)
+}
+
+func podsByIndex(pods []*corev1.Pod) map[int32][]*corev1.Pod {
+	out := map[int32][]*corev1.Pod{}
+	for _, pod := range pods {
+		if idx, ok := query.InstanceIdxFromLabels(pod); ok {
+			out[idx] = append(out[idx], pod)
+		}
+	}
+	return out
 }
 
 func podsByComponent(pods []*corev1.Pod) map[v1beta1.ComponentType][]*corev1.Pod {
@@ -548,6 +679,24 @@ func podNames(pods []*corev1.Pod) string {
 	return strings.Join(names, ",")
 }
 
+// podRestarts lists each pod's restart count, summed over its containers
+// as kubectl shows it.
+func podRestarts(pods []*corev1.Pod) string {
+	parts := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		var n int32
+		for _, cs := range pod.Status.ContainerStatuses {
+			n += cs.RestartCount
+		}
+		parts = append(parts, fmt.Sprintf("%s=%d", pod.Name, n))
+	}
+	sort.Strings(parts)
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, ",")
+}
+
 // evaluateTarget checks one observation against the three invariants and
 // returns what is broken right now. armed keeps, per target and Component,
 // the desired count the serving floor last held at, so a Component that is
@@ -561,7 +710,10 @@ func evaluateTarget(obs *targetObservation, armed map[string]int32) []finding {
 	var out []finding
 
 	// I1: once a Component has served its desired count, at least desired
-	// minus maxUnavailable of its pods stay serving and pairable.
+	// minus maxUnavailable of its pods stay serving and pairable. A shortfall
+	// of exactly one while a promoted Instance is unproven is its own
+	// subject: the budget plus the one start the engine admitted before that
+	// Instance crashed, which the owner may read as the contract or a gap.
 	specProtocol := ""
 	if obs.isvc.Spec.Rollout != nil && obs.isvc.Spec.Rollout.PairingProtocol != nil {
 		specProtocol = *obs.isvc.Spec.Rollout.PairingProtocol
@@ -595,16 +747,34 @@ func evaluateTarget(obs *targetObservation, armed map[string]int32) []finding {
 			pairNote = fmt.Sprintf(", pairing transition to %q in flight", specProtocol)
 		}
 		if pairable < floor {
-			out = append(out, finding{
-				invariant: InvariantPairableCapacity, target: target, subject: string(c),
-				detail: fmt.Sprintf("%d pairable serving pods, floor %d (desired %d, maxUnavailable %d, serving %d%s)",
-					pairable, floor, budget.Desired, budget.MaxUnavailable, serving, pairNote),
-			})
+			subject := string(c)
+			detail := fmt.Sprintf("%d pairable serving pods, floor %d (desired %d, maxUnavailable %d, serving %d%s)",
+				pairable, floor, budget.Desired, budget.MaxUnavailable, serving, pairNote)
+			if floor-pairable == 1 {
+				if idx, ok := unprovenPromotedInstance(obs.rows[c], podsByIndex(byComp[c])); ok {
+					subject += " (budget plus one while a promoted set is unproven)"
+					detail += fmt.Sprintf("; instance %d was promoted and has not proven itself since", idx)
+				}
+			}
+			out = append(out, finding{invariant: InvariantPairableCapacity, target: target, subject: subject, detail: detail})
 		}
 	}
 
-	// I2: every traffic target with a share has a serving pod on its revision.
+	// I2: every traffic target with a share has a serving pod on its
+	// revision. A Component with no serving pod at all is left to I1 and I4,
+	// since no target could be right then. An unbacked target is one of two
+	// subjects, each measured as its own window: the revision still has pods
+	// and none serves, or it has no pod left and other revisions serve.
 	for _, c := range sortedComponents(obs.isvc.Status.Components) {
+		var servingPods []*corev1.Pod
+		for _, pod := range byComp[c] {
+			if podInRotation(pod) {
+				servingPods = append(servingPods, pod)
+			}
+		}
+		if len(servingPods) == 0 {
+			continue
+		}
 		for _, tt := range obs.isvc.Status.Components[c].Traffic {
 			if tt.Percent <= 0 {
 				continue
@@ -614,61 +784,88 @@ func evaluateTarget(obs *targetObservation, armed map[string]int32) []finding {
 				continue
 			}
 			backed := false
-			var servingPods []*corev1.Pod
+			var revisionPods []*corev1.Pod
 			for _, pod := range byComp[c] {
-				if !podInRotation(pod) {
+				if pod.Labels[query.LabelRevisionHash] != hash {
 					continue
 				}
-				servingPods = append(servingPods, pod)
-				if pod.Labels[query.LabelRevisionHash] == hash {
+				revisionPods = append(revisionPods, pod)
+				if podInRotation(pod) {
 					backed = true
 				}
 			}
-			if !backed {
-				out = append(out, finding{
-					invariant: InvariantTrafficBacked, target: target, subject: string(c) + " " + tt.RevisionName,
-					detail: fmt.Sprintf("%d%% of traffic, no serving pod carries revision hash %s (serving pods: %s)",
-						tt.Percent, hash, podNames(servingPods)),
-				})
+			if backed {
+				continue
 			}
+			subject := string(c) + " " + tt.RevisionName
+			if len(revisionPods) > 0 {
+				out = append(out, finding{
+					invariant: InvariantTrafficBacked, target: target, subject: subject + " (no pod serves)",
+					detail: fmt.Sprintf("%d%% of traffic, %d pods carry revision hash %s and none serves (revision pods: %s; serving pods: %s)",
+						tt.Percent, len(revisionPods), hash, podNames(revisionPods), podNames(servingPods)),
+				})
+				continue
+			}
+			out = append(out, finding{
+				invariant: InvariantTrafficBacked, target: target, subject: subject + " (a pod of another revision serves)",
+				detail: fmt.Sprintf("%d%% of traffic, no pod carries revision hash %s, the serving pods are on other revisions (serving pods: %s)",
+					tt.Percent, hash, podNames(servingPods)),
+			})
 		}
 	}
 
-	// I4: a Ready row has a serving pod, a Failed row has none, and podCount
-	// is the number of pods the API lists for the index, as the engine counts.
+	// I4: a Ready row's set serves, a Failed row's set does not unless the
+	// row's failure record names a replacement that died beside the serving
+	// source, and podCount is the number of pods the API lists for the index,
+	// as the engine counts. A set serves when every pod of it serves: the
+	// pods of the index on the row's incarnation, as many as the Component's
+	// runners declare.
 	for _, c := range sortedComponents(obs.rows) {
-		byIndex := map[int32][]*corev1.Pod{}
-		for _, pod := range byComp[c] {
-			if idx, ok := query.InstanceIdxFromLabels(pod); ok {
-				byIndex[idx] = append(byIndex[idx], pod)
-			}
-		}
+		byIndex := podsByIndex(byComp[c])
+		size := max(obs.setSizes[c], 1)
 		for _, row := range obs.rows[c] {
 			pods := byIndex[row.Index]
-			var serving int32
-			for _, pod := range pods {
+			set := activeSetPods(row, pods)
+			var serving []*corev1.Pod
+			for _, pod := range set {
 				if podInRotation(pod) {
-					serving++
+					serving = append(serving, pod)
 				}
 			}
+			serves := int32(len(serving)) >= size
 			subject := string(c) + " instance " + strconv.FormatInt(int64(row.Index), 10)
 			switch {
-			case row.Phase == v1beta1.OMENativeInstanceReady && serving == 0:
+			case row.Phase == v1beta1.OMENativeInstanceReady && !serves:
 				out = append(out, finding{
 					invariant: InvariantStatusTruth, target: target, subject: subject,
-					detail: fmt.Sprintf("row is Ready but no pod of the index is serving (pods: %s)", podNames(pods)),
+					detail: fmt.Sprintf("row is Ready but %d of %d pods of its set serve (servingPodCount %d; restarts: %s; pods: %s)",
+						len(serving), size, row.ServingPodCount, podRestarts(pods), podNames(pods)),
 				})
-			case row.Phase == v1beta1.OMENativeInstanceFailed && serving > 0:
-				out = append(out, finding{
-					invariant: InvariantStatusTruth, target: target, subject: subject,
-					detail: fmt.Sprintf("row is Failed but %d pods of the index are serving (pods: %s)", serving, podNames(pods)),
-				})
+			case row.Phase == v1beta1.OMENativeInstanceFailed && serves && !failureNamesReplacement(row, serving):
+				// A failure of the promoted set itself, with its pods back
+				// and serving, is the engine's considered verdict on a set
+				// that keeps restarting; it is recorded as its own subject.
+				if remembersCrash(row) {
+					out = append(out, finding{
+						invariant: InvariantStatusTruth, target: target, subject: subject + " (Failed after promotion while the set restarts)",
+						detail: fmt.Sprintf("row is Failed with every pod of its set serving (%d of %d); %s at %s, after the row entered Ready at %s (restarts: %s; pods: %s)",
+							len(serving), size, failureNote(row), row.LastFailure.Time.UTC().Format(time.RFC3339),
+							row.ReadySince.UTC().Format(time.RFC3339), podRestarts(pods), podNames(pods)),
+					})
+				} else {
+					out = append(out, finding{
+						invariant: InvariantStatusTruth, target: target, subject: subject,
+						detail: fmt.Sprintf("row is Failed but every pod of its set serves (%d of %d, pods: %s; %s)",
+							len(serving), size, podNames(pods), failureNote(row)),
+					})
+				}
 			}
 			if int32(len(pods)) != row.PodCount {
 				out = append(out, finding{
 					invariant: InvariantStatusTruth, target: target, subject: subject + " podCount",
 					detail: fmt.Sprintf("row reports podCount %d, the API lists %d pods for the index (%s)",
 						row.PodCount, len(pods), podNames(pods)),
+					window: InvariantPodCountTolerance,
 				})
 			}
 		}
