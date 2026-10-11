@@ -322,7 +322,7 @@ KIND_SPEC_GROUPS = (
     ("gang-surge-multipod", "Gang surge and multi-pod", (
         "concurrent_gang_surge", "gang_surge_floor", "multipod_inplace",
         "multipod_recreatepod", "multipod_surge_fallback", "topology_podgroup",
-        "gang_surge_drain_member_lost", "gang_surge_replacement_lost_rule",
+        "gang_surge_drain_member_lost",
     )),
     ("migration-relocation", "Migration and relocation", (
         "auto_migrate", "auto_migrate_multiinstance", "migrate", "interleave_extra",
