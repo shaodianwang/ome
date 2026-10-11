@@ -3703,8 +3703,9 @@ def _rows_settled_on_new(items, N, configured, bumped, old_hashes):
         if not isinstance(rows, list) or len(rows) != N[c]:
             return False, f"{c}: instanceStatuses {len(rows) if isinstance(rows, list) else 0}/{N[c]}"
         for row in rows:
-            if row.get("phase") != "Ready" or row.get("operation") is not None:
-                return False, f"{c}/{row.get('index', '?')}: Instance is not settled"
+            why = _row_unsettled_why(row)
+            if why:
+                return False, f"{c}/{row.get('index', '?')}: {why}"
     return True, "settled on the new revision"
 
 
@@ -3799,7 +3800,7 @@ def _overlap_checks(ov, ctx, mcomp, reqs, entries, ir_entries, rollout_conv_ts, 
                       "revision the new one")
     else:
         fail(f"controller rows not settled after both operations: {why}",
-             f"  ✗ controller rows not settled after both operations: {why} — an Instance is left mid-operation")
+             f"  ✗ controller rows not settled after both operations: {why} ({_unsettled_label(why, 'an Instance')})")
     cm_rows = _migration_ledger_moves(ctx["case_id"])
     mine = sum(1 for e in cm_rows if e.get("requestUUID") == req_uuid)
     if mine == 1 and len(cm_rows) == len(reqs):
@@ -4370,8 +4371,9 @@ def _rollback_fault_rows(items, N, configured, bumped, old_hashes, kept):
         if str(row.get("index")) == str(kinst):
             victim = row
             continue
-        if row.get("phase") != "Ready" or row.get("operation") is not None:
-            return False, f"{kcomp}/{row.get('index', '?')}: Instance is not settled"
+        why = _row_unsettled_why(row)
+        if why:
+            return False, f"{kcomp}/{row.get('index', '?')}: {why}"
     if victim is None:
         return False, f"{kcomp}: no row at the kept victim's index {kinst}"
     served = f"{victim.get('servingPodCount', 0)}/{victim.get('podCount', 0)}"
@@ -7720,7 +7722,7 @@ def _once_checks(f, out, verdict, notes, checks):
     if out["rows_settled"]:
         checks.append(f"  ✓ {label}: every Instance row settled (Ready, no operation open)")
     else:
-        fail("a row was left mid-operation", f"a row did not settle after the restart ({out['rows_why']}) — left mid-operation")
+        fail(_unsettled_label(out["rows_why"]), f"a row did not settle after the restart ({out['rows_why']})")
     if out.get("new_hash"):
         fail("a new revision appeared", "a new revision appeared on a service nobody bumped")
     if bad:
@@ -7929,25 +7931,6 @@ def _fault_configkey_fire(f, pod_state, old_hashes):
     print(f"    ⚡ {f['notes'][-1]}")
 
 
-def _ir_row(case_id, comp, inst):
-    """One Instance's decoded row in its Component's InferenceReplica status
-    (None when the row or the object cannot be read)."""
-    r = kubectl("-n", NS, "get", "inferencereplicas", "-l", f"ome.io/inferenceservice={case_id}", "-o", "json")
-    if r.returncode != 0:
-        return None
-    try:
-        items = json.loads(r.stdout).get("items", []) or []
-    except Exception:
-        return None
-    for it in items:
-        if (it.get("spec") or {}).get("component") != comp:
-            continue
-        for row in _instance_rows(it.get("status") or {}):
-            if str(row.get("index")) == str(inst):
-                return row
-    return None
-
-
 def _ir_row_phase(case_id, comp, inst):
     """Phase of one Instance's row in its Component's InferenceReplica status
     ("" when the row or the object cannot be read)."""
@@ -8015,6 +7998,56 @@ def _row_serving_short(row, ppi=1):
                 or str(row.get("phase") or "") != "Ready")
     except (TypeError, ValueError):
         return False
+
+
+def _row_unsettled_why(row):
+    """"" when a row is settled: Ready with no operation open. Otherwise why
+    it is not, in the engine's own terms. An operation open is the engine
+    mid-operation on the Instance, whatever the phase reads. A phase other
+    than Ready with no operation open is the status publication's reading
+    of the pod set, nobody working on the Instance: Restarting when its
+    pods are present and serve nothing, Pending when it has no pods."""
+    phase = str((row or {}).get("phase") or "") or "?"
+    op = (row or {}).get("operation")
+    if op is not None:
+        return f"{phase} with an operation open ({(op or {}).get('type') or 'operation'}: mid-operation)"
+    if phase == "Ready":
+        return ""
+    if phase == "Restarting":
+        return "Restarting with no operation open (not mid-operation: its pods do not serve)"
+    if phase == "Pending":
+        return "Pending with no operation open (not mid-operation: no pods)"
+    return f"{phase} with no operation open (not mid-operation, not Ready)"
+
+
+def _unsettled_label(why, who="a row"):
+    """The failure a row that did not settle names, read off its reason:
+    left mid-operation when an operation is open on it, left not serving
+    when the status reads it as not whole with no operation open, else the
+    rows did not settle (a count or a revision did not converge)."""
+    if ": mid-operation)" in why:
+        return f"{who} was left mid-operation"
+    if "with no operation open" in why:
+        return f"{who} was left not serving, no operation open"
+    return "the rows did not settle"
+
+
+def _row_down_settled(row):
+    """(ok, why) for a row the case expects left down: its pod runs out of
+    rotation and nothing rebuilds it, so the row carries no operation and
+    the status says the Instance is not whole (Restarting, the
+    publication's word for a pod set that serves nothing, or Ready with
+    the serving count short of the pod count). An operation open is
+    mid-operation; a row that claims the Instance whole contradicts the
+    fault; any other phase is not the fault's shape."""
+    phase = str((row or {}).get("phase") or "") or "?"
+    if (row or {}).get("operation") is not None:
+        return False, _row_unsettled_why(row)
+    if phase == "Restarting" or (phase == "Ready" and _row_serving_short(row)):
+        return True, ""
+    if phase == "Ready":
+        return False, "Ready with no operation open and every pod serving, want the Instance down as the fault left it"
+    return False, f"{phase} with no operation open, want Restarting (down, nothing rebuilding it)"
 
 
 def _ready_endpoint_uids(case_id):
@@ -12192,7 +12225,7 @@ def _fix_push_checks(f, oneshot, out, verdict, notes, checks):
     if out["rows_settled"]:
         checks.append(f"  ✓ {label}: every Instance row settled (Ready, no operation open)")
     else:
-        fail("a row was left mid-operation", f"a row did not settle after the roll ({out['rows_why']}) — left mid-operation")
+        fail(_unsettled_label(out["rows_why"]), f"a row did not settle after the roll ({out['rows_why']})")
     if out["holds"]:
         fail("a rollout hold is left behind",
              "a rollout hold is left behind after the fix: " + "; ".join(f"{c} gate={g} {r}" for c, g, r in out["holds"]))
@@ -12612,8 +12645,8 @@ def _pause_repair_checks(f, contract, out, verdict, notes, checks):
         checks.append("  ✓ no Instance left mid-operation: every row Ready with no operation open")
     else:
         verdict = "FAIL"
-        notes.append(f"an Instance was left mid-operation after the unpause ({out['ir_detail']})")
-        checks.append(f"  ✗ an Instance was left mid-operation after the unpause: {out['ir_detail']}")
+        notes.append(f"{_unsettled_label(out['ir_detail'], 'an Instance')} after the unpause ({out['ir_detail']})")
+        checks.append(f"  ✗ an Instance row did not settle after the unpause: {out['ir_detail']}")
     if out["pause_left"]:
         verdict = "FAIL"
         notes.append(f"the pause annotation still reads {out['pause_left']!r} at the end")
@@ -13509,7 +13542,7 @@ def _oneshot_new_checks(ctx, out, state, verdict, notes, checks):
     if settled:
         checks.append(f"  ✓ {kind}: every Instance row settled (Ready, no operation open)")
     else:
-        fail("a row was left mid-operation", f"a row did not settle after the roll ({why}) — left mid-operation")
+        fail(_unsettled_label(why), f"a row did not settle after the roll ({why})")
     if bad:
         verdict = "FAIL"
         notes.extend(f"{kind}: {b}" for b in bad)
@@ -18405,8 +18438,9 @@ def _ir_settled(items, expected, configured, fresh_indexes):
         if fresh_indexes and indexes != set(range(desired)):
             return False, f"{component}: Instance indexes have not converged"
         for instance in instances:
-            if instance.get("phase") != "Ready" or instance.get("operation") is not None:
-                return False, f"{component}/{instance.get('index', '?')}: Instance is not settled"
+            why = _row_unsettled_why(instance)
+            if why:
+                return False, f"{component}/{instance.get('index', '?')}: {why}"
     return True, "settled"
 
 
@@ -19700,12 +19734,15 @@ def _wait_rows_settled(case_id, N, configured, budget_s, fresh_indexes=False):
 
 
 def _rows_settled_checks(settled, why, verdict, notes, checks, window_s=ROWS_SETTLE_S):
-    """No Instance is left mid-operation once the pods have converged."""
+    """Every row settled, Ready with no operation open, once the pods have
+    converged. A row that did not is named for what it was left as: an
+    operation open is mid-operation, a phase the publication wrote with
+    no operation open is an Instance left not serving."""
     if settled:
         checks.append("  ✓ every Instance row settled after the roll: Ready, no operation open")
         return verdict
-    notes.append(f"an Instance was left mid-operation after the roll ({why})")
-    checks.append(f"  ✗ an Instance row did not settle within {window_s}s after the roll ({why}) — left mid-operation")
+    notes.append(f"{_unsettled_label(why, 'an Instance')} after the roll ({why})")
+    checks.append(f"  ✗ an Instance row did not settle within {window_s}s after the roll ({why})")
     return "FAIL"
 
 
@@ -22548,13 +22585,17 @@ def _row_waits_on_key(row):
     return True, ""
 
 
-def _broken_rows_settled(case_id, want, configured, waiting=()):
+def _broken_rows_settled(case_id, want, configured, waiting=(), down=()):
     """(settled, reason): every configured Component has one InferenceReplica
     whose replicas counter is its wanted count and whose rows, that many,
     all read Ready with no operation open — but for the (component, index)
     rows in `waiting`, which read parked on the ConfigMap key kept away
-    (_row_waits_on_key). Indexes may be sparse after a scale-down."""
+    (_row_waits_on_key), and those in `down`, which read down with no
+    operation open, as a fault that takes a running pod out of rotation
+    leaves them (_row_down_settled). Indexes may be sparse after a
+    scale-down."""
     waiting = {(c, str(i)) for c, i in waiting}
+    down = {(c, str(i)) for c, i in down}
     by_comp = {}
     for it in _fetch_initial_ir_items(case_id) or []:
         comp = (it.get("spec") or {}).get("component")
@@ -22581,16 +22622,21 @@ def _broken_rows_settled(case_id, want, configured, waiting=()):
                 if not ok:
                     return False, f"{comp}/{idx}: {why}"
                 continue
-            if str(row.get("phase") or "") != "Ready" or row.get("operation") is not None:
-                open_op = "an" if row.get("operation") is not None else "no"
-                return False, f"{comp}/{idx}: {row.get('phase') or '?'} with {open_op} operation open"
+            if (comp, idx) in down:
+                ok, why = _row_down_settled(row)
+                if not ok:
+                    return False, f"{comp}/{idx}: {why}"
+                continue
+            why = _row_unsettled_why(row)
+            if why:
+                return False, f"{comp}/{idx}: {why}"
     return True, "settled"
 
 
-def _wait_broken_rows_settled(case_id, want, configured, budget_s, waiting=()):
+def _wait_broken_rows_settled(case_id, want, configured, budget_s, waiting=(), down=()):
     deadline = time.time() + budget_s
     while True:
-        settled, why = _broken_rows_settled(case_id, want, configured, waiting=waiting)
+        settled, why = _broken_rows_settled(case_id, want, configured, waiting=waiting, down=down)
         if settled or time.time() >= deadline:
             return settled, why
         time.sleep(2.0)
@@ -22814,9 +22860,14 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
     waiting_rows = set()
     if up and expect == BROKEN_WAIT_EXPECT:
         waiting_rows = {(scomp, i) for i in new_instances} | {(comp, inst)}
+    # Left as the fault left it, the broken Instance's pod runs out of
+    # rotation with nothing rebuilding it: its row is judged down with no
+    # operation open, not Ready.
+    down_rows = {(comp, inst)} if judge_fate and expect == "left" else set()
     rows_settled, settle_why = False, "the scale did not converge"
     if state == "CONVERGED":
-        rows_settled, settle_why = _wait_broken_rows_settled(case_id, target, configured, BROKEN_ROWS_SETTLE_S, waiting_rows)
+        rows_settled, settle_why = _wait_broken_rows_settled(case_id, target, configured, BROKEN_ROWS_SETTLE_S,
+                                                             waiting_rows, down_rows)
     if not up:
         for c in sorted(scaled):
             rows_now = {i for i, _h, _ph in _broken_rows(case_id, c)}
@@ -22924,12 +22975,16 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
         if rows_settled and waiting_rows:
             checks.append(f"  ✓ every Instance row settled: the rows waiting on the key read Failed naming "
                           f"{CONFIGKEY_WAITING} with at most a repair parked on them, every other Ready with no operation open")
+        elif rows_settled and down_rows:
+            checks.append(f"  ✓ every Instance row settled: {comp} Instance {inst} reads down with no operation open, as the "
+                          f"fault left it (its pod runs out of rotation, nothing rebuilds it), every other Ready with no "
+                          f"operation open")
         elif rows_settled:
             checks.append("  ✓ every Instance row settled: Ready, no operation open")
         else:
             verdict = "FAIL"
-            notes.append(f"a row was left mid-operation after the scale ({settle_why})")
-            checks.append(f"  ✗ a row did not settle within {BROKEN_ROWS_SETTLE_S}s after the scale ({settle_why}) — left mid-operation")
+            notes.append(f"{_unsettled_label(settle_why)} after the scale ({settle_why})")
+            checks.append(f"  ✗ a row did not settle within {BROKEN_ROWS_SETTLE_S}s after the scale ({settle_why})")
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
@@ -23211,8 +23266,8 @@ def _pending_scale(case_id, yaml_file, desc, hdr):
             checks.append("  ✓ every Instance row settled: Ready, no operation open")
         else:
             verdict = "FAIL"
-            notes.append(f"a row was left mid-operation after the scale ({why})")
-            checks.append(f"  ✗ a row did not settle within {BROKEN_ROWS_SETTLE_S}s after the scale ({why}) — left mid-operation")
+            notes.append(f"{_unsettled_label(why)} after the scale ({why})")
+            checks.append(f"  ✗ a row did not settle within {BROKEN_ROWS_SETTLE_S}s after the scale ({why})")
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 

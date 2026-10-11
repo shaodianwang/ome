@@ -95,7 +95,7 @@ class InitialRolloutSettlementTest(unittest.TestCase):
             "worker": pod("engine", 0, "worker"),
         }
         item = inference_replica("engine", 1, phase="Creating")
-        self.assert_not_settled(pods, {"engine": 2}, {"engine": 1}, [item], "not settled")
+        self.assert_not_settled(pods, {"engine": 2}, {"engine": 1}, [item], "Creating with no operation open")
 
     def test_fully_settled_multi_component_fleet_passes(self):
         pods = {
@@ -7476,8 +7476,44 @@ class RuntimeEditRepairTest(unittest.TestCase):
         self.assertEqual("PASS", run._rows_settled_checks(True, "settled", "PASS", notes, checks))
         self.assertTrue(any("no operation open" in c for c in checks))
         notes, checks = [], []
-        self.assertEqual("FAIL", run._rows_settled_checks(False, "engine/2: Instance is not settled", "PASS", notes, checks))
-        self.assertTrue(any("left mid-operation" in c for c in checks))
+        busy = "engine/2: Updating with an operation open (Update: mid-operation)"
+        self.assertEqual("FAIL", run._rows_settled_checks(False, busy, "PASS", notes, checks))
+        self.assertEqual([f"an Instance was left mid-operation after the roll ({busy})"], notes)
+        self.assertTrue(any(busy in c for c in checks))
+        notes, checks = [], []
+        down = "engine/2: Restarting with no operation open (not mid-operation: its pods do not serve)"
+        self.assertEqual("FAIL", run._rows_settled_checks(False, down, "PASS", notes, checks),
+                         "a row the status reads as down still fails a roll that must end serving")
+        self.assertEqual([f"an Instance was left not serving, no operation open after the roll ({down})"], notes,
+                         "the publication's Restarting row is not called mid-operation")
+        self.assertFalse(any("left mid-operation" in c or ": mid-operation)" in c for c in checks))
+
+    def test_a_row_is_settled_by_its_operation_not_the_phase_word(self):
+        """The status publication writes Restarting with no operation over a
+        settled row whose pods serve nothing; only an operation open makes
+        a row mid-operation."""
+        self.assertEqual("", run._row_unsettled_why({"index": 1, "phase": "Ready"}))
+        self.assertEqual("Updating with an operation open (Update: mid-operation)",
+                         run._row_unsettled_why({"index": 1, "phase": "Updating", "operation": {"type": "Update"}}))
+        self.assertEqual("Ready with an operation open (Restart: mid-operation)",
+                         run._row_unsettled_why({"index": 1, "phase": "Ready", "operation": {"type": "Restart"}}),
+                         "an operation open is mid-operation whatever the phase reads")
+        self.assertEqual("Restarting with no operation open (not mid-operation: its pods do not serve)",
+                         run._row_unsettled_why({"index": 1, "phase": "Restarting", "servingPodCount": 0}))
+        self.assertEqual("Pending with no operation open (not mid-operation: no pods)", run._row_unsettled_why({"index": 1, "phase": "Pending"}))
+        self.assertEqual("Failed with no operation open (not mid-operation, not Ready)", run._row_unsettled_why({"index": 1, "phase": "Failed"}))
+        self.assertEqual("a row was left mid-operation",
+                         run._unsettled_label("engine/1: Ready with an operation open (Restart: mid-operation)"))
+        self.assertEqual("an Instance was left not serving, no operation open",
+                         run._unsettled_label("engine/1: Restarting with no operation open (not mid-operation: its pods do not serve)", "an Instance"))
+        self.assertEqual("the rows did not settle", run._unsettled_label("engine: replicas 4/5"))
+        self.assertEqual((True, ""), run._row_down_settled({"phase": "Restarting", "podCount": 1, "servingPodCount": 0}))
+        self.assertEqual((True, ""), run._row_down_settled({"phase": "Ready", "podCount": 1, "servingPodCount": 0}),
+                         "Ready with the serving count short says the same")
+        self.assertFalse(run._row_down_settled({"phase": "Ready", "podCount": 1, "servingPodCount": 1})[0],
+                         "a row claiming the Instance whole contradicts the fault")
+        self.assertFalse(run._row_down_settled({"phase": "Restarting", "operation": {"type": "Restart"}})[0], "mid-operation")
+        self.assertFalse(run._row_down_settled({"phase": "Pending"})[0], "no pods is not the fault's shape")
 
     def test_break_checks_skip_cases_without_a_break(self):
         ctx = {"fault": None, "pod_state": {}, "configured": {"engine"}, "case_id": "p999", "N": {"engine": 1}}
@@ -10796,7 +10832,7 @@ class PlainRollbackTest(unittest.TestCase):
         self.assertIn("not the starting revision", why)
         ok, why = run._rollback_ir_settled([inference_replica("engine", 2, operation={"type": "Update"})], N, configured, bumped, {"a"})
         self.assertFalse(ok)
-        self.assertIn("not settled", why)
+        self.assertIn("with an operation open (Update: mid-operation)", why)
         self.assertFalse(run._rollback_ir_settled(None, N, configured, bumped, {"a"})[0])
         # A gang surge promoted before the rollback leaves the fleet on rotated indexes: after a roll back only the count holds.
         rotated = inference_replica("engine", 2)
@@ -13182,9 +13218,15 @@ class PauseRepairTest(unittest.TestCase):
         v, notes, _c = judge(plain_before, self._out(state="WATCHING", end_detail="engine 1 alive/1 ready/1 serving of 2"))
         self.assertEqual("FAIL", v)
         self.assertTrue(any("end state not reached" in n for n in notes))
-        v, notes, _c = judge(plain_before, self._out(ir_settled=False, ir_detail="engine/1: Instance is not settled"))
+        v, notes, _c = judge(plain_before, self._out(ir_settled=False,
+                                                     ir_detail="engine/1: Updating with an operation open (Update: mid-operation)"))
         self.assertEqual("FAIL", v)
         self.assertTrue(any("mid-operation" in n for n in notes))
+        v, notes, _c = judge(plain_before, self._out(ir_settled=False,
+                                                     ir_detail="engine/1: Restarting with no operation open (not mid-operation: its pods do not serve)"))
+        self.assertEqual("FAIL", v, "the unpause must end with every row Ready")
+        self.assertTrue(any("left not serving, no operation open" in n for n in notes), notes)
+        self.assertFalse(any("left mid-operation" in n for n in notes), "the publication's Restarting row is not mid-operation")
         v, notes, _c = judge(plain_before, self._out(pause_left="true"))
         self.assertEqual("FAIL", v)
         self.assertTrue(any("annotation still reads" in n for n in notes))
@@ -13567,7 +13609,15 @@ class RowsSettledAfterRollTest(unittest.TestCase):
         self.assertIn("Instance indexes have not converged", why)
         busy = self._rolled()
         busy[0]["status"]["instanceStatuses"][1]["operation"] = {"type": "Surge"}
-        self.assertFalse(run._rolled_ir_settled(busy, {"engine": 2}, {"engine"})[0], "an open operation is not settled")
+        ok, why = run._rolled_ir_settled(busy, {"engine": 2}, {"engine"})
+        self.assertFalse(ok, "an open operation is not settled")
+        self.assertEqual("engine/2: Ready with an operation open (Surge: mid-operation)", why)
+        down = self._rolled()
+        down[0]["status"]["instanceStatuses"][1].update(phase="Restarting", servingPodCount=0)
+        ok, why = run._rolled_ir_settled(down, {"engine": 2}, {"engine"})
+        self.assertFalse(ok, "a roll must end with every row Ready")
+        self.assertEqual("engine/2: Restarting with no operation open (not mid-operation: its pods do not serve)", why,
+                         "the publication's Restarting row is named for what it is, not mid-operation")
         short = self._rolled()
         short[0]["status"]["instanceStatuses"].pop()
         self.assertFalse(run._rolled_ir_settled(short, {"engine": 2}, {"engine"})[0], "N rows are still required")
@@ -16963,7 +17013,49 @@ class BrokenOperationTest(unittest.TestCase):
             self.assertFalse(settled)
             self.assertIn("engine/3: Updating with an operation open", why, "the other rows still settle Ready with no operation")
         src = inspect.getsource(run._broken_scale)
-        self.assertIn("BROKEN_ROWS_SETTLE_S, waiting_rows)", src)
+        self.assertIn("waiting_rows, down_rows)", src)
+
+    def test_rows_left_down_settle_as_the_left_cells_expect(self):
+        """Left as the fault left it, the broken Instance's row reads down
+        with no operation open: Restarting, the publication's word for a
+        pod set that serves nothing. Every other row settles Ready with no
+        operation; an operation open on the broken row is mid-operation,
+        and a row claiming it whole contradicts the fault."""
+        def items(rows, replicas=5):
+            return [{"spec": {"component": "engine"},
+                     "status": {"replicas": replicas, "instanceStatuses": [dict(index=i, **r) for i, r in rows.items()]}}]
+        ready = {"phase": "Ready", "operation": None, "podCount": 1, "servingPodCount": 1}
+        down = {"phase": "Restarting", "operation": None, "podCount": 1, "servingPodCount": 0}
+        rows = {0: dict(down), 1: dict(ready), 2: dict(ready), 3: dict(ready), 4: dict(ready)}
+        want = {"engine": 5}
+        with mock.patch.object(run, "_fetch_initial_ir_items", lambda cid: items(rows)):
+            self.assertEqual((True, "settled"), run._broken_rows_settled("p999", want, {"engine"}, down={("engine", 0)}))
+            settled, why = run._broken_rows_settled("p999", want, {"engine"})
+            self.assertFalse(settled, "a row the case does not expect down is not settled")
+            self.assertEqual("engine/0: Restarting with no operation open (not mid-operation: its pods do not serve)", why)
+            self.assertEqual("a row was left not serving, no operation open", run._unsettled_label(why),
+                             "the publication's Restarting row is not mid-operation")
+        short = {"phase": "Ready", "operation": None, "podCount": 1, "servingPodCount": 0}
+        with mock.patch.object(run, "_fetch_initial_ir_items", lambda cid: items({**rows, 0: short})):
+            self.assertEqual((True, "settled"), run._broken_rows_settled("p999", want, {"engine"}, down={("engine", "0")}),
+                             "Ready with the serving count short says the same")
+        bad = [({"phase": "Restarting", "operation": {"type": "Restart"}}, "engine/0: Restarting with an operation open (Restart: mid-operation)"),
+               (dict(ready), "every pod serving, want the Instance down"),
+               ({"phase": "Pending", "operation": None, "podCount": 0}, "engine/0: Pending with no operation open, want Restarting"),
+               ({"phase": "Failed", "operation": {"type": "Restart"}}, "engine/0: Failed with an operation open (Restart: mid-operation)")]
+        for row, frag in bad:
+            with mock.patch.object(run, "_fetch_initial_ir_items", lambda cid, row=row: items({**rows, 0: row})):
+                settled, why = run._broken_rows_settled("p999", want, {"engine"}, down={("engine", "0")})
+                self.assertFalse(settled, (row, why))
+                self.assertIn(frag, why)
+        with mock.patch.object(run, "_fetch_initial_ir_items",
+                               lambda cid: items({**rows, 3: {"phase": "Updating", "operation": {"type": "Update"}}})):
+            settled, why = run._broken_rows_settled("p999", want, {"engine"}, down={("engine", "0")})
+            self.assertFalse(settled)
+            self.assertEqual("engine/3: Updating with an operation open (Update: mid-operation)", why)
+            self.assertEqual("a row was left mid-operation", run._unsettled_label(why))
+        src = inspect.getsource(run._broken_scale)
+        self.assertIn('down_rows = {(comp, inst)} if judge_fate and expect == "left" else set()', src)
 
     def test_the_broken_instances_fate_is_judged_as_the_header_states(self):
         f = {"crash_comp": "engine", "crash_inst": "0", "kind": "crashloop"}
@@ -18051,10 +18143,12 @@ class RuntimeEditBreakTest(unittest.TestCase):
         self.assertTrue(checks[-1].lstrip().startswith("ⓘ"))
 
     def test_rows_settled_gate(self):
-        checks = []
+        checks, notes = [], []
         self.assertEqual("PASS", run._rows_settled_checks(True, "", "PASS", [], checks))
-        self.assertEqual("FAIL", run._rows_settled_checks(False, "engine/2: Instance is not settled", "PASS", [], checks))
-        self.assertIn("left mid-operation", checks[-1])
+        busy = "engine/2: Updating with an operation open (Update: mid-operation)"
+        self.assertEqual("FAIL", run._rows_settled_checks(False, busy, "PASS", notes, checks))
+        self.assertIn(busy, checks[-1])
+        self.assertEqual([f"an Instance was left mid-operation after the roll ({busy})"], notes)
 
 
 class GeneratedFaultEditFamilyTest(unittest.TestCase):
@@ -19242,7 +19336,8 @@ class CrashOnceTest(unittest.TestCase):
             ({"serving": False}, "did not end Ready and serving"),
             ({"on_revision": False}, "not on the running revision"),
             ({"escalations": ["InstanceFailed: component=engine instance=1 x"]}, "escalated or held"),
-            ({"rows_settled": False, "rows_why": "engine/1: Restarting with an operation open"}, "left mid-operation"),
+            ({"rows_settled": False, "rows_why": "engine/1: Restarting with an operation open (Restart: mid-operation)"},
+             "Restart: mid-operation"),
             ({"new_hash": True}, "new revision appeared"),
             ({"repairs": [self.REPAIR]}, "restart policy None promises no repair"),
         ):
@@ -20588,8 +20683,9 @@ class BrokenScaleOnTheWindowTest(unittest.TestCase):
                     "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER, "state":
                         {"waiting": {"reason": run.CONFIGKEY_WAITING}} if waits else {"running": {}}}]}}
 
-        def settle(case_id, want, configured, budget_s, waiting=()):
+        def settle(case_id, want, configured, budget_s, waiting=(), down=()):
             settles.append(set(waiting))
+            self.assertEqual(set(), set(down), "a key kept away leaves no row down")
             return True, "settled"
         with mock.patch.multiple(run, _get_pod=key_pod, IDLE_HOLD_S=0):
             out = self._drive(hdr, ctx, lambda ctx, hdr: self._repair_opens(ctx, True), read_one,
@@ -21086,7 +21182,8 @@ class FixPushTest(unittest.TestCase):
                             ({"victim_serving_new": False}, "did not end on the new revision"),
                             ({"repairs_after_push": ["OMENative component=engine instance=3 restart triggered"]},
                              "repaired after the fix push"),
-                            ({"rows_settled": False, "rows_why": "engine/3 Restarting"}, "mid-operation"),
+                            ({"rows_settled": False, "rows_why": "engine/3: Restarting with an operation open (Restart: mid-operation)"},
+                             "left mid-operation"),
                             ({"holds": [("engine", "Budget", "x")]}, "hold is left behind")):
             notes = []
             self.assertEqual("FAIL", run._fix_push_checks(dict(f), False, self._out(**over), "PASS", notes, []), over)
