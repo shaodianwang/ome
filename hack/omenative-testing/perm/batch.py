@@ -4,7 +4,8 @@
 Defaults: cases = p01..p25 (the single-Component lifecycle set), conc = 8.
 Each case runs as its own `python3 run.py <case>` subprocess (own watcher),
 logs to results/logs/<case>.log, and writes its own results/<case>-<ts>.tsv.
-After all finish, prints a summary table from the latest TSV per case.
+After all finish, prints a summary table from the latest TSV per case and
+writes results/<RUN_TS>/verdicts.json, the same verdicts for machines.
 
 Examples:
   python3 batch.py                       # p01..p25 @ conc 8
@@ -212,6 +213,119 @@ def latest_tsv(case_id):
     # This run's TSVs live under results/<RUN_TS>/<feature>/<topo>/.
     files = glob.glob(str(HERE / "results" / RUN_TS / "**" / f"{case_id}-*.tsv"), recursive=True)
     return max(files, key=os.path.getmtime) if files else None
+
+
+def result_row(case_id):
+    """(path, verdict, note) from this run's newest result file of a case:
+    (None, "?", "") when there is none, and "?" for a file whose row has
+    no verdict column."""
+    path = latest_tsv(case_id)
+    if not path:
+        return None, "?", ""
+    with open(path) as fh:
+        lines = fh.read().splitlines()
+    cols = lines[1].split("\t") if len(lines) >= 2 else []
+    verdict = cols[16] if len(cols) > 16 else "?"
+    note = cols[17] if len(cols) > 17 else ""
+    return path, verdict, note
+
+
+def case_outcome(case_id, rc, secs):
+    """What one finished case left behind, read the way the summary, the
+    JUnit and the verdict file all read it: the verdict, a one-line reason,
+    run.py's exit status, the wall time and the result file. A nonzero exit
+    after a green verdict is PROCESS_EXIT_<rc>: the case was not validated."""
+    path, verdict, note = result_row(case_id)
+    if path is None:
+        note = "no result file"
+    elif verdict == "?":
+        note = "result file without a verdict"
+    if rc != 0 and is_green(verdict):
+        note = f"run.py exited {rc} after recording {verdict}" + (f": {note}" if note else "")
+        verdict = f"PROCESS_EXIT_{rc}"
+    return {"verdict": verdict, "reason": " ".join(str(note).split()), "exit": rc,
+            "seconds": round(secs, 1), "result": path}
+
+
+# The run's machine-readable record beside summary.txt: one object per case
+# and the lane the run was, so a reader never has to open the result archive
+# or scrape the log. CI uploads it on its own and the round record
+# (.buildkite/eval_verdicts.py) reads it; the format is named inside it.
+VERDICTS_FILE = "verdicts.json"
+VERDICTS_FORMAT = "ome-eval-job-verdicts/1"
+
+
+def verdict_word(verdict):
+    """The verdict's first word, which every XFAIL form shares."""
+    words = str(verdict or "").split()
+    return words[0] if words else "?"
+
+
+def harness_commit(env):
+    """The commit the harness ran from: CI's, else the checkout's, else None."""
+    commit = (env.get("BUILDKITE_COMMIT") or "").strip()
+    if commit:
+        return commit
+    try:
+        r = subprocess.run(["git", "-C", str(HERE), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (r.stdout.strip() or None) if r.returncode == 0 else None
+
+
+def job_verdicts(cases, outcomes, elapsed, env=None):
+    """The run's verdict document: one object per case, in the run's order,
+    with its verdict, one-line reason, run.py exit, seconds, the fault its
+    header injects, and its log and result file under the run directory
+    (result null when the harness never finished the case); then the lane
+    the run was, from the CI environment (null outside CI), and the count
+    of cases per verdict word."""
+    env = os.environ if env is None else env
+    scheduler = env.get("OME_EVAL_SCHEDULER", "")
+    run_dir = HERE / "results" / RUN_TS
+    rows = []
+    for case_id in cases:
+        feature, topo = case_category(case_id)
+        outcome = outcomes.get(case_id) or {"verdict": "?", "reason": "no result file",
+                                             "exit": None, "seconds": None, "result": None}
+        result = outcome.get("result")
+        rows.append({
+            "case": case_id,
+            "feature": feature,
+            "topology": topo,
+            "scheduler": scheduler,
+            "verdict": outcome["verdict"],
+            "reason": outcome["reason"],
+            "exit": outcome["exit"],
+            "seconds": outcome["seconds"],
+            "fault": case_header_fields(case_id).get("fault"),
+            "log": f"{feature}/{topo}/{case_id}.log",
+            "result": os.path.relpath(result, run_dir) if result else None,
+        })
+    counts = {}
+    for row in rows:
+        word = verdict_word(row["verdict"])
+        counts[word] = counts.get(word, 0) + 1
+    return {
+        "format": VERDICTS_FORMAT,
+        "build": env.get("BUILDKITE_BUILD_NUMBER") or None,
+        "job": env.get("BUILDKITE_JOB_ID") or None,
+        "step": env.get("BUILDKITE_STEP_KEY") or None,
+        "lane": env.get("OME_EVAL_LANE") or None,
+        "scheduler": scheduler,
+        "commit": harness_commit(env),
+        "run": RUN_TS,
+        "seconds": round(elapsed, 1),
+        "counts": dict(sorted(counts.items())),
+        "cases": rows,
+    }
+
+
+def write_verdicts(path, document):
+    out = pathlib.Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(document, indent=1) + "\n")
 
 
 def summarize(cases):
@@ -525,24 +639,18 @@ def main():
 
     t0 = time.time()
     results = {}
+    outcomes = {}
     streamed_failures = set()
     done = 0
 
     def record(case_id, rc, secs):
         nonlocal done
         done += 1
-        v = latest_tsv(case_id)
-        verdict = "?"
-        if v:
-            with open(v) as fh:
-                ls = fh.read().splitlines()
-            if len(ls) >= 2:
-                cols = ls[1].split("\t")
-                verdict = cols[16] if len(cols) > 16 else "?"
-        if rc != 0 and is_green(verdict):
-            verdict = f"PROCESS_EXIT_{rc}"
+        outcome = case_outcome(case_id, rc, secs)
+        verdict = outcome["verdict"]
         print(f"  [{done}/{len(cases)}] {case_id} done in {secs:.0f}s  rc={rc}  verdict={verdict}")
         results[case_id] = verdict
+        outcomes[case_id] = outcome
         if not is_green(verdict):
             print_failure_logs([case_id], heading=f"FAILED CASE LOG: {case_id}")
             streamed_failures.add(case_id)
@@ -555,6 +663,12 @@ def main():
 
     print(f"\n=== all {len(cases)} cases finished in {time.time() - t0:.0f}s ===")
     summarize(cases)
+    verdicts_path = HERE / "results" / RUN_TS / VERDICTS_FILE
+    try:
+        write_verdicts(verdicts_path, job_verdicts(cases, outcomes, time.time() - t0))
+        print(f"verdicts written: {verdicts_path}")
+    except Exception as exc:  # the record is an add-on: the verdicts above stand without it
+        print(f"WARNING: could not write {verdicts_path}: {exc}")
 
     # Safety sweep: delete any ISVC that lingered (run.py deletes on its own
     # path, but a killed subprocess could leave one behind).

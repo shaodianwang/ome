@@ -11,6 +11,7 @@ state: cleaned logs and downloads go under
   classify   failed jobs' logs matched against the known failure signatures
   log        one job's log with ANSI and timestamp escapes stripped
   artifacts  list or download a job's artifacts
+  verdicts   the eval lanes' per-case verdicts of a build from their verdict files
   retry      retry one failed job (newest attempt only; needs write_builds)
   wait       poll until the build is terminal; prints DONE: <state>
 
@@ -284,7 +285,7 @@ SIGNATURES = [
     (r"\[FAIL(ED)?\]|Summarizing \d+ Failures?", None,
      "code/ginkgo-spec", "reproduce the named spec (envtest: go test ./tests/integration/...; KIND: GINKGO_FOCUS='<It text>' make test-kind under a throwaway KUBECONFIG); never retry a red spec"),
     (r"NON-PASS:", None,
-     "code/eval-case", "read the FAILED CASE LOGS section; the job's results archive artifact holds per-case logs and the junit file"),
+     "code/eval-case", "verdicts <build> --job <key> lists the cases from the lane's verdict file; the FAILED CASE LOGS section and the results archive artifact hold the per-case logs"),
     (r"average coverage|coverage threshold|below the .*threshold", "test",
      "code/coverage", "the merged average must stay at or above 48%; add tests (make coverage prints the number)"),
     (r"\S+\.go:\d+:\d+: .+ \([a-z0-9]+\)$", "lint",
@@ -421,6 +422,20 @@ def cmd_log(args) -> None:
         print(line)
 
 
+def download_artifact(artifact: dict) -> bytes:
+    """The artifact's bytes: the API answers with a redirect to storage,
+    which is fetched without the bearer header."""
+    st, body, headers = http("GET", artifact["download_url"], accept="*/*", follow_redirects=False)
+    if st in (301, 302, 303, 307, 308):
+        location = headers.get("Location") or headers.get("location")
+        request = urllib.request.Request(location, headers={"User-Agent": "ome-fix-ci/1"})
+        with urllib.request.urlopen(request, timeout=300) as response:
+            return response.read()
+    if st >= 400:
+        die(f"download {artifact.get('path')} -> HTTP {st}")
+    return body
+
+
 def cmd_artifacts(args) -> None:
     build = fetch_build(args.build)
     job = resolve_job(build, args.job)
@@ -435,17 +450,175 @@ def cmd_artifacts(args) -> None:
         print(f"{a.get('path')}  {a.get('file_size')} bytes  state={a.get('state')}")
         if args.download:
             dest = Path(args.download) / a["path"]
-            st, body, headers = http("GET", a["download_url"], accept="*/*", follow_redirects=False)
-            if st in (301, 302, 303, 307, 308):
-                location = headers.get("Location") or headers.get("location")
-                request = urllib.request.Request(location, headers={"User-Agent": "ome-fix-ci/1"})
-                with urllib.request.urlopen(request, timeout=300) as response:
-                    body = response.read()
-            elif st >= 400:
-                die(f"download {a.get('path')} -> HTTP {st}")
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(body)
+            dest.write_bytes(download_artifact(a))
             print(f"  -> {dest}")
+
+
+# --- eval verdict files ----------------------------------------------------------
+
+# Every eval lane job uploads, beside its result archive, the harness's own
+# record of the job: a JSON object with the lane ("step", "lane",
+# "scheduler", "run", "seconds", "counts", ...) and "cases", one object per
+# case with "case", "feature", "topology", "verdict", "reason", "exit",
+# "seconds", "fault", "log" (the member <run>/<log> of the archive) and
+# "result" (null when the harness never finished the case).
+# .buildkite/eval_verdicts.py defines the format; this is a reader of it.
+VERDICTS_SUFFIX = ".verdicts.json"
+VERDICTS_FORMAT = "ome-eval-job-verdicts/1"
+EVAL_STEP_PREFIX = "omenative-e2e-"
+# Verdict words that need nobody's attention: a pass, parked debt, a case
+# whose fault apparatus the cluster lacks.
+GREEN_WORDS = {"PASS", "XFAIL", "SKIP"}
+
+
+def build_artifacts(number) -> list[dict]:
+    """Every artifact of the build, across pages."""
+    out: list[dict] = []
+    page = 1
+    while True:
+        batch = get_json(f"{api_root()}/builds/{number}/artifacts?per_page=100&page={page}")
+        if not isinstance(batch, list) or not batch:
+            return out
+        out.extend(batch)
+        if len(batch) < 100:
+            return out
+        page += 1
+
+
+def verdict_word(verdict) -> str:
+    """The verdict's first word, which every XFAIL form shares."""
+    words = str(verdict or "").split()
+    return words[0] if words else "?"
+
+
+def parse_verdicts(text: str) -> dict:
+    """One lane's verdict document; ValueError when the text is not one."""
+    try:
+        document = json.loads(text)
+    except ValueError as err:
+        raise ValueError(f"not JSON: {err}") from None
+    if not isinstance(document, dict) or document.get("format") != VERDICTS_FORMAT:
+        raise ValueError(f"not a {VERDICTS_FORMAT} document")
+    if not isinstance(document.get("cases"), list):
+        raise ValueError("cases is not a list")
+    return document
+
+
+def tally_verdicts(documents: list[dict]) -> dict:
+    """Cases per verdict word over every document, and per lane, in the
+    documents' order, its counts and the cases that are not green."""
+    counts: dict[str, int] = {}
+    lanes = []
+    for document in documents:
+        lane_counts: dict[str, int] = {}
+        red = []
+        for row in document["cases"]:
+            row = row if isinstance(row, dict) else {"case": "?", "verdict": "?"}
+            word = verdict_word(row.get("verdict"))
+            counts[word] = counts.get(word, 0) + 1
+            lane_counts[word] = lane_counts.get(word, 0) + 1
+            if word not in GREEN_WORDS:
+                red.append(row)
+        lanes.append({
+            "step": document.get("step"),
+            "lane": document.get("lane"),
+            "scheduler": document.get("scheduler"),
+            "run": document.get("run"),
+            "seconds": document.get("seconds"),
+            "cases": len(document["cases"]),
+            "counts": dict(sorted(lane_counts.items())),
+            "red": red,
+        })
+    return {"cases": sum(counts.values()), "counts": dict(sorted(counts.items())), "lanes": lanes}
+
+
+def _counts_text(counts: dict[str, int]) -> str:
+    return ", ".join(f"{word} {n}" for word, n in counts.items()) or "no cases"
+
+
+def format_tally(build, tally: dict, missing: list[dict], show_all: bool = False) -> list[str]:
+    """The tally as lines: the build's totals; every lane with a case that is
+    not green (every lane with show_all) and those cases; then the eval jobs
+    that uploaded no verdict file."""
+    lines = [
+        f"build {build}: {tally['cases']} cases in {len(tally['lanes'])} lanes with a verdict file: "
+        f"{_counts_text(tally['counts'])}"
+    ]
+    for lane in tally["lanes"]:
+        if not lane["red"] and not show_all:
+            continue
+        name = lane["step"] or lane["lane"] or "?"
+        lines.append(f"- {name}: {lane['cases']} cases, {_counts_text(lane['counts'])}  (case logs under {lane['run']}/ in the results archive)")
+        for row in lane["red"]:
+            seconds = row.get("seconds")
+            fault = f"  fault={row['fault']}" if row.get("fault") else ""
+            lines.append(
+                f"    {str(row.get('case') or '?'):<6} {str(row.get('verdict') or '?'):<14} "
+                f"{(f'{seconds:.0f}s' if isinstance(seconds, (int, float)) else '-'):>6}{fault}  {row.get('reason') or ''}".rstrip()
+            )
+            lines.append(f"           log {row.get('log') or '?'}")
+    for job in missing:
+        lines.append(
+            f"- {job_name(job)}: no verdict file (state={job.get('state')} exit={job.get('exit_status')}): "
+            "the lane stopped before its summary; read its log"
+        )
+    return lines
+
+
+def cmd_verdicts(args) -> None:
+    build = fetch_build(args.build)
+    jobs = {j["id"]: j for j in latest_attempts(build)}
+    if args.job:
+        job = resolve_job(build, args.job)
+        jobs = {job["id"]: job}
+    artifacts = [
+        a for a in build_artifacts(args.build)
+        if str(a.get("filename") or "").endswith(VERDICTS_SUFFIX) and a.get("job_id") in jobs
+    ]
+    dest_dir = Path(args.download) if args.download else scratch_dir() / f"b{args.build}-verdicts"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    documents = []
+    with_file = set()
+    for a in sorted(artifacts, key=lambda a: a.get("path") or ""):
+        body = download_artifact(a)
+        (dest_dir / a["filename"]).write_bytes(body)
+        try:
+            document = parse_verdicts(body.decode("utf-8", "replace"))
+        except ValueError as err:
+            warn(f"{a.get('path')}: {err}")
+            continue
+        job = jobs[a["job_id"]]
+        if not document.get("step"):
+            document["step"] = job.get("step_key")
+        document["job_web_url"] = job.get("web_url")
+        documents.append(document)
+        with_file.add(a["job_id"])
+    # The "-skipped" steps only say which cases a scheduler twin left out.
+    missing = sorted(
+        (
+            j for jid, j in jobs.items()
+            if jid not in with_file
+            and (j.get("step_key") or "").startswith(EVAL_STEP_PREFIX)
+            and not (j.get("step_key") or "").endswith("-skipped")
+        ),
+        key=job_name,
+    )
+    tally = tally_verdicts(documents)
+    if args.json:
+        print(json.dumps({
+            "build": build.get("number"),
+            **tally,
+            "without_file": [
+                {"key": job_name(j), "id": j.get("id"), "state": j.get("state"), "exit_status": j.get("exit_status"), "web_url": j.get("web_url")}
+                for j in missing
+            ],
+            "dir": str(dest_dir),
+        }, indent=1))
+        return
+    for line in format_tally(build.get("number"), tally, missing, args.all):
+        print(line)
+    print(f"# {len(documents)} verdict file(s) saved under {dest_dir}")
 
 
 def cmd_retry(args) -> None:
@@ -519,6 +692,14 @@ def main() -> None:
     p.add_argument("job")
     p.add_argument("--download", metavar="DIR")
     p.set_defaults(func=cmd_artifacts)
+
+    p = sub.add_parser("verdicts", help="per-case verdicts of a build's eval lanes from their verdict files")
+    p.add_argument("build")
+    p.add_argument("--job", help="one lane: step key or job id prefix (default: every newest eval job)")
+    p.add_argument("--download", metavar="DIR", help="where to save the files (default: scratch)")
+    p.add_argument("--all", action="store_true", help="list every lane, not only those with a case that is not green")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_verdicts)
 
     p = sub.add_parser("retry", help="retry one failed job (needs write_builds)")
     p.add_argument("build")

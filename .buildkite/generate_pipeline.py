@@ -177,8 +177,9 @@ def _load_sibling(name: str):
 
 
 # The round's verdict file: eval_verdicts.py defines its columns, its name,
-# the lane record the runner writes and the meta-data that marks a recorded
-# round; the full round's recording step and the targeted lookup use these.
+# the lane record and the per-job verdict file the runner uploads, and the
+# meta-data that marks a recorded round; the full round's recording step and
+# the targeted lookup use these.
 eval_verdicts = _load_sibling("eval_verdicts")
 # The step of a full round that records its verdicts, the last top-level
 # step before the release marker.
@@ -3101,11 +3102,11 @@ def _upload_batches_step(uploads: int, jobs: int) -> str:
 
 def _eval_verdicts_step(depends_on: list[str]) -> str:
     """Record the full round once every eval group has finished, passed or
-    not: one verdict per (case, scheduler) lane from the lanes' result
-    archives, attached as the artifact targeted builds read, and the
-    meta-data that marks the build as a recorded round. Soft: a round that
-    cannot be recorded leaves the marker alone, and targeted builds keep
-    reading the newest round that was."""
+    not: one verdict per (case, scheduler) lane from the lanes' verdict
+    files (the archive of a lane without one), attached as the artifact
+    targeted builds read, and the meta-data that marks the build as a
+    recorded round. Soft: a round that cannot be recorded leaves the marker
+    alone, and targeted builds keep reading the newest round that was."""
     if not depends_on:
         raise RuntimeError("the verdict record needs the eval groups it reads")
     deps = "\n".join(f'              - "{key}"' for key in depends_on)
@@ -3120,6 +3121,7 @@ def _eval_verdicts_step(depends_on: list[str]) -> str:
             soft_fail: true
             env:
               OME_EVAL_RESULTS_DIR: "{eval_verdicts.RESULTS_DIR}"
+              OME_EVAL_JOB_VERDICTS_SUFFIX: "{eval_verdicts.JOB_VERDICTS_SUFFIX}"
               OME_EVAL_VERDICTS_FILE: "{eval_verdicts.VERDICTS_FILE}"
               OME_EVAL_ROUND_META_KEY: "{eval_verdicts.ROUND_META_KEY}"
               OME_EVAL_ROUND_META_VALUE: "{eval_verdicts.ROUND_META_VALUE}"

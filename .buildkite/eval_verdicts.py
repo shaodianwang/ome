@@ -1,44 +1,62 @@
 #!/usr/bin/env python3
-"""Record one eval round's verdicts from the lanes' result archives.
+"""Record one eval round's verdicts from the lanes' verdict files and archives.
 
-Every eval lane job uploads ``<results dir>/<build>-<job>.tgz``, an archive
-of the directory the harness wrote for that job: ``lane.tsv`` (the lane the
-job ran: feature, topology, scheduler, force-delete twin or not), and one
+Every eval lane job uploads two artifacts under ``<results dir>``.
+``<build>-<job>.verdicts.json`` is the harness's own record of the job: one
+object per case with its verdict, and the lane the job ran (feature,
+topology, scheduler). ``<build>-<job>.tgz`` is an archive of the directory
+the harness wrote for that job: ``lane.tsv`` (the lane: feature, topology,
+scheduler, force-delete twin or not), one
 ``<feature>/<topology>/<case>-<epoch>.tsv`` per case the harness finished,
-whose second line is the case's result row with its ``verdict`` column.
+whose second line is the case's result row with its ``verdict`` column, and
+the diagnostics. The verdict file is a few kilobytes and the archive is not,
+so a job is read from its verdict file when it has one and from its archive
+only when it has none (the harness stopped before its summary).
 
-This script reads every archive of the build and writes ``eval-verdicts.tsv``
-with the columns build, commit, feature, topology, scheduler, case, verdict:
-one row per (case, scheduler) the round ran. A lane whose archive is missing
-yields no row, a case the harness never finished yields no row, and an
-archive or result file that cannot be read is reported and skipped. The
-targeted eval mode of ``generate_pipeline.py`` reads this file through the
-Buildkite API, so the format is defined here and nowhere else.
+This script reads them and writes ``eval-verdicts.tsv`` with the columns
+build, commit, feature, topology, scheduler, case, verdict: one row per
+(case, scheduler) the round ran. A lane with neither artifact yields no row,
+a case the harness never finished yields no row, and a file, archive or
+result that cannot be read is reported and skipped. The targeted eval mode
+of ``generate_pipeline.py`` reads this file through the Buildkite API, so the
+format is defined here and nowhere else.
 
 Standard library only; Python 3.9.
 
 Usage: eval_verdicts.py [--archives DIR] [--out FILE] [--build N] [--commit SHA]
 
-Exit status: 0 when a file was written, 1 when the build carries no result
-archive at all (nothing to record, so the round must not be marked as
-recorded), 2 on a usage error.
+Exit status: 0 when a file was written, 1 when the build carries no verdict
+file and no result archive at all (nothing to record, so the round must not
+be marked as recorded), 2 on a usage error.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
 import tarfile
 from pathlib import Path
-from typing import Callable, Iterable, NamedTuple
+from typing import Callable, Iterable, NamedTuple, Tuple
 
 # What the eval runner uploads per lane job, relative to the repository.
 RESULTS_DIR = "hack/omenative-testing/perm/results"
 # The record the runner writes into the job's result directory.
 LANE_FILE = "lane.tsv"
 LANE_COLUMNS = ("feature", "topology", "scheduler", "force_delete")
+# The harness's record of one job (batch.py writes it as verdicts.json in the
+# run directory; the runner uploads it as <build>-<job>.verdicts.json): a
+# JSON object whose "format" names this format, with the lane ("build",
+# "job", "step", "lane", "scheduler", "commit", "run", "seconds", "counts")
+# and "cases", one object per case: "case", "feature", "topology",
+# "scheduler", "verdict", "reason", "exit", "seconds", "fault", "log" and
+# "result", the case's result file under the run directory, null when the
+# harness never finished the case.
+JOB_VERDICTS_FILE = "verdicts.json"
+JOB_VERDICTS_SUFFIX = "." + JOB_VERDICTS_FILE
+JOB_VERDICTS_FORMAT = "ome-eval-job-verdicts/1"
 # The round's verdict file, uploaded by the recording step as an artifact.
 VERDICTS_FILE = "eval-verdicts.tsv"
 COLUMNS = ("build", "commit", "feature", "topology", "scheduler", "case", "verdict")
@@ -57,6 +75,7 @@ SKIP = "SKIP"
 XFAIL = "XFAIL"
 # A case result file: <case>-<epoch>.tsv, the case id as the harness names it.
 RESULT_FILE = re.compile(r"^(?P<case>p[0-9]+)-(?P<stamp>[0-9]+)\.tsv$")
+CASE_ID = re.compile(r"^p[0-9]+$")
 
 
 def is_set_aside(verdict: str) -> bool:
@@ -74,6 +93,10 @@ class Verdict(NamedTuple):
     scheduler: str
     case: str
     verdict: str
+
+
+# What one lane job contributes before the build and commit are attached.
+Row = Tuple[str, str, str, str, str]  # (feature, topology, scheduler, case, verdict)
 
 
 def _table(text: str, required: Iterable[str]) -> tuple[dict[str, int], list[list[str]]]:
@@ -164,17 +187,88 @@ def read_archive(path: Path, warn: Callable[[str], None]) -> tuple[tuple[str, st
     return lane, {case: verdict for case, (_, verdict) in newest.items()}
 
 
-def collect(archives: Iterable[Path], build: str, commit: str, warn: Callable[[str], None]) -> list[Verdict]:
-    """Every verdict of the round, one per (case, scheduler), in a stable
-    order; an archive that cannot be read is reported and yields nothing."""
-    rows: dict[tuple[str, str], Verdict] = {}
-    for path in sorted(archives):
+def _job_case(item, lane_scheduler) -> list[Row]:
+    """The row of one case object of a verdict file: none when the harness
+    never finished the case (result null)."""
+    if not isinstance(item, dict):
+        raise ValueError("not an object")
+    case = item.get("case")
+    if not isinstance(case, str) or not CASE_ID.match(case):
+        raise ValueError(f"case {case!r} is not a case id")
+    if item.get("result") is None:
+        return []
+    verdict = item.get("verdict")
+    if not isinstance(verdict, str) or not verdict.strip():
+        raise ValueError(f"{case}: empty verdict")
+    feature, topology = item.get("feature"), item.get("topology")
+    for name, value in (("feature", feature), ("topology", topology)):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{case}: empty {name}")
+    scheduler = item.get("scheduler", lane_scheduler)
+    if scheduler is None:
+        scheduler = ""
+    if not isinstance(scheduler, str):
+        raise ValueError(f"{case}: scheduler is not a string")
+    return [(feature.strip(), topology.strip(), scheduler.strip(), case, " ".join(verdict.split()))]
+
+
+def read_job_verdicts(text: str, warn: Callable[[str], None], source: str = JOB_VERDICTS_FILE) -> list[Row]:
+    """The rows of one job's verdict file: one per case the harness finished,
+    under the lane's scheduler unless the case names its own. A case object
+    that does not fit the format is reported through `warn` and left out; a
+    document that is not a verdict file raises ValueError."""
+    try:
+        document = json.loads(text)
+    except ValueError as error:
+        raise ValueError(f"not JSON: {error}") from None
+    if not isinstance(document, dict):
+        raise ValueError("not a JSON object")
+    if document.get("format") != JOB_VERDICTS_FORMAT:
+        raise ValueError(f"format {document.get('format')!r}, not {JOB_VERDICTS_FORMAT!r}")
+    cases = document.get("cases")
+    if not isinstance(cases, list):
+        raise ValueError("cases is not a list")
+    rows: list[Row] = []
+    for index, item in enumerate(cases):
         try:
-            (feature, topology, scheduler), verdicts = read_archive(path, warn)
+            rows.extend(_job_case(item, document.get("scheduler")))
+        except ValueError as error:
+            warn(f"{source}: cases[{index}]: {error}")
+    return rows
+
+
+def is_job_file(path: Path) -> bool:
+    return path.name.endswith(JOB_VERDICTS_SUFFIX)
+
+
+def job_of(path: Path) -> str:
+    """The <build>-<job> stem the two artifacts of one lane job share."""
+    if is_job_file(path):
+        return path.name[: -len(JOB_VERDICTS_SUFFIX)]
+    return path.stem
+
+
+def collect(sources: Iterable[Path], build: str, commit: str, warn: Callable[[str], None]) -> list[Verdict]:
+    """Every verdict of the round, one per (case, scheduler), in a stable
+    order: from each job's verdict file, and from the archive of a job that
+    has no verdict file. A file or archive that cannot be read is reported
+    and yields nothing."""
+    paths = sorted(Path(source) for source in sources)
+    recorded = {job_of(path) for path in paths if is_job_file(path)}
+    rows: dict[tuple[str, str], Verdict] = {}
+    for path in paths:
+        try:
+            if is_job_file(path):
+                found = read_job_verdicts(path.read_text(encoding="utf-8"), warn, path.name)
+            elif job_of(path) in recorded:
+                continue
+            else:
+                (feature, topology, scheduler), verdicts = read_archive(path, warn)
+                found = [(feature, topology, scheduler, case, verdict) for case, verdict in verdicts.items()]
         except (OSError, tarfile.TarError, ValueError, UnicodeDecodeError) as error:
             warn(f"{path.name}: skipped: {error}")
             continue
-        for case, verdict in verdicts.items():
+        for feature, topology, scheduler, case, verdict in found:
             key = (case, scheduler)
             if key in rows:
                 warn(f"{path.name}: {case} under {scheduler or 'the default scheduler'} was already recorded; keeping the first")
@@ -184,28 +278,32 @@ def collect(archives: Iterable[Path], build: str, commit: str, warn: Callable[[s
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Record one eval round's verdicts from the lanes' result archives.")
-    parser.add_argument("--archives", default=RESULTS_DIR, metavar="DIR", help=f"where the lane archives were downloaded (default {RESULTS_DIR})")
+    parser = argparse.ArgumentParser(description="Record one eval round's verdicts from the lanes' verdict files and result archives.")
+    parser.add_argument("--archives", default=RESULTS_DIR, metavar="DIR", help=f"where the lanes' verdict files and result archives were downloaded (default {RESULTS_DIR})")
     parser.add_argument("--out", default=VERDICTS_FILE, metavar="FILE", help=f"the verdict file to write (default {VERDICTS_FILE})")
     parser.add_argument("--build", default=os.environ.get("BUILDKITE_BUILD_NUMBER", ""), help="the build number (default BUILDKITE_BUILD_NUMBER)")
     parser.add_argument("--commit", default=os.environ.get("BUILDKITE_COMMIT", ""), help="the commit (default BUILDKITE_COMMIT)")
     args = parser.parse_args(argv)
     if not args.build or not args.commit:
         parser.error("--build and --commit are required when BUILDKITE_BUILD_NUMBER and BUILDKITE_COMMIT are unset")
-    archives = sorted(Path(args.archives).glob("*.tgz"))
-    if not archives:
-        sys.stderr.write(f"no result archive under {args.archives}: nothing to record\n")
+    directory = Path(args.archives)
+    files = sorted(directory.glob("*" + JOB_VERDICTS_SUFFIX))
+    archives = sorted(directory.glob("*.tgz"))
+    if not files and not archives:
+        sys.stderr.write(f"no verdict file or result archive under {args.archives}: nothing to record\n")
         return 1
 
     def warn(message: str) -> None:
         sys.stderr.write("warning: " + message + "\n")
 
-    rows = collect(archives, args.build, args.commit, warn)
+    rows = collect(files + archives, args.build, args.commit, warn)
     Path(args.out).write_text(write_verdicts(rows))
+    recorded = {job_of(path) for path in files}
+    fallbacks = sum(1 for path in archives if job_of(path) not in recorded)
     passed = sum(1 for row in rows if row.verdict == PASS)
     aside = sum(1 for row in rows if is_set_aside(row.verdict))
     print(
-        f"{args.out}: {len(rows)} verdicts from {len(archives)} archives, "
+        f"{args.out}: {len(rows)} verdicts from {len(files)} verdict files and {fallbacks} archives, "
         f"{passed} {PASS}, {aside} skipped or parked, {len(rows) - passed - aside} other"
     )
     return 0

@@ -257,14 +257,18 @@ is the one place a mode chooses cases; the emission packs and shards whatever
 it returns, so `targeted` can read a recorded round without touching the lanes.
 
 A `full` round records itself: the soft-failing step `eval-verdicts`, after
-every eval group, downloads the lanes' result archives
-(`hack/omenative-testing/perm/results/<build>-<job>.tgz`, each carrying the
-job's `lane.tsv` and the harness's per-case result files), writes
-`eval-verdicts.tsv` with the columns build, commit, feature, topology,
-scheduler, case, verdict (one row per case and scheduler the round ran; a
-lane whose archive is missing yields no row), attaches it to the build and
-sets the build meta-data `ome:eval-round=full`. `.buildkite/eval_verdicts.py`
-defines the format; `record_eval_verdicts.sh` is the step's command.
+every eval group, downloads the lanes' verdict files
+(`hack/omenative-testing/perm/results/<build>-<job>.verdicts.json`, the
+harness's own record of the job: one object per case with its verdict, reason,
+seconds, fault and log path, and the lane the job ran) and, for a lane that
+uploaded none because it stopped before its summary, its result archive
+(`<build>-<job>.tgz`, carrying the job's `lane.tsv`, the harness's per-case
+result files and the diagnostics), writes `eval-verdicts.tsv` with the
+columns build, commit, feature, topology, scheduler, case, verdict (one row
+per case and scheduler the round ran; a lane with neither artifact yields no
+row), attaches it to the build and sets the build meta-data
+`ome:eval-round=full`. `.buildkite/eval_verdicts.py` defines both formats;
+`record_eval_verdicts.sh` is the step's command.
 
 A `targeted` build reads that record through the Buildkite REST API when
 `OME_EVAL_RESULTS_TOKEN` holds a read-only API token (`read_builds`,

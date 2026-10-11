@@ -122,6 +122,6 @@ is a dependency state, not a failure of their own.
 |---|---|---|
 | `package-kind-eval-image` | `GKE_EVAL_ENABLED` | after the manager, agent, canary-metrics and kind-ci mirrors |
 | `upload-eval-lanes` | `GKE_EVAL_ENABLED` | last step of the entrypoint's upload; uploads the eval groups and then the release marker as further documents |
-| groups `omenative-e2e-kind-gke-<i>-of-<n>` → `omenative-e2e-<feature>-<topology>[-i-of-n]` | `GKE_EVAL_ENABLED` | deployed OMENative eval over the case YAMLs in `hack/omenative-testing/perm/isvcs/`, one group per upload (per scheduler, cut between families when a scheduler's jobs exceed the limit); 180 minute timeout; results archive uploaded as an artifact |
+| groups `omenative-e2e-kind-gke-<i>-of-<n>` → `omenative-e2e-<feature>-<topology>[-i-of-n]` | `GKE_EVAL_ENABLED` | deployed OMENative eval over the case YAMLs in `hack/omenative-testing/perm/isvcs/`, one group per upload (per scheduler, cut between families when a scheduler's jobs exceed the limit); 180 minute timeout; the lane's verdict file and its results archive uploaded as artifacts |
 | group `integration-test-kind-upgrade` → `kind-gke-upgrade-identity` | `GKE_UPGRADE_ENABLED` and `GKE_KIND_ENABLED` | operator-upgrade identity gate; skips loudly when the previous images were not baked |
 | `chart-ome-release` | `build.branch == "main"` | uploaded last; depends on every other top-level step and group by key (a soft-failing step completes before it without blocking it): the release marker for the control-plane charts and images |

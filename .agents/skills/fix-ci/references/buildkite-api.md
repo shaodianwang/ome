@@ -67,7 +67,7 @@ rollup whose `target_url` is `https://buildkite.com/msl/ome/builds/<n>`.
 | Step | Artifact |
 |---|---|
 | `test` | `.buildkite/artifacts/omenative-kind-test.tgz`, `multicluster-kind-test.tgz`, `omenative-upgrade-kind-test.tgz`, `kind` (the exact-commit bundles the GKE lanes run) |
-| `omenative-e2e-*` | the results archive (`<results-root>.tgz`) with per-case logs, summary and junit |
+| `omenative-e2e-*` | the verdict file (`<results-root>.verdicts.json`: one object per case with verdict, reason, seconds, fault and log path, plus the lane; `verdicts <build>` tallies them) and the results archive (`<results-root>.tgz`) with per-case logs, summary and junit |
 | `chart-<chart>` | `.buildkite/artifacts/chart-versions/<chart>` |
 
 ## Agent-pod evidence (operators only)

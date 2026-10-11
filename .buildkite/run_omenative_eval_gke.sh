@@ -95,6 +95,16 @@ finish() {
   collect_diagnostics
   kind delete cluster --name "$cluster" >/dev/null 2>&1 || true
   if command -v buildkite-agent >/dev/null 2>&1; then
+    # The job's verdict file travels on its own beside the archive, so the
+    # round record and a reader of one lane never open the archive for it.
+    job_verdicts="${results_root}/verdicts.json"
+    if [ -s "$job_verdicts" ]; then
+      cp "$job_verdicts" "${results_root}.verdicts.json"
+      if ! buildkite-agent artifact upload "${results_root}.verdicts.json"; then
+        echo "WARNING: verdict file upload failed; the round record falls back to the result archive" >&2
+      fi
+      rm -f -- "${results_root}.verdicts.json"
+    fi
     results_archive="${results_root}.tgz"
     if tar -C "$(dirname "$results_root")" -czf "$results_archive" "$(basename "$results_root")"; then
       if ! buildkite-agent artifact upload "$results_archive"; then
@@ -198,6 +208,8 @@ export OME_EVAL_KIND=1
 export OME_TEST_ALLOW_CTRL_RESTART=1
 export OME_EVAL_METRICS_IMAGE=canary-metrics:kind-local
 export OME_EVAL_SCHEDULER="$scheduler"
+# The lane's name goes into the job's verdict file beside the build and job.
+export OME_EVAL_LANE="$lane"
 export OME_KIND_OFFLINE=true
 export OME_IMAGE_TAG="$short_sha"
 export OME_RUN_TS="$run_stamp"

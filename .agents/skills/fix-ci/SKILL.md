@@ -44,6 +44,7 @@ python3 $S status <build>                # every job: key, state, exit, attempts
 python3 $S classify <build>              # failed jobs' logs matched against known signatures
 python3 $S log <build> <job|key> --grep 'FAIL|Error|FATAL'   # cleaned log, saved to scratch
 python3 $S artifacts <build> <job|key> [--download DIR]
+python3 $S verdicts <build> [--job <key>] [--all] [--json]   # eval lanes' per-case verdicts from their verdict files
 python3 $S retry <build> <job|key>       # PUT .../jobs/<id>/retry, newest attempt only
 python3 $S wait <build>                  # poll until the build is terminal
 ```

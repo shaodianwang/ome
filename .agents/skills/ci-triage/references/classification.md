@@ -16,7 +16,8 @@ registry credentials that a log may echo.
   lane before any Go test runs.
 - Ginkgo lanes end with `Summarizing N Failures` and one `[FAIL]` line per
   spec naming the file and line. `omenative-e2e-*` ends with a `NON-PASS:`
-  list; per-case logs are in the job's results archive artifact.
+  list; `ci_build.py verdicts <build>` tallies every lane from the verdict
+  file artifacts, and per-case logs are in the job's results archive artifact.
 - The first real error is rarely the last line: Buildkite appends the
   command's exit status and, for the docker plugin, container teardown.
 
@@ -49,7 +50,7 @@ First match wins; step-key filters are in brackets. The classes are the ones
 | code/helm [`helm-lint`] | `[ERROR]`, `N chart(s) failed` | chart template or values error | `make helm-lint` |
 | code/rust [`muse-rust-checks`] | `error[E...]`, `clippy::` | console build or lint | `make -C muse ci-rust` |
 | code/dockerfile [`build-*`] | `failed to solve:`, `ERROR: failed to build` | Dockerfile or its inputs | read the failing `RUN` |
-| code/eval-case [`omenative-e2e-*`] | `NON-PASS:` | an eval case's expectation failed | read the case log in the results archive |
+| code/eval-case [`omenative-e2e-*`] | `NON-PASS:` | an eval case's expectation failed | `verdicts <build> --job <key>` names the cases and reasons; the case log is in the results archive |
 | timeout/go-test | `panic: test timed out after`, `Test killed with quit` | hung test past `-test.timeout` | read the goroutine dump for the blocked wait |
 | timeout/spec | a spec's `Eventually` past `kindLongTimeout`, job `timed_out` | slow convergence or starvation | code unless the whole lane was starved (see queue-starved) |
 | advisory | `soft_failed: true` | `perf-test`, `kind-gke-mc-*`, `kind-gke-quarantine` | note it; never blocks merge |

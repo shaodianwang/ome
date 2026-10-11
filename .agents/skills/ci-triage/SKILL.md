@@ -58,6 +58,7 @@ python3 $F status <build>           # every job: key, state, exit, attempts, sta
 python3 $F classify <build>         # failed jobs' cleaned logs matched against known signatures
 python3 $F log <build> <key> --grep 'FAIL|Error|FATAL|panic' --context 20
 python3 $F artifacts <build> <key> [--download DIR]
+python3 $F verdicts <build> [--job <key>]   # every eval lane's per-case verdicts from the verdict files
 python3 $F retry <build> <key>      # PUT .../jobs/<id>/retry, newest attempt only
 ```
 
@@ -121,8 +122,10 @@ Find the FIRST real error, not the last line. Buildkite groups a lane's stages
 under `--- name ---` headers; the failing stage is the last header before the
 error. For `test`, the generator stage runs first and its failure aborts the
 lane. For KIND children read the Ginkgo summary (`Summarizing N Failures`) and
-the `[FAIL]` line naming the spec file. For `omenative-e2e-*` read the
-`NON-PASS:` list and download the results archive with `artifacts --download`.
+the `[FAIL]` line naming the spec file. For `omenative-e2e-*` run `verdicts
+<build>` (every lane's cases, verdicts and reasons from the verdict files, no
+log scraping) or read the `NON-PASS:` list, and download the results archive
+with `artifacts --download` when you need a case log.
 
 ## Step 3: classify
 

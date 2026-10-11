@@ -131,6 +131,8 @@ perm/
         ├── pNN-<ts>.tsv   — one verdict row per case
         └── pNN.log        — full per-case log
     └── <RUN_TS>/summary.txt — the batch summary table for that run
+    └── <RUN_TS>/verdicts.json — the same verdicts for machines: one object per case
+                                 (verdict, reason, seconds, fault, log) and the lane
 ```
 
 ## The runtime — why the startup sleep matters
@@ -306,6 +308,12 @@ python3 batch.py --shard 0/4 --junit results/junit-0.xml p01-p96
   Every case lands in exactly one shard.
 - `--junit PATH` — one `testcase` per case. Parked debt (`XFAIL`) is recorded as
   **skipped**, not passed, so tracked debt reads as debt in the CI UI.
+- `results/<RUN_TS>/verdicts.json` — always written beside `summary.txt`: one
+  object per case (`verdict`, a one-line `reason`, `exit`, `seconds`, the
+  header's `fault`, the `log` and `result` paths under the run directory) and
+  the lane the run was (`build`, `job`, `step`, `lane`, `scheduler`, `commit`,
+  null outside CI). The eval lanes upload it as its own artifact and the round
+  record (`.buildkite/eval_verdicts.py`) reads it instead of the archive.
 - **Exit status** — nonzero when any case ends in a verdict that is neither
   `PASS` nor an `XFAIL`. `FAIL`, `INIT_TIMEOUT`, `APPLY_FAIL`, `INFRA-FAIL` and
   an unreadable verdict all mean the sweep did not validate that case.
@@ -927,7 +935,7 @@ Re-run any timed-out case isolated to tell contention from a real failure. (Bump
 the controller's `MaxConcurrentReconciles` would raise these ceilings — a real
 production-scale improvement too.) Each `batch.py` invocation stamps one `RUN_TS`
 shared by its subprocesses, so a run's results land together under
-`results/<RUN_TS>/<feature>/<topo>/` with a `summary.txt`.
+`results/<RUN_TS>/<feature>/<topo>/` with a `summary.txt` and a `verdicts.json`.
 
 ### Mid-roll edits (`edit=strategy:<type>`, `edit=restartPolicy:<policy>`)
 

@@ -2199,9 +2199,9 @@ class TestEvalTargeted(PipelineTestCase):
 
 
 class TestEvalVerdicts(unittest.TestCase):
-    """eval_verdicts.py records a round from the lanes' result archives: one
-    row per (case, scheduler) the round ran, in the format the generator's
-    targeted lookup reads back."""
+    """eval_verdicts.py records a round from the lanes' verdict files, and
+    from the archive of a lane without one: one row per (case, scheduler)
+    the round ran, in the format the generator's targeted lookup reads back."""
 
     BUILD = "4321"
     COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -2258,8 +2258,84 @@ class TestEvalVerdicts(unittest.TestCase):
         results[f"junit-{feature}-{topology}.xml"] = "<testsuite/>"
         return self.make_archive(job, feature, topology, scheduler, results, **kwargs)
 
+    def job_file(self, job, rows, scheduler="", lane=None, text=None):
+        """One lane job's verdict file as batch.py writes it: rows is
+        [(feature, topology, case, verdict)] for finished cases, with a fifth
+        False for a case the harness never finished."""
+        cases = []
+        for row in rows:
+            feature, topology, case, verdict = row[:4]
+            finished = row[4] if len(row) > 4 else True
+            cases.append({
+                "case": case, "feature": feature, "topology": topology, "scheduler": scheduler,
+                "verdict": verdict, "reason": "", "exit": 0, "seconds": 1.0, "fault": None,
+                "log": f"{feature}/{topology}/{case}.log",
+                "result": f"{feature}/{topology}/{case}-100.tsv" if finished else None,
+            })
+        document = {
+            "format": ev.JOB_VERDICTS_FORMAT, "build": self.BUILD, "job": job, "step": f"omenative-e2e-{job}",
+            "lane": lane, "scheduler": scheduler, "commit": self.COMMIT, "run": f"{self.BUILD}-{job}",
+            "seconds": 10.0, "counts": {}, "cases": cases,
+        }
+        path = self.archives / f"{self.BUILD}-{job}{ev.JOB_VERDICTS_SUFFIX}"
+        path.write_text(json.dumps(document) if text is None else text)
+        return path
+
     def collect(self):
-        return ev.collect(sorted(self.archives.glob("*.tgz")), self.BUILD, self.COMMIT, self.warnings.append)
+        sources = sorted(self.archives.glob("*.tgz")) + sorted(self.archives.glob("*" + ev.JOB_VERDICTS_SUFFIX))
+        return ev.collect(sources, self.BUILD, self.COMMIT, self.warnings.append)
+
+    def test_a_lane_is_read_from_its_verdict_file_and_from_its_archive_only_without_one(self):
+        # Lane a uploaded both; its archive still holds an older FAIL for p1
+        # and the file is what counts. Lane b stopped before its summary and
+        # has only an archive. Lane c has a verdict file alone.
+        self.lane("a", "rollout", "eng", "", {"p1": "FAIL", "p2": "FAIL"})
+        self.job_file("a", [("rollout", "eng", "p1", "PASS"), ("rollout", "eng", "p2", "FAIL")], lane="rollout-eng")
+        self.lane("b", "canary", "eng-mn", "", {"p3": "TRIGGER_FAIL"})
+        self.job_file("c", [("rollout", "eng", "p1", "PASS"), ("rollout", "eng", "p2", "INFRA-FAIL")], scheduler=gp.EVAL_GANG_SCHEDULER)
+        rows = self.collect()
+        self.assertEqual(rows, [
+            ev.Verdict(self.BUILD, self.COMMIT, "canary", "eng-mn", "", "p3", "TRIGGER_FAIL"),
+            ev.Verdict(self.BUILD, self.COMMIT, "rollout", "eng", "", "p1", "PASS"),
+            ev.Verdict(self.BUILD, self.COMMIT, "rollout", "eng", "", "p2", "FAIL"),
+            ev.Verdict(self.BUILD, self.COMMIT, "rollout", "eng", gp.EVAL_GANG_SCHEDULER, "p1", "PASS"),
+            ev.Verdict(self.BUILD, self.COMMIT, "rollout", "eng", gp.EVAL_GANG_SCHEDULER, "p2", "INFRA-FAIL"),
+        ])
+        self.assertEqual(self.warnings, [])
+
+    def test_a_case_the_harness_never_finished_yields_no_row_from_a_verdict_file(self):
+        self.job_file("a", [("rollout", "eng", "p1", "PASS"), ("rollout", "eng", "p2", "?", False)])
+        rows = self.collect()
+        self.assertEqual([(row.case, row.verdict) for row in rows], [("p1", "PASS")])
+        self.assertEqual(self.warnings, [])
+
+    def test_a_verdict_file_or_case_object_that_does_not_fit_is_reported_and_skipped(self):
+        self.job_file("a", [], text="not json")
+        # A verdict file that cannot be read is a harness bug to fix, not a
+        # reason to open the archive: lane a's archive stays unread.
+        self.lane("a", "rollout", "eng", "", {"p9": "PASS"})
+        self.job_file("b", [], text=json.dumps({"format": "something-else", "cases": []}))
+        self.job_file("c", [], text=json.dumps({"format": ev.JOB_VERDICTS_FORMAT, "cases": {}}))
+        good = {"case": "p1", "feature": "rollout", "topology": "eng", "verdict": "PASS", "result": "rollout/eng/p1-1.tsv"}
+        self.job_file("d", [], text=json.dumps({"format": ev.JOB_VERDICTS_FORMAT, "scheduler": "", "cases": [
+            good,
+            {**good, "case": "x1"},
+            {**good, "case": "p3", "verdict": "  "},
+            {**good, "case": "p4", "feature": ""},
+            {**good, "case": "p5", "scheduler": 3},
+            "p6",
+            # Fields the reader does not need may be absent; the lane's
+            # scheduler applies when the case names none.
+            {"case": "p7", "feature": "rollout", "topology": "eng", "verdict": "FAIL\tnoted", "result": "x"},
+        ]}))
+        rows = self.collect()
+        self.assertEqual([(row.case, row.verdict) for row in rows], [("p1", "PASS"), ("p7", "FAIL noted")])
+        skipped = [warning for warning in self.warnings if "skipped" in warning]
+        self.assertEqual([warning.split(":")[0] for warning in skipped],
+                         [f"{self.BUILD}-a{ev.JOB_VERDICTS_SUFFIX}", f"{self.BUILD}-b{ev.JOB_VERDICTS_SUFFIX}", f"{self.BUILD}-c{ev.JOB_VERDICTS_SUFFIX}"])
+        objects = [warning for warning in self.warnings if "cases[" in warning]
+        self.assertEqual([re.search(r"cases\[(\d+)\]", warning).group(1) for warning in objects], ["1", "2", "3", "4", "5"])
+        self.assertEqual(len(self.warnings), 8)
 
     def test_a_round_is_recorded_one_row_per_lane_the_round_ran(self):
         self.lane("a", "rollout", "eng", "", {"p1": "PASS", "p2": "FAIL"})
@@ -2342,17 +2418,43 @@ class TestEvalVerdicts(unittest.TestCase):
             status = ev.main(["--archives", str(self.archives), "--out", str(out), "--build", self.BUILD, "--commit", self.COMMIT])
         self.assertEqual(status, 0)
         self.assertEqual([(row.case, row.verdict) for row in ev.read_verdicts(out.read_text())], [("p1", "PASS"), ("p2", "FAIL")])
-        self.assertIn("2 verdicts from 1 archives, 1 PASS, 0 skipped or parked, 1 other", log.getvalue())
+        self.assertIn("2 verdicts from 0 verdict files and 1 archives, 1 PASS, 0 skipped or parked, 1 other", log.getvalue())
+        # With the lane's verdict file present its archive is not counted.
+        self.job_file("a", [("rollout", "eng", "p1", "PASS"), ("rollout", "eng", "p2", "SKIP")])
+        self.job_file("b", [("migration", "pd", "p3", "XFAIL")])
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(log):
+            status = ev.main(["--archives", str(self.archives), "--out", str(out), "--build", self.BUILD, "--commit", self.COMMIT])
+        self.assertEqual(status, 0)
+        self.assertEqual([(row.case, row.verdict) for row in ev.read_verdicts(out.read_text())], [("p3", "XFAIL"), ("p1", "PASS"), ("p2", "SKIP")])
+        self.assertIn("3 verdicts from 2 verdict files and 0 archives, 1 PASS, 2 skipped or parked, 0 other", log.getvalue())
 
     def test_the_runner_and_the_recording_step_agree_with_the_script(self):
         runner = (Path(__file__).resolve().parent / "run_omenative_eval_gke.sh").read_text()
         self.assertIn("/" + ev.LANE_FILE + '"', runner)
         self.assertIn("'" + "\\t".join(ev.LANE_COLUMNS) + "\\n", runner)
         self.assertIn(f'results_root="{ev.RESULTS_DIR}/', runner)
+        # The runner names the lane for the harness, copies the harness's
+        # file out beside the archive and uploads it on its own.
+        self.assertIn('export OME_EVAL_LANE="$lane"', runner)
+        self.assertIn('job_verdicts="${results_root}/' + ev.JOB_VERDICTS_FILE + '"', runner)
+        self.assertIn('"${results_root}' + ev.JOB_VERDICTS_SUFFIX + '"', runner)
+        self.assertLess(runner.index('artifact upload "${results_root}' + ev.JOB_VERDICTS_SUFFIX), runner.index('artifact upload "$results_archive"'))
+        # The harness writes the file the format module names.
+        harness = (gp.REPO_ROOT / "hack/omenative-testing/perm/batch.py").read_text()
+        self.assertIn(f'VERDICTS_FILE = "{ev.JOB_VERDICTS_FILE}"', harness)
+        self.assertIn(f'VERDICTS_FORMAT = "{ev.JOB_VERDICTS_FORMAT}"', harness)
         recorder = (Path(__file__).resolve().parent / "record_eval_verdicts.sh").read_text()
         self.assertIn("python3 .buildkite/eval_verdicts.py", recorder)
-        for name in ("OME_EVAL_RESULTS_DIR", "OME_EVAL_VERDICTS_FILE", "OME_EVAL_ROUND_META_KEY", "OME_EVAL_ROUND_META_VALUE"):
+        for name in ("OME_EVAL_RESULTS_DIR", "OME_EVAL_JOB_VERDICTS_SUFFIX", "OME_EVAL_VERDICTS_FILE", "OME_EVAL_ROUND_META_KEY", "OME_EVAL_ROUND_META_VALUE"):
             self.assertIn("${" + name + ":?", recorder)
+        # The verdict files come first, then only the archives of the lanes
+        # without one (every archive when the list cannot be searched), then
+        # the record, its upload and the mark.
+        self.assertLess(recorder.index('artifact download "${results_dir}/*${job_suffix}"'), recorder.index("artifact search"))
+        self.assertLess(recorder.index("artifact search"), recorder.index('artifact download "$archive"'))
+        self.assertLess(recorder.index('artifact download "$archive"'), recorder.index('artifact download "${results_dir}/*.tgz"'))
+        self.assertLess(recorder.index('artifact download "${results_dir}/*.tgz"'), recorder.index("python3 .buildkite/eval_verdicts.py"))
+        self.assertLess(recorder.index("python3 .buildkite/eval_verdicts.py"), recorder.index("artifact upload"))
         self.assertLess(recorder.index("artifact upload"), recorder.index("meta-data set"))
 
 
@@ -3276,6 +3378,7 @@ class TestPipelineUploads(PipelineTestCase):
         # The script reads the format's names from the step, defined once.
         for name, value in (
             ("OME_EVAL_RESULTS_DIR", ev.RESULTS_DIR),
+            ("OME_EVAL_JOB_VERDICTS_SUFFIX", ev.JOB_VERDICTS_SUFFIX),
             ("OME_EVAL_VERDICTS_FILE", ev.VERDICTS_FILE),
             ("OME_EVAL_ROUND_META_KEY", ev.ROUND_META_KEY),
             ("OME_EVAL_ROUND_META_VALUE", ev.ROUND_META_VALUE),
