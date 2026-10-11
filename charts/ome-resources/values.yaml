@@ -999,6 +999,11 @@ alfred:
     apiVersion: ""
     acknowledgementTimeout: 2m
     failureBackoff: 5m
+  # Opt-in that lets execute mode cordon nodes under a maintenance rule with
+  # cordon: true. Grants node get/patch in a separate ClusterRole and passes
+  # --enable-maintenance-cordon. Alfred never uncordons.
+  maintenanceCordon:
+    enabled: false
   # Alfred's policy configuration, rendered verbatim into
   # <configMapName>/config.yaml and hot-reloaded by every replica. A config
   # that fails schema validation is rejected at reload and the last-known-good
@@ -1079,6 +1084,11 @@ alfred:
     # OMENative execution uses the owning controller's migration annotations.
     omenativeMigrationEnabled: true
     lwsRecommendationsEnabled: true
+    # TPU instances that OME provisions one slice per Instance for may move to a
+    # new slice; off keeps every TPU finding advisory. Moves are not simulated:
+    # Alfred requires a free healthy partition of the instance's topology, read
+    # from the labels in tpuSlicePartitions (GKE's labels by default).
+    tpuSliceMigrationEnabled: false
     # Output. The recommendations ConfigMap is pre-created by this chart;
     # Alfred updates it but never creates it.
     recommendationsConfigMapEnabled: true

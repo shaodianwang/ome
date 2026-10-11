@@ -68,6 +68,9 @@ spec:
           - {{ printf "--migration-ack-timeout=%s" $a.migration.acknowledgementTimeout | quote }}
           - {{ printf "--migration-failure-backoff=%s" $a.migration.failureBackoff | quote }}
           {{- end }}
+          {{- if $a.maintenanceCordon.enabled }}
+          - "--enable-maintenance-cordon=true"
+          {{- end }}
           {{- if $a.simulation.configMapName }}
           - "--simulation-workers=/etc/alfred-simulation/workers.json"
           - {{ printf "--simulation-timeout=%s" $a.simulation.timeout | quote }}

@@ -158,7 +158,11 @@ writes nothing else. Execution needs three explicit opt-ins:
 1. `alfred.simulation.configMapName`: an existing ConfigMap holding
    `workers.json` and the scheduler configuration files it references, mounted
    at `/etc/alfred-simulation` (profile identities come from
-   `alfred-simulator --print-profile`).
+   `alfred-simulator --print-profile`). An identity is valid for one Alfred
+   image only: it covers the worker's Go build information, including the
+   `.alfred-oss-ref` commit, and Alfred exits at startup on a mismatch. A
+   cluster with dispatch on pins `alfred.image.tag` and changes the tag and
+   its registry together.
 2. `alfred.migration.apiVersion: v1`: installs the fail-closed
    ValidatingAdmissionPolicy that limits alfred's ServiceAccount to adding one
    migration-request annotation, and pre-creates the `alfred-dispatch-state`
