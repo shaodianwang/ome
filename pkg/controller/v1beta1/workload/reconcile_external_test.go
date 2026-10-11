@@ -8611,7 +8611,7 @@ func TestPreemptedPod_ReturnsAndSaysWhyUntilPlaced(t *testing.T) {
 func TestPreemptedPod_SteadyPDService_RebuildsAndSaysWhy(t *testing.T) {
 	const noRoom = "0/3 nodes are available: 3 node(s) had untolerated taint(s). no new claims to deallocate"
 	none, recreate := workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance
-	cells := []struct {
+	cases := []struct {
 		name      string
 		component workloadtypes.ComponentType
 		replicas  int32
@@ -8628,12 +8628,12 @@ func TestPreemptedPod_SteadyPDService_RebuildsAndSaysWhy(t *testing.T) {
 		{"engine x4 policy None, informer lags the loss", workloadtypes.ComponentEngine, 4, &none, true},
 		{"decoder x4 RecreateInstanceOnPodRestart, informer lags the loss", workloadtypes.ComponentDecoder, 4, &recreate, true},
 	}
-	for _, cell := range cells {
-		t.Run(cell.name, func(t *testing.T) {
-			h := newComponentRecoveryHarness(t, false, "main", cell.component)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newComponentRecoveryHarness(t, false, "main", tc.component)
 			h.recorder = record.NewFakeRecorder(256)
-			h.replicas = cell.replicas
-			h.lifecycle.RestartPolicy = cell.policy
+			h.replicas = tc.replicas
+			h.lifecycle.RestartPolicy = tc.policy
 			maxSurge, maxUnavailable := intstr.FromInt(1), intstr.FromInt(0)
 			h.lifecycle.UpdateStrategy = &workloadtypes.UpdateStrategy{
 				Type:          workloadtypes.UpdateStrategySurgeThenDrain,
@@ -8643,16 +8643,16 @@ func TestPreemptedPod_SteadyPDService_RebuildsAndSaysWhy(t *testing.T) {
 			h.podGrace = 30 * time.Second
 			h.stopLag = 1
 			h.setTarget(h.revV1, goodImage)
-			if !h.run(40, func() bool { return h.settledOn(h.revV1, cell.replicas) }) {
+			if !h.run(40, func() bool { return h.settledOn(h.revV1, tc.replicas) }) {
 				h.dumpState("initial create")
 				t.Fatalf("the Component never settled on v1")
 			}
 			repairs := 0
-			for i, victimIdx := range []int32{0, cell.replicas - 1} {
+			for i, victimIdx := range []int32{0, tc.replicas - 1} {
 				rep := i + 1
 				victim := h.podOf(victimIdx, "")
 				others := map[int32]types.UID{}
-				for idx := int32(0); idx < cell.replicas; idx++ {
+				for idx := int32(0); idx < tc.replicas; idx++ {
 					if idx != victimIdx {
 						others[idx] = h.podOf(idx, "").UID
 					}
@@ -8674,7 +8674,7 @@ func TestPreemptedPod_SteadyPDService_RebuildsAndSaysWhy(t *testing.T) {
 				}
 				h.holdPlacement(noRoom)
 				h.preempt(victimIdx, "")
-				h.cacheLagOnce = cell.cacheLag
+				h.cacheLagOnce = tc.cacheLag
 				taken := h.clk.Now()
 				passes := 0
 				replaced := func() bool {
@@ -8710,14 +8710,14 @@ func TestPreemptedPod_SteadyPDService_RebuildsAndSaysWhy(t *testing.T) {
 					}
 				})
 				h.releasePlacement()
-				if !h.runWithInvariant(10, func() bool { return h.settledOn(h.revV1, cell.replicas) }, untouched) {
+				if !h.runWithInvariant(10, func() bool { return h.settledOn(h.revV1, tc.replicas) }, untouched) {
 					h.dumpState(fmt.Sprintf("repetition %d: after the room came back", rep))
 					t.Fatalf("repetition %d: the Instance did not return Ready once its pod could be placed", rep)
 				}
 				if pods := h.podsOf(victimIdx); len(pods) != 1 || pods[0].UID != replacement.UID {
 					t.Fatalf("repetition %d: the pod that was placed is not the one that waited", rep)
 				}
-				if cell.policy != nil && *cell.policy == workloadtypes.RestartPolicyRecreateInstance {
+				if tc.policy != nil && *tc.policy == workloadtypes.RestartPolicyRecreateInstance {
 					repairs++
 				}
 				if h.restartEvents() != repairs {

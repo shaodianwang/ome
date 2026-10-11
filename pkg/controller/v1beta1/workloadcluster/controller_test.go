@@ -396,7 +396,7 @@ func TestReconcile_DisconnectsManagerWhenDeleted(t *testing.T) {
 
 // TestReconcile_DecidesConnectionWhetherOrNotItConnects: once the controller
 // has reconciled a registration, a missing connection is its decision, whether
-// the cluster connected, failed to connect, or no longer exists.
+// the cluster connected, failed to connect, or was removed.
 func TestReconcile_DecidesConnectionWhetherOrNotItConnects(t *testing.T) {
 	for _, tt := range []struct {
 		name      string

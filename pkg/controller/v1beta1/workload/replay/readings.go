@@ -9,24 +9,24 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/reading/compare"
 )
 
-// ReadingFinding is one place where a reader the passes use today and the
-// one reading of the same pods (package reading) answer differently.
+// ReadingFinding is one place where a reader the passes use and the one
+// reading of the same pods (package reading) answer differently.
 type ReadingFinding struct {
 	// Index is the Instance whose pods were read.
 	Index int32
 	// Reader names the reader compared, as package compare names it.
 	Reader string
-	// Class is the stable key a corpus tally groups by: the question asked,
-	// the reader's side and what each side answered, with no number or
-	// name in it. Every question compare asks today is about the Serving
-	// level or a verdict built on it.
+	// Class is the stable key a tally over recorded scenarios groups by:
+	// the question asked, the reader's side and what each side answered,
+	// with no number or name in it. Every question compare asks is about
+	// the Serving level or a verdict built on it.
 	Class string
 	// Detail is the one-line account with the index, the names and the
 	// numbers.
 	Detail string
 }
 
-// CompareReadings asks the one reading and today's readers the same
+// CompareReadings asks the one reading and the passes' readers the same
 // questions about every Instance's pods in the view and lists where they
 // disagree, in Instance order. The reading gets the pass's clock, the
 // Component's two windows and the routed rotation the view carries. The

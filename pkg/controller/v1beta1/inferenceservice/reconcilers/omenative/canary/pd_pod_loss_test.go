@@ -21,7 +21,7 @@ import (
 // Instances, nothing moves to a revision with no serving pod, the stable
 // Instances stay held until the engine is rebuilt on the canary revision,
 // and the ladder then lands the canary revision on every Instance of both
-// members. The two orderings an operator can produce are both driven: the
+// members. The two orderings an operator can produce are both covered: the
 // deletion while the hold stands, and the deletion in the same second as
 // the promote, where the pass that applies the promote still counts the
 // pod and the pass after it finds the pod on its way out.
@@ -304,8 +304,8 @@ func TestDispatch_PDManualCanaryKeepsItsEngineWhenThePodIsDeletedAtPromote(t *te
 // still count the pod, and the pass after them finds it on its way out.
 // The release waits on a count of its own, so the stable Instances stay
 // held through the drain until the rebuilt engine serves; the drain's 100%
-// write stands meanwhile, as the pod-loss rows decide, and the pass that
-// counts the rebuilt engine is the release.
+// write stands meanwhile, and the pass that counts the rebuilt engine is
+// the release.
 func TestDispatch_PDManualCanaryKeepsItsEngineWhenThePodIsDeletedAfterTheShift(t *testing.T) {
 	p := newPDPodLoss(t, "pdlate")
 

@@ -1,8 +1,7 @@
 // Package compare sets the readers the passes use beside the reading of
 // the same pods and lists where they disagree, so a test can count the
-// disagreements over the replay corpus. It is a measuring tool for the
-// move onto the reading, not something a pass calls, and it keeps the
-// reading package free of the readers it is replacing.
+// disagreements over recorded replay scenarios. It only measures: no pass
+// calls it, and it keeps the reading package free of the other readers.
 package compare
 
 import (

@@ -1744,7 +1744,7 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/Failed[stableMissing]/record[stableEqualsCanary]", fixtureFailedStableMissing, evRecordStableEqualsCanary, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
 		{"canary/Failed[stableMissing]/record[noStable]", fixtureFailedStableMissing, evRecordNoStable, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
 		{"canary/Failed[stableMissing]/record[negativeStep]", fixtureFailedStableMissing, evRecordNegativeStep, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
-		// --- Repins the fixtures above do not drive, and a phase-only Failed
+		// --- Repins the fixtures above do not exercise, and a phase-only Failed
 		// over a recorded rejection: a repin clamps the index under every
 		// hold without moving it, done stays done, and the record with a
 		// rejection and no marker reads as the revert, which the dispatch

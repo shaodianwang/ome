@@ -81,8 +81,9 @@ type Finding struct {
 	// Index is the Instance the finding is about, or ComponentWide when
 	// it is about the Component as a whole.
 	Index int32
-	// Class is the stable key a corpus tally groups by: the invariant,
-	// the rule and the row states involved, with no number or name in it.
+	// Class is the stable key a tally over recorded scenarios groups by:
+	// the invariant, the rule and the row states involved, with no number
+	// or name in it.
 	Class string
 	// Detail is the one-line account with the numbers and names.
 	Detail string
@@ -92,7 +93,7 @@ type Finding struct {
 // a whole rather than one Instance.
 const ComponentWide int32 = -1
 
-// The invariant ids, as the findings and the corpus tally spell them.
+// The invariant ids, as the findings and the tallies spell them.
 const (
 	InvariantCapacity     = "I1"
 	InvariantBoundedWaits = "I3"

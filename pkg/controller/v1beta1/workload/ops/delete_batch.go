@@ -308,7 +308,7 @@ func admitDeleteBatch(ctx context.Context, input workload.ReconcileInput, plan w
 // an attempt failing on its own; the wave is what ends it, so the wave
 // records it the way the escalation would, with the pod's reason. A
 // failed gang surge pair the plan let go is read through its source
-// (retiredGangSurgeFailure), against the observed table, which holds the
+// (retiredGangSurgeFailure), against the observed rows, which hold the
 // replacement the source names. One record per wave: the ladder counts
 // waves, not rows. nil when the wave retires no such attempt — an attempt
 // that showed no failure is left to the gate, which reads an

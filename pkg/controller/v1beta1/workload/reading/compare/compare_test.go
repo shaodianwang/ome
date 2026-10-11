@@ -47,8 +47,8 @@ func TestCompare_PlainFullyServingSetAgrees(t *testing.T) {
 }
 
 // Each crafted set names the readers that must disagree on it and the
-// class each disagreement must carry. The three evidence readers are
-// ports of the same membership rule and must never appear.
+// class each disagreement must carry. The three evidence readers
+// implement the same membership rule and must never appear.
 func TestCompare_CraftedSetsDisagreePerReader(t *testing.T) {
 	cases := []struct {
 		name    string
