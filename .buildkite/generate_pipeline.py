@@ -377,27 +377,7 @@ KIND_QUARANTINE: list[dict[str, str]] = []
 # quarantine: owner, one-line reason, expiry (two weeks is the norm);
 # generation fails on an unknown group, an empty owner or reason, and on the
 # day after `expires`. To promote the twin, delete the entry in the fix PR.
-KIND_SCHEDULER_SOFT_GROUPS: list[dict[str, str]] = [
-    {
-        "group": "gang-surge-multipod",
-        "owner": "slin1237",
-        "expires": "2026-10-12",
-        "reason": (
-            "the required leader topology spread is not honored under the "
-            "gang scheduler: two instances' leaders never land on distinct "
-            "nodes within the spec's budget; the default-scheduler job passes"
-        ),
-    },
-    {
-        "group": "migration-relocation",
-        "owner": "slin1237",
-        "expires": "2026-10-12",
-        "reason": (
-            "auto-relocation of a stuck Instance does not complete under the "
-            "gang scheduler; the default-scheduler job passes"
-        ),
-    },
-]
+KIND_SCHEDULER_SOFT_GROUPS: list[dict[str, str]] = []
 
 # Eval-twin soft list: the same escape hatch for the eval shards under the gang
 # scheduler, keyed by topology because a gang-scheduler defect shows on every
