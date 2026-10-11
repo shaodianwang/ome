@@ -266,16 +266,23 @@ func (e *specEnv) memberNames() []string {
 	return out
 }
 
-// createKeeperISVC creates a control-plane ISVC that declares no placement
-// requirement, so it matches no cluster and is never fanned out. It exists only
-// to keep the GC's live-ISVC list non-empty: the sweep treats an empty list as
-// suspect and skips it, so without a survivor no orphan is ever reaped.
-func (e *specEnv) createKeeperISVC() *v1beta1.InferenceService {
-	keeper := runnableSourceISVC(e.isvcNS, uniqueName("keeper"), "unused-model", "unused-runtime",
+// createUnplacedISVC creates a control-plane ISVC that declares no placement
+// requirement, so the placer never fans it out and never puts its finalizer on
+// it: a delete removes it at once. Specs use one as a keeper that keeps the GC's
+// live-ISVC list non-empty, or as the live source a planted derived points at.
+func (e *specEnv) createUnplacedISVC(prefix string) *v1beta1.InferenceService {
+	isvc := runnableSourceISVC(e.isvcNS, uniqueName(prefix), "unused-model", "unused-runtime",
 		v1beta1.PlacementModeSingle, 1)
-	keeper.Spec.Placement = nil // no requirements => no candidates => never placed
-	mustCreate(controlCluster, keeper)
-	return keeper
+	isvc.Spec.Placement = nil // no requirements => no candidates => never placed
+	mustCreate(controlCluster, isvc)
+	return isvc
+}
+
+// createKeeperISVC keeps the GC's live-ISVC list non-empty: the sweep treats an
+// empty list as suspect and skips it, so without a survivor no orphan is ever
+// reaped.
+func (e *specEnv) createKeeperISVC() *v1beta1.InferenceService {
+	return e.createUnplacedISVC("keeper")
 }
 
 // createSplitSource assigns an equal share of the fleet floor to each member.

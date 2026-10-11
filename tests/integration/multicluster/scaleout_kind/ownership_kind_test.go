@@ -8,6 +8,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
@@ -93,12 +94,19 @@ var _ = ginkgo.Describe("Multi-cluster ownership (KIND)", func() {
 		keeper := env.createKeeperISVC()
 		ginkgo.DeferCleanup(func() { deleteIfExists(controlCluster, keeper) })
 
+		// The sweep reaps an orphan at its next tick, which can come before a
+		// real kubelet has started the orphan's pod. So the orphan starts life
+		// as the derived of a source that is still alive, and the source is
+		// deleted only once the pod runs: the reap then has real pods to remove.
+		source := env.createUnplacedISVC("source")
+		ginkgo.DeferCleanup(func() { deleteIfExists(controlCluster, source) })
+
 		host := env.members[0]
 		orphanName := uniqueName("orphan")
 		foreignName := uniqueName("foreign")
 
-		ginkgo.By("planting an orphan of THIS control plane and a derived of another one")
-		env.createDerivedLookalike(host, orphanName, model, runtime, controlPlaneID, uniqueName("dead-uid"))
+		ginkgo.By("planting a derived of THIS control plane and a derived of another one")
+		env.createDerivedLookalike(host, orphanName, model, runtime, controlPlaneID, string(source.UID))
 		env.createDerivedLookalike(host, foreignName, model, runtime, "some-other-control-plane", uniqueName("dead-uid"))
 
 		ginkgo.By("waiting for both to be running, so the reap has real pods to remove")
@@ -109,6 +117,15 @@ var _ = ginkgo.Describe("Multi-cluster ownership (KIND)", func() {
 			}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed(),
 				"%s should be running before the sweep", name)
 		}
+
+		ginkgo.By("deleting the source, which turns its derived into our orphan")
+		gomega.Expect(controlCluster.client.Delete(controlCluster.ctx, source)).To(gomega.Succeed())
+		gomega.Eventually(func() bool {
+			err := controlCluster.client.Get(controlCluster.ctx,
+				client.ObjectKeyFromObject(source), &v1beta1.InferenceService{})
+			return apierrors.IsNotFound(err)
+		}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.BeTrue(),
+			"an unplaced source carries no placement finalizer and should be gone at once")
 
 		ginkgo.By("asserting the GC reaps our orphan and its pods")
 		gomega.Eventually(func() bool {
