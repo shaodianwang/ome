@@ -1462,6 +1462,13 @@ type recoveryHarness struct {
 	// removes them on the pass after, as a kubelet publishes a pod it
 	// stopped.
 	exitsCleanOnStop map[string]bool
+	// stopLag is how many kubelet passes a deleted pod keeps running
+	// before the kubelet reports it stopped: the process is still shutting
+	// down under its grace when the controller first looks. Zero stops
+	// the pod on the pass after the delete; stillStopping counts the
+	// passes left per pod.
+	stopLag       int
+	stillStopping map[string]int
 
 	// routed turns on the endpoint-controller model: the per-revision
 	// routed Services and the headless Service carry EndpointSlices that
@@ -1644,6 +1651,12 @@ func (h *recoveryHarness) kubelet() {
 			continue
 		}
 		if pod.DeletionTimestamp != nil {
+			if h.stillStopping[pod.Name] > 0 {
+				// The process is still shutting down: the kubelet has
+				// nothing new to report on the pod yet.
+				h.stillStopping[pod.Name]--
+				continue
+			}
 			if h.exitsCleanOnStop[pod.Name] && pod.Status.Phase != corev1.PodSucceeded {
 				h.reportStoppedClean(pod)
 				continue
@@ -2556,6 +2569,12 @@ func (h *recoveryHarness) preempt(idx int32, runner string) {
 		h.exitsCleanOnStop = map[string]bool{}
 	}
 	h.exitsCleanOnStop[pod.Name] = true
+	if h.stopLag > 0 {
+		if h.stillStopping == nil {
+			h.stillStopping = map[string]int{}
+		}
+		h.stillStopping[pod.Name] = h.stopLag
+	}
 	if err := h.c.Delete(h.ctx, pod); err != nil {
 		h.t.Fatalf("preempt %s: %v", pod.Name, err)
 	}
@@ -8388,6 +8407,146 @@ func TestPreemptedPod_ReturnsAndSaysWhyUntilPlaced(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A steady prefill-decode service loses one pod to the scheduler, as a
+// cluster delivers the loss: the DisruptionTarget condition lands, the
+// pod is deleted under its grace and is still shutting down when the
+// controller first looks, the kubelet then reports it Succeeded, then
+// the object is gone. No rollout is in flight. Within a few passes the
+// Instance that lost its pod has a replacement under the stable name;
+// the scheduler refuses it and the row carries the Unschedulable wait
+// with the scheduler's own message, reading Failed at no point inside
+// the grace; every other Instance keeps serving on the pod it had. Once
+// the room is back the Instance returns Ready on the pod that waited. A
+// second preemption that takes another Instance as soon as the first is
+// back runs the same loop and finds the first still serving throughout.
+// The engine and the decoder run four Instances under both restart
+// policies, the router two under the default, all under the service's
+// own SurgeThenDrain budget of one surge and no unavailability.
+//
+// Cells: instance/Ready/pod.deleted[source]/before, instance/Ready/pod.phaseTerminal[Succeeded]/before, instance/Create/CreatePods/pod.unschedulable[source]/before, instance/Restart/Drain/pod.unschedulable[source]/before
+func TestPreemptedPod_SteadyPDService_RebuildsAndSaysWhy(t *testing.T) {
+	const noRoom = "0/3 nodes are available: 3 node(s) had untolerated taint(s). no new claims to deallocate"
+	none, recreate := workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance
+	cells := []struct {
+		name      string
+		component workloadtypes.ComponentType
+		replicas  int32
+		policy    *workloadtypes.RestartPolicy
+		// cacheLag makes the pass after each loss open on the informer's
+		// stale list, which still shows the taken pod.
+		cacheLag bool
+	}{
+		{"engine x4 policy None", workloadtypes.ComponentEngine, 4, &none, false},
+		{"engine x4 RecreateInstanceOnPodRestart", workloadtypes.ComponentEngine, 4, &recreate, false},
+		{"decoder x4 policy None", workloadtypes.ComponentDecoder, 4, &none, false},
+		{"decoder x4 RecreateInstanceOnPodRestart", workloadtypes.ComponentDecoder, 4, &recreate, false},
+		{"router x2 default policy", workloadtypes.ComponentRouter, 2, nil, false},
+		{"engine x4 policy None, informer lags the loss", workloadtypes.ComponentEngine, 4, &none, true},
+		{"decoder x4 RecreateInstanceOnPodRestart, informer lags the loss", workloadtypes.ComponentDecoder, 4, &recreate, true},
+	}
+	for _, cell := range cells {
+		t.Run(cell.name, func(t *testing.T) {
+			h := newComponentRecoveryHarness(t, false, "main", cell.component)
+			h.recorder = record.NewFakeRecorder(256)
+			h.replicas = cell.replicas
+			h.lifecycle.RestartPolicy = cell.policy
+			maxSurge, maxUnavailable := intstr.FromInt(1), intstr.FromInt(0)
+			h.lifecycle.UpdateStrategy = &workloadtypes.UpdateStrategy{
+				Type:          workloadtypes.UpdateStrategySurgeThenDrain,
+				RollingUpdate: &workloadtypes.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable},
+			}
+			h.unschedulableGrace = 15 * time.Minute
+			h.podGrace = 30 * time.Second
+			h.stopLag = 1
+			h.setTarget(h.revV1, goodImage)
+			if !h.run(40, func() bool { return h.settledOn(h.revV1, cell.replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("the Component never settled on v1")
+			}
+			repairs := 0
+			for i, victimIdx := range []int32{0, cell.replicas - 1} {
+				rep := i + 1
+				victim := h.podOf(victimIdx, "")
+				others := map[int32]types.UID{}
+				for idx := int32(0); idx < cell.replicas; idx++ {
+					if idx != victimIdx {
+						others[idx] = h.podOf(idx, "").UID
+					}
+				}
+				untouched := func() {
+					if s := h.instance(victimIdx); s != nil && s.Phase == workloadtypes.InstancePhaseFailed {
+						h.dumpState(fmt.Sprintf("repetition %d: failed inside the grace", rep))
+						t.Fatalf("repetition %d: the Instance read Failed while the scheduler's wait was inside the grace: %+v", rep, s.LastFailure)
+					}
+					for idx, uid := range others {
+						if s := h.instance(idx); s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil {
+							t.Fatalf("repetition %d: Instance %d, which the scheduler did not take, left Ready: %+v", rep, idx, s)
+						}
+						pods := h.podsOf(idx)
+						if len(pods) != 1 || pods[0].UID != uid || !podreadiness.IsServing(pods[0]) {
+							t.Fatalf("repetition %d: the pod of Instance %d, which the scheduler did not take, was replaced or taken out of rotation", rep, idx)
+						}
+					}
+				}
+				h.holdPlacement(noRoom)
+				h.preempt(victimIdx, "")
+				h.cacheLagOnce = cell.cacheLag
+				taken := h.clk.Now()
+				passes := 0
+				replaced := func() bool {
+					pods := h.podsOf(victimIdx)
+					return len(pods) == 1 && pods[0].UID != victim.UID
+				}
+				if !h.runWithInvariant(4, replaced, func() { untouched(); passes++ }) {
+					h.dumpState(fmt.Sprintf("repetition %d: waiting for the replacement", rep))
+					t.Fatalf("repetition %d: no replacement pod for Instance %d within four passes of the loss", rep, victimIdx)
+				}
+				t.Logf("repetition %d: Instance %d rebuilt its pod on pass %d, %s after the loss", rep, victimIdx, passes-1, h.clk.Since(taken))
+				replacement := h.podOf(victimIdx, "")
+				if replacement.Name != victim.Name {
+					t.Fatalf("repetition %d: the replacement is %s, want the stable name %s", rep, replacement.Name, victim.Name)
+				}
+				saysWhy := func() bool {
+					s := h.instance(victimIdx)
+					return s != nil && s.Operation != nil && s.Operation.Waiting == workloadtypes.WaitingReasonUnschedulable
+				}
+				if !h.runWithInvariant(2, saysWhy, untouched) {
+					h.dumpState(fmt.Sprintf("repetition %d: waiting for the reason", rep))
+					t.Fatalf("repetition %d: the row of Instance %d does not report the Unschedulable wait within two passes of the scheduler's verdict: %+v", rep, victimIdx, h.instance(victimIdx))
+				}
+				t.Logf("repetition %d: Instance %d reports the Unschedulable wait %s after the loss", rep, victimIdx, h.clk.Since(taken))
+				if s := h.instance(victimIdx); s.LastFailure == nil || s.LastFailure.Reason != workloadtypes.WaitingReasonUnschedulable ||
+					s.LastFailure.PodName != replacement.Name || s.LastFailure.Message != noRoom {
+					t.Fatalf("repetition %d: the row's record does not name the held pod and the scheduler's message: %+v", rep, s.LastFailure)
+				}
+				h.runWithInvariant(4, func() bool { return false }, func() {
+					untouched()
+					if !saysWhy() {
+						t.Fatalf("repetition %d: the wait left the row while the cluster still had no room: %+v", rep, h.instance(victimIdx))
+					}
+				})
+				h.releasePlacement()
+				if !h.runWithInvariant(10, func() bool { return h.settledOn(h.revV1, cell.replicas) }, untouched) {
+					h.dumpState(fmt.Sprintf("repetition %d: after the room came back", rep))
+					t.Fatalf("repetition %d: the Instance did not return Ready once its pod could be placed", rep)
+				}
+				if pods := h.podsOf(victimIdx); len(pods) != 1 || pods[0].UID != replacement.UID {
+					t.Fatalf("repetition %d: the pod that was placed is not the one that waited", rep)
+				}
+				if cell.policy != nil && *cell.policy == workloadtypes.RestartPolicyRecreateInstance {
+					repairs++
+				}
+				if h.restartEvents() != repairs {
+					t.Fatalf("repetition %d: %d repair(s) opened, want %d; events = %v", rep, h.restartEvents(), repairs, h.events)
+				}
+			}
+			if len(h.failedWarnings) != 0 {
+				t.Fatalf("InstanceFailed warnings raised across two preemptions inside the grace: %v", h.failedWarnings)
+			}
+		})
 	}
 }
 
