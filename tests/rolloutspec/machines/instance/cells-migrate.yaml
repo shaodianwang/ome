@@ -589,15 +589,12 @@ cells:
   - state: Migrate/CreateSurge
     event: spec.policyTuning
     variants: [migrationPolicy]
-    outcome: transition
-    to: Ready
-    note: today a mode set to Never plans no migrate pass, and the Create pass, whose promote
-      carries no ownership precondition, reads the source as an ordinary serving Instance
-      and stamps it Ready with its Migrate pin cleared while the record still names it, so
-      the plan mints an extra index beside the pinned surge; which is wrong because the
-      record owns the pair and only its completion or expiry may clear a pin
+    outcome: defer
+    note: a mode set to Never plans no migrate pass, and the Create pass leaves the row to
+      the record that owns the pair, serving under its pin on the revision it ran; only the
+      record's completion or expiry may clear the pin, and the record's deadline ends the move
     placement: unit
-    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-mode-never]}
+    coverage: {perm: [], unit: [TestCreate_MigrationPairStandsUnderModeNever], kind: [], replay: [migrate-surge-pending-mode-never]}
     status: decided
   - state: Migrate/CreateSurge
     event: config.changed
@@ -1380,12 +1377,12 @@ cells:
     event: spec.policyTuning
     variants: [migrationPolicy]
     outcome: defer
-    note: today a mode set to Never plans no migrate pass, so nothing drives this row again
-      and the Create pass clears the paired source's pin; the row stands pinned until the
+    note: today a mode set to Never plans no migrate pass, so nothing drives this row again;
+      the Create pass leaves the pair to the record, and the row stands pinned until the
       record's deadline tears the index down, which is wrong because a serving surge is
       discarded for a knob meant to stop new requests, not the move already in flight
     placement: unit
-    coverage: {perm: [], unit: [], kind: [], replay: [migrate-surge-pending-mode-never]}
+    coverage: {perm: [], unit: [TestCreate_MigrationPairStandsUnderModeNever], kind: [], replay: [migrate-surge-pending-mode-never]}
     status: decided
   - state: Migrate/SurgeTarget
     event: config.changed
@@ -1820,7 +1817,7 @@ cells:
   - {state: Failed/MigrateTarget, event: spec.resetInstances, outcome: reject, note: "a Migrate continuation belongs to the migration machinery: the reset skips the row untouched with an InstancesResetSkipped event, since clearing the pin would orphan the record", placement: unit, coverage: {perm: [], unit: [TestConsumeResetInstances_RolloutOwnedTarget_SkipConsumed], kind: []}, status: decided}
   - {state: Failed/MigrateTarget, event: spec.partition, outcome: ignore, note: "a Migrate-pinned surge row is excluded from the partition's candidates", placement: unit, coverage: {perm: [], unit: [TestPartitionHeldIndices], kind: []}, status: decided}
   - {state: Failed/MigrateTarget, event: spec.rollbackTarget, outcome: defer, note: "the update trigger declines a migrate-owned status; the rolled-back target reaches the source once it is restored", placement: unit, coverage: {perm: [], unit: [], kind: [], replay: [migrate-target-grace-failed-rollback-pin]}, status: decided}
-  - {state: Failed/MigrateTarget, event: spec.policyTuning, variants: [migrationPolicy], outcome: defer, note: "a mode set to Never stops new requests and plans no drive, which this row did not need; the record's deadline ends the move. Today the same flip lets the Create pass promote the paired source and clear its pin while the record still runs, which is wrong because only the record may end a pin", placement: unit, coverage: {perm: [], unit: [], kind: [], replay: [migrate-target-grace-failed-mode-never]}, status: decided}
+  - {state: Failed/MigrateTarget, event: spec.policyTuning, variants: [migrationPolicy], outcome: defer, note: "a mode set to Never stops new requests and plans no drive, which this row did not need; the Create pass leaves the pair to the record, whose deadline ends the move and restores the source", placement: unit, coverage: {perm: [], unit: [TestCreate_MigrationPairStandsUnderModeNever], kind: [], replay: [migrate-target-grace-failed-mode-never]}, status: decided}
   - {state: Failed/MigrateTarget, event: spec.policyTuning, variants: [restartPolicy, instanceReadyTimeout, minReadySeconds, markNotReady], outcome: ignore, note: "none is read by a row whose clock is the record's", placement: perm, coverage: {perm: [], unit: [], kind: [], replay: [migrate-target-grace-failed-spec-edits-wait]}, status: decided}
   - {state: Failed/MigrateTarget, event: config.changed, outcome: ignore, note: "the grace and the sweep are read afresh every pass; no edit writes the row", placement: unit, coverage: {perm: [], unit: [], kind: [], replay: [migrate-target-grace-failed-force-delete]}, status: decided}
   - {state: Failed/MigrateTarget, event: timer.operationDeadline, outcome: ignore, note: "the operation deadline stamped on the pin is never consumed: the fast and broad escalation paths skip a Failed row, and the record's deadline is what ends the migration", invariants: [record.is.timeout.authority], placement: unit, coverage: {perm: [], unit: [], kind: [], replay: [migrate-target-grace-failed-operation-deadline]}, status: decided}

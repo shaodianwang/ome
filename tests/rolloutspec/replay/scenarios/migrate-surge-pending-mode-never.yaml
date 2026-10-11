@@ -1,23 +1,24 @@
 # The migration mode is set to Never while a live pair stands at
-# SurgePending. The mode plans no migrate pass, so nothing drives the pair;
-# the Create pass then reads the source as an ordinary Instance whose pods
-# are all serving and promotes it, which clears the source's Migrate pin
-# while the record still names it, and the plan mints an extra index beside
-# the pinned surge. The record's deadline closes the move through the surge
-# pin alone, and the scale-down pipeline tears down the surge and the extra
-# index.
+# SurgePending. The mode plans no migrate pass, so nothing drives the pair,
+# and the Create pass leaves both rows to the record that owns them: the
+# source keeps serving under its pin and the surge stands pinned. The
+# record's deadline closes the move: the expiry clears the surge pin and
+# restores the source, and the scale-down pipeline tears the surge index
+# down.
 scenario: migrate-surge-pending-mode-never
 arrows:
   - T-ready-migrate
   - T-empty-migrate-target
   - T-migratetarget-expired
+  - T-migrate-deadline-restore
 cells:
   - instance/Migrate/CreateSurge/spec.policyTuning[migrationPolicy]/before
   - instance/Migrate/SurgeTarget/spec.policyTuning[migrationPolicy]/before
 intentional: >-
-  the Create pass promote carries no ownership precondition, so a mode flip
-  to Never lets it clear the Migrate pin of a source the record still drives;
-  the trace records that promote and the extra index it leaves behind
+  a migration pair is the record's for as long as its pins stand, so a mode
+  flip to Never leaves both rows to the record: the Create pass neither
+  promotes the source nor writes the surge's gate, and the record's deadline
+  ends the move
 initial:
   spec:
     replicas: 1
@@ -48,14 +49,14 @@ timeline:
       - pod.scheduled[target]: {pod: {index: 1}, message: node-1}
       - pod.containersReady[target]: {pod: {index: 1}}
   - tick: 5
-    note: the migration mode is set to Never, so no migrate pass runs and the Create pass promotes the source, clearing its Migrate pin while the record still drives the pair
+    note: the migration mode is set to Never, so no migrate pass runs; the pair stays the record's, and the Create pass leaves the source serving under its pin and the surge pinned
     events:
       - spec.policyTuning[migrationPolicy]: {value: Never}
   - tick: 6
-    note: a tick with nothing changed plans the unpinned source as an ordinary Instance, so the plan mints an extra index beside the pinned surge and the Create pass materializes it
+    note: a tick with nothing changed plans the pair as before, so no extra index is minted and nothing is driven on either row
   - tick: 7
-    note: the record's deadline elapses, so the expiry clears the surge pin and closes the record with the source already Ready on its running revision
+    note: the record's deadline elapses, so the expiry clears the surge pin, restores the source to Ready on the revision it kept serving, and closes the record
     events:
       - timer.migrationDeadline: {slack: 1s}
   - tick: 8
-    note: the unpinned surge index and the extra index are beyond the desired set, so the scale-down pipeline commits Phase Deleting on both
+    note: the unpinned surge index is beyond the desired set, so the scale-down pipeline commits Phase Deleting on it

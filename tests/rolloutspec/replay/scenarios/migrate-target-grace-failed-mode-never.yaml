@@ -1,13 +1,15 @@
 # The migration mode is set to Never while a migration surge row stands
 # Failed with its Migrate pin kept. The mode stops new requests; the record
-# that already owns the pair keeps running and its deadline ends the move,
-# with the Failed surge row untouched by the edit and torn down once the
-# expiry clears its pin.
+# that already owns the pair keeps running and its deadline ends the move.
+# The Failed surge row is untouched by the edit and torn down once the
+# expiry clears its pin, and the source keeps serving under its own pin
+# until the same expiry restores it.
 scenario: migrate-target-grace-failed-mode-never
 arrows:
   - T-ready-migrate
   - T-empty-migrate-target
   - T-failedmigratetarget-expired
+  - T-migrate-deadline-restore
   - T-delete-done
 cells:
   - instance/Failed/MigrateTarget/spec.policyTuning[migrationPolicy]/before
@@ -45,13 +47,13 @@ timeline:
     events:
       - clock.advance: 11m
   - tick: 6
-    note: the migration mode is set to Never, which stops new requests; the Failed surge row is untouched, and the source is read as an ordinary serving Instance again while the record it belongs to keeps running
+    note: the migration mode is set to Never, which stops new requests; the pair stays the record's, so the Failed surge row and the source serving under its pin are both left as they are
     events:
       - spec.policyTuning[migrationPolicy]: {value: Never}
   - tick: 7
-    note: a tick with nothing changed finds the record's deadline ahead and drives nothing on the Failed surge row
+    note: a tick with nothing changed finds the record's deadline ahead and drives nothing on either row of the pair
   - tick: 8
-    note: the record's deadline elapses, so the expiry clears the pin from the Failed surge row and closes the record, with the source already Ready on its running revision
+    note: the record's deadline elapses, so the expiry clears the pin from the Failed surge row, restores the source to Ready on the revision it kept serving, and closes the record
     events:
       - timer.migrationDeadline: {slack: 1s}
   - tick: 9
