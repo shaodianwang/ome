@@ -2398,14 +2398,23 @@ cell on the six shape families (the surge strategy, the env edit):
   the spare CPU of every node a case pod could be placed on (Ready,
   uncordoned, untainted), and one filler under that class, pinned to the
   node of the aimed pod (the kill target, or the podkill rule's victim at
-  the hook), asks for that node's spare CPU plus the aimed pod's own — so
-  the scheduler must preempt one pod there (the pod it picks among those
-  below the press on that node; the runner reads the victim back off the
-  scheduler's `DisruptionTarget` condition or its `Preempted` event, by
-  UID, since the controller brings the victim back under the same name
-  within seconds — never off a drain). Before the press lands, the
-  harness's `perm.test/pending` NoSchedule taint goes on every one of
-  those nodes (the fillers tolerate it): the fillers hold the room there
+  the hook), refuses to share that node with the aimed pod (a required pod
+  anti-affinity on the identity labels the pod carries: service, Component,
+  Instance index, gang runner, pod ordinal) and asks for that pod's own CPU
+  — so the scheduler must preempt that pod and no other (left to size
+  alone it picks its own victim among the pods below the press: those no
+  disruption budget covers first, the youngest after, so a router or a
+  sibling of the same size could go instead, or two pods once the spare had
+  shrunk; the runner reads the victim back off the scheduler's
+  `DisruptionTarget` condition or its `Preempted` event, by UID, since the
+  controller brings the victim back under the same name within seconds —
+  never off a drain). The fill is `INFRA-FAIL` when the aimed pod has left
+  the node before the press, or when another pod there carries the same
+  identity labels, so the press could not single it out. A canary press
+  (`victim=canary`) lands on the first bound replacement of the Component
+  `victimcomp=` names, or of any acting Component without it. Before the
+  press lands, the harness's `perm.test/pending` NoSchedule taint goes on
+  every one of those nodes (the fillers tolerate it): the fillers hold the room there
   was, and the taint keeps the case from the room its own pods free
   afterwards — what the preemption vacates and, under a roll, what each
   drain vacates, which a surge-then-drain roll would otherwise take one pod

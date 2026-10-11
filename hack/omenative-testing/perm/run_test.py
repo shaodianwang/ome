@@ -3436,7 +3436,7 @@ class PressAimWaitsTest(unittest.TestCase):
     def test_the_hook_op_driver_waits_before_it_fires_the_press(self):
         src = inspect.getsource(run._hook_op)
         self.assertIn("_wait_scale_wave(ctx, done, budget)", src)
-        self.assertIn("_wait_new_bound(ctx, acting, done, budget)", src)
+        self.assertIn("_wait_new_bound(ctx, _canary_press_comps(f, acting), done, budget)", src)
         self.assertLess(src.index("_wait_scale_wave("), src.index("_fault_fire(f, ctx[\"pod_state\"]"))
         self.assertLess(src.index("_wait_new_bound("), src.index("_fault_fire(f, ctx[\"pod_state\"]"))
 
@@ -15118,9 +15118,10 @@ class EvictFaultTest(unittest.TestCase):
 class PreemptFaultTest(unittest.TestCase):
     """preempt has the scheduler remove the pod: fillers take every node's
     spare CPU, the pending taint closes every node to the case and a
-    higher-priority filler presses on the aimed pod's node; the victim is
-    read back from the scheduler's own record by UID, and the taint and the
-    fillers go at the lift or by the cleanup."""
+    higher-priority filler presses on the aimed pod's node, refusing that
+    pod's company so it is the one taken; the victim is read back from the
+    scheduler's own record by UID, and the taint and the fillers go at the
+    lift or by the cleanup."""
 
     BASE = "# p999: x Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
     KILL = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
@@ -15205,10 +15206,6 @@ class PreemptFaultTest(unittest.TestCase):
             self.assertEqual([{"key": run.TAINT_KEY, "operator": "Exists", "effect": "NoSchedule"}], m["spec"]["tolerations"],
                              "a filler sits where the pending taint closes the node to the case")
 
-    def test_press_need_is_the_spare_plus_the_aimed_pods_own(self):
-        self.assertEqual(383300, run._press_need(383250, 50), "the node fits the press only once one pod of that size has gone")
-        self.assertEqual(50, run._press_need(-20, 50), "a node over its allocatable has no spare to add")
-
     def test_arm_registers_the_cleanup_then_creates_a_class_above_the_case(self):
         f = run._fault_new("p999", {"fault": "preempt:rotating", "lift": "after-settle"})
         calls, saved = [], list(run._FAULT_CLEANUPS)
@@ -15251,10 +15248,12 @@ class PreemptFaultTest(unittest.TestCase):
                 order.append(" ".join(a[1:4]))
             return subprocess.CompletedProcess(a, 0, "", "")
         free = {"kind-worker": 1000, "kind-worker2": 2000}
-        target = {"spec": {"containers": [{"resources": {"requests": {"cpu": "50m"}}}]}}
+        target = {"metadata": {"name": "e0", "namespace": run.NS, "uid": "u-e0",
+                               "labels": {"ome.io/inferenceservice": "p999", "component": "engine", "ome.io/instance-index": "0"}},
+                  "spec": {"containers": [{"resources": {"requests": {"cpu": "50m"}}}]}, "status": {"phase": "Running"}}
         with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_get_pod", lambda n, ns=run.NS: target), \
                 mock.patch.object(run, "_eligible_nodes", lambda: ["kind-worker", "kind-worker2"]), \
-                mock.patch.object(run, "_node_pods", lambda n: []), mock.patch.object(run, "_control_plane_pods", lambda: []), \
+                mock.patch.object(run, "_node_pods", lambda n: [target]), mock.patch.object(run, "_control_plane_pods", lambda: []), \
                 mock.patch.object(run, "_node_cpu_free", lambda n, items=None: free[n]), \
                 mock.patch.object(run, "_pod_bound", lambda n: "bound"), \
                 mock.patch.object(run, "_fixture_values", lambda: {"OME_EVAL_NGINX_IMAGE": "nginx:test"}):
@@ -15267,14 +15266,20 @@ class PreemptFaultTest(unittest.TestCase):
         self.assertEqual(("kind-worker2", "2000m"), (block["spec"]["nodeSelector"]["kubernetes.io/hostname"],
                                                      block["spec"]["containers"][0]["resources"]["requests"]["cpu"]))
         self.assertNotIn("priorityClassName", block["spec"], "a blocking filler fits without preempting anything")
+        self.assertNotIn("affinity", block["spec"])
         press = by_name["perm-p999-press"]
-        self.assertEqual(("kind-worker", "1050m", "perm-p999-preempt"),
+        self.assertEqual(("kind-worker", "50m", "perm-p999-preempt"),
                          (press["spec"]["nodeSelector"]["kubernetes.io/hostname"],
-                          press["spec"]["containers"][0]["resources"]["requests"]["cpu"], press["spec"]["priorityClassName"]))
-        self.assertEqual({"e0": {"comp": "engine", "inst": "0", "serving": True, "uid": ""},
-                          "e1": {"comp": "engine", "inst": "1", "serving": True, "uid": ""}}, f["pre_alive"])
+                          press["spec"]["containers"][0]["resources"]["requests"]["cpu"], press["spec"]["priorityClassName"]),
+                         "the press asks for the aimed pod's own room, not the node's spare")
+        self.assertEqual([{"labelSelector": {"matchLabels": target["metadata"]["labels"]}, "topologyKey": "kubernetes.io/hostname"}],
+                         press["spec"]["affinity"]["podAntiAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"],
+                         "and refuses to share the node with it")
+        self.assertEqual({"e0": {"comp": "engine", "inst": "0", "serving": True, "uid": "u-e0"},
+                          "e1": {"comp": "engine", "inst": "1", "serving": True, "uid": ""}}, f["pre_alive"],
+                         "the aimed pod is recorded under the UID the press lands on")
         self.assertEqual(("e0", "kind-worker", 50), (f["aim_pod"], f["aim_node"], f["victim_cpu"]))
-        self.assertTrue(any("must preempt one pod there" in n for n in f["notes"]))
+        self.assertTrue(any("must preempt that pod and no other" in n for n in f["notes"]))
         self.assertEqual(["kind-worker", "kind-worker2"], f["tainted"])
         self.assertEqual(["apply perm-p999-fill-kind-worker2", f"nodes kind-worker {run.TAINT_KEY}=p999:NoSchedule",
                           f"nodes kind-worker2 {run.TAINT_KEY}=p999:NoSchedule", "apply perm-p999-press"], order,
@@ -15478,6 +15483,188 @@ class PreemptFaultTest(unittest.TestCase):
         hook = " fault=preempt:settling floor_soft=1 order_soft=1 co=none during=rotating rollback=1 lift=after-settle"
         self.assertEqual([], self._errs(self.BASE + hook + " victim=stable"))
         self.assertTrue(any("aims a podkill, an eviction or a preemption" in e for e in self._errs(self.BASE + " victim=stable")))
+
+
+class PressAimsTrueTest(unittest.TestCase):
+    """The press takes the pod it is aimed at and no other. On the pressed
+    node the scheduler picks its own victims among the pods below the press:
+    it removes them all, then lets each back in importance order (the pods
+    whose loss would breach a disruption budget first, older before younger)
+    while the press still fits, and takes the rest. A press that only needs
+    room is therefore free to take a sibling of the same size, a router no
+    budget protects, or two pods once the spare has shrunk. The press refuses
+    to share the node with the aimed pod, so that pod alone can never come
+    back, and asks only for the room it frees, so no second pod is needed."""
+
+    NODE = "worker-2"
+
+    @staticmethod
+    def _pod(name, comp, inst, start, cpu=50, runner=None, ordinal=None, case="p1", uid=None):
+        labels = {"ome.io/inferenceservice": case, "component": comp, "ome.io/instance-index": str(inst)}
+        if runner is not None:
+            labels["ome.io/runner"] = runner
+        if ordinal is not None:
+            labels["ome.io/pod-ordinal"] = str(ordinal)
+        return {"metadata": {"name": name, "namespace": run.NS, "uid": uid or f"uid-{name}", "labels": labels},
+                "spec": {"priority": 0, "containers": [{"name": "c", "resources": {"requests": {"cpu": f"{cpu}m"}}}]},
+                "status": {"phase": "Running", "startTime": start}}
+
+    @staticmethod
+    def _scheduler_takes(press, items, allocatable, budgets=()):
+        """The kube-scheduler's victims on one node for the press manifest:
+        every pod below its priority comes off, then each goes back in
+        importance order (budget-breaching pods first, older before younger)
+        while the press still fits on CPU and on its own anti-affinity; the
+        pods that could not go back are the ones it takes. `budgets` are
+        (selector, disruptions allowed) pairs, as the scheduler reads them."""
+        need = run._qty("cpu", press["spec"]["containers"][0]["resources"]["requests"]["cpu"])
+        prio = 1 if press["spec"].get("priorityClassName") else 0
+        anti = ((press["spec"].get("affinity") or {}).get("podAntiAffinity") or {})
+        terms = [t["labelSelector"]["matchLabels"] for t in anti.get("requiredDuringSchedulingIgnoredDuringExecution", [])]
+
+        def matches(sel, it):
+            return all((it["metadata"].get("labels") or {}).get(k) == v for k, v in sel.items())
+        lower = sorted([it for it in items if run._pod_priority(it) < prio],
+                       key=lambda it: (-run._pod_priority(it), it["status"]["startTime"]))
+        present = [it for it in items if run._pod_priority(it) >= prio]
+        allowed = [a for _sel, a in budgets]
+        breaching, covered = [], []
+        for it in lower:
+            breach = False
+            for i, (sel, _a) in enumerate(budgets):
+                if matches(sel, it):
+                    allowed[i] -= 1
+                    breach = breach or allowed[i] < 0
+            (breaching if breach else covered).append(it)
+
+        def fits():
+            return (sum(run._pod_requests(it).get("cpu", 0) for it in present) + need <= allocatable
+                    and not any(matches(t, it) for t in terms for it in present))
+        assert fits(), "the press fits once every pod below it is gone"
+        taken = []
+        for it in breaching + covered:
+            present.append(it)
+            if not fits():
+                present.pop()
+                taken.append(it["metadata"]["name"])
+        return sorted(taken)
+
+    def _press(self, items, target, spare, pod_state=None, live=None):
+        """Run the fill against a node holding `items` with `spare` millicores
+        read free (`live` answers the pod reads when it differs from the
+        node's pods); the fault record and the press manifest applied."""
+        f = run._fault_new("p1", {"fault": "preempt:settling", "lift": "after-settle"})
+        f.update(pc_name="perm-p1-preempt", pc_value=1, fillers=[], pc_deleted=False, fillers_dropped=False)
+        manifests = []
+
+        def kubectl(*a, **k):
+            if a[0] == "apply":
+                manifests.append(json.loads(k["input"]))
+            return _Resp("")
+        by_name = live if live is not None else {it["metadata"]["name"]: it for it in items}
+        with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_get_pod", lambda n, ns=run.NS: by_name.get(n)), \
+                mock.patch.object(run, "_eligible_nodes", lambda: [self.NODE]), \
+                mock.patch.object(run, "_node_pods", lambda n: list(items)), mock.patch.object(run, "_control_plane_pods", lambda: []), \
+                mock.patch.object(run, "_node_cpu_free", lambda n, items=None: spare), \
+                mock.patch.object(run, "_fixture_values", lambda: {"OME_EVAL_NGINX_IMAGE": "nginx:test"}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            run._preempt_fill(f, target, self.NODE, pod_state or {})
+        press = [m for m in manifests if m["metadata"]["name"] == "perm-p1-press"]
+        return f, (press[0] if press else None)
+
+    def test_a_sibling_of_the_same_size_bound_after_the_aim_is_not_the_one_taken(self):
+        # Two gang leaders of the case on the node, 50m each, no budget in
+        # play: the aimed one was bound two seconds before the roll placed
+        # the other, and the scheduler takes the younger pod.
+        aim = self._pod("p1-engine-2-leader-0", "engine", 2, 41, runner="leader", ordinal=0)
+        young = self._pod("p1-engine-1-leader-0", "engine", 1, 43, runner="leader", ordinal=0)
+        f, press = self._press([aim, young], "p1-engine-2-leader-0", spare=383800)
+        self.assertIsNone(f["infra_fail"])
+        self.assertEqual(["p1-engine-2-leader-0"], self._scheduler_takes(press, [aim, young], allocatable=383900))
+
+    def test_a_router_no_budget_protects_is_not_the_one_taken(self):
+        # The moved engine's replacement is the youngest pod on the node and
+        # its Component's budget is spent while the move is in flight; the
+        # router beside it has budget left, so the scheduler takes the router.
+        aim = self._pod("p1-engine-4-default-0", "engine", 4, 55)
+        router = self._pod("p1-router-0-default-0", "router", 0, 10)
+        budgets = [({"component": "engine"}, 0), ({"component": "router"}, 1)]
+        f, press = self._press([aim, router], "p1-engine-4-default-0", spare=383650)
+        self.assertIsNone(f["infra_fail"])
+        self.assertEqual(["p1-engine-4-default-0"],
+                         self._scheduler_takes(press, [aim, router], allocatable=383750, budgets=budgets))
+
+    def test_a_pod_that_lands_after_the_spare_was_read_costs_no_second_pod(self):
+        # The spare was read at 383050m; the roll then placed a 50m pod on the
+        # node before the press was scheduled, so the room is 50m short and a
+        # press sized to the spare needs two pods out: a router and a decoder.
+        aim = self._pod("p1-engine-0-default-1", "engine", 0, 34, ordinal=1)
+        landed = self._pod("p1-engine-1-default-0", "engine", 1, 36)
+        decoder = self._pod("p1-decoder-2-default-0", "decoder", 2, 20)
+        router = self._pod("p1-router-0-default-0", "router", 0, 5)
+        when_read = [aim, decoder, router]
+        f, press = self._press(when_read, "p1-engine-0-default-1", spare=383050)
+        self.assertIsNone(f["infra_fail"])
+        self.assertEqual(["p1-engine-0-default-1"],
+                         self._scheduler_takes(press, when_read + [landed], allocatable=383200,
+                                               budgets=[({"component": "engine"}, 0)]))
+
+    def test_the_press_refuses_the_aimed_pods_company_and_asks_for_its_room_only(self):
+        aim = self._pod("p1-engine-0-default-0", "engine", 0, 1, runner="default", ordinal=0)
+        state = {"p1-engine-0-default-0": {"alive": True, "comp": "engine", "inst": "0", "ready": True, "serving": True,
+                                           "uid": "uid-stale"}}
+        f, press = self._press([aim], "p1-engine-0-default-0", spare=1000, pod_state=state)
+        self.assertIsNone(f["infra_fail"])
+        self.assertEqual("50m", press["spec"]["containers"][0]["resources"]["requests"]["cpu"],
+                         "the room the aimed pod frees, not the node's spare")
+        self.assertEqual("perm-p1-preempt", press["spec"]["priorityClassName"])
+        self.assertEqual([{"labelSelector": {"matchLabels": {"ome.io/inferenceservice": "p1", "component": "engine",
+                                                             "ome.io/instance-index": "0", "ome.io/runner": "default",
+                                                             "ome.io/pod-ordinal": "0"}},
+                           "topologyKey": "kubernetes.io/hostname"}],
+                         press["spec"]["affinity"]["podAntiAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"],
+                         "the identity labels the live pod carries, on the node")
+        self.assertEqual({"comp": "engine", "inst": "0", "serving": True, "uid": "uid-p1-engine-0-default-0"},
+                         f["pre_alive"]["p1-engine-0-default-0"], "the record names the pod as it is when the press lands")
+        self.assertEqual(50, f["victim_cpu"])
+        self.assertTrue(any("that pod and no other" in n for n in f["notes"]), f["notes"])
+        plain = run._filler_manifest("perm-p1-fill-w", "p1", "w", 100)
+        self.assertNotIn("affinity", plain["spec"], "a blocking filler keeps everyone's company")
+
+    def test_the_identity_is_what_the_live_pod_carries(self):
+        self.assertEqual({"ome.io/inferenceservice": "p1", "component": "router", "ome.io/instance-index": "1"},
+                         run._press_identity(self._pod("p1-router-1-default-0", "router", 1, 1)))
+        self.assertEqual({}, run._press_identity({"metadata": {"labels": {"app": "x"}}}))
+        self.assertEqual({}, run._press_identity(None))
+
+    def test_the_fill_refuses_to_press_when_the_aimed_pod_cannot_be_singled_out(self):
+        twin_a = self._pod("p1-engine-0-default-0", "engine", 0, 1)
+        twin_b = self._pod("p1-engine-1-default-0", "engine", 1, 2)
+        for twin in (twin_a, twin_b):
+            del twin["metadata"]["labels"]["ome.io/instance-index"]
+        f, press = self._press([twin_a, twin_b], "p1-engine-0-default-0", spare=1000)
+        self.assertIsNone(press, "no press was created")
+        self.assertIn("cannot single out p1-engine-0-default-0 on worker-2", f["infra_fail"])
+        self.assertIn("p1-engine-1-default-0", f["infra_fail"])
+        self.assertEqual([], f.get("tainted") or [], "the nodes were never closed")
+
+    def test_the_fill_refuses_to_press_once_the_aimed_pod_has_left_the_node(self):
+        aim = self._pod("p1-engine-0-default-0", "engine", 0, 1)
+        other = self._pod("p1-engine-1-default-0", "engine", 1, 2)
+        f, press = self._press([other], "p1-engine-0-default-0", spare=1000, live={"p1-engine-0-default-0": aim})
+        self.assertIsNone(press)
+        self.assertIn("p1-engine-0-default-0 is no longer on worker-2", f["infra_fail"])
+        leaving = dict(aim, metadata=dict(aim["metadata"], deletionTimestamp="t"))
+        with mock.patch.object(run, "LIFT_SETTLE_S", 0):
+            f, press = self._press([leaving, other], "p1-engine-0-default-0", spare=1000, live={"p1-engine-0-default-0": aim})
+        self.assertIsNone(press)
+        self.assertIn("is no longer on worker-2", f["infra_fail"])
+
+    def test_a_canary_press_lands_on_the_component_the_case_names(self):
+        self.assertEqual(["engine"], run._canary_press_comps({"victimcomp": "engine"}, {"decoder", "engine", "router"}))
+        self.assertEqual(["decoder", "engine", "router"], run._canary_press_comps({}, {"decoder", "engine", "router"}))
+        self.assertEqual(["decoder", "engine"], run._canary_press_comps({"victimcomp": "router"}, {"decoder", "engine"}),
+                         "a Component the operation does not act on is no aim")
 
 
 class PendingHoldTest(unittest.TestCase):
@@ -20468,7 +20655,7 @@ class PressSparesTheControlPlaneTest(unittest.TestCase):
                 mock.patch.object(run, "_control_plane_pods", lambda: cp_items), \
                 mock.patch.object(run, "_preempt_close_nodes", lambda f, nodes: (True, "the pending taint on every node")), \
                 mock.patch.object(run, "_filler_create",
-                                  lambda f, name, node, cpu, pc="": created.append((name, node, cpu, pc)) or (True, "")), \
+                                  lambda f, name, node, cpu, pc="", avoid=None: created.append((name, node, cpu, pc, avoid)) or (True, "")), \
                 contextlib.redirect_stdout(io.StringIO()):
             run._preempt_fill(f, "p1-engine-0-default-0", "worker-1", pod_state)
         return f, created
@@ -20485,8 +20672,8 @@ class PressSparesTheControlPlaneTest(unittest.TestCase):
         manager = self._pod("ome-controller-manager-abc", "ome", cpu="500m", priority=self.CP["value"])
         f, created = self._fill([manager, self._pod("cert-manager-abc", "cert-manager")], [manager])
         self.assertIsNone(f["infra_fail"])
-        self.assertEqual([("perm-p1-press", "worker-1", 250, "perm-p1-preempt")], created,
-                         "the node's spare CPU plus the aimed pod's own, under the press class")
+        self.assertEqual([("perm-p1-press", "worker-1", 50, "perm-p1-preempt", {"ome.io/inferenceservice": "p1"})], created,
+                         "the aimed pod's own CPU, under the press class, refusing that pod's company")
         self.assertEqual({"ome-controller-manager-abc": "uid-ome-controller-manager-abc"}, f["cp_pods"])
 
     def _after_fire(self):

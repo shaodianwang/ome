@@ -3010,24 +3010,31 @@ EVICTION_API = "/apis/policy/v1"
 # pod: fillers take the spare CPU of every node a case pod could land on,
 # the pending taint closes those nodes to the case (the fillers tolerate
 # it), then one filler under a PriorityClass a notch above the case's pods
-# asks for the victim's node's spare CPU plus the victim's own, so the
-# scheduler must preempt a pod there. The taint is what holds: the fillers
-# only took the room there was, and the room the preemption frees, or each
-# drain of a roll frees, would seat the case's next pod at once. Nothing of
-# the case can be placed again until the lift opens the nodes and drops the
-# fillers at lift=after-settle; lift=never keeps the hold to the end. The
-# verb needs a cluster this harness owns (it blocks every node) and the
-# PriorityClass API; elsewhere the case is skipped with the reason.
+# refuses to share the victim's node with the victim and asks for the room
+# it holds, so the scheduler must preempt that pod. The taint is what
+# holds: the fillers only took the room there was, and the room the
+# preemption frees, or each drain of a roll frees, would seat the case's
+# next pod at once. Nothing of the case can be placed again until the lift
+# opens the nodes and drops the fillers at lift=after-settle; lift=never
+# keeps the hold to the end. The verb needs a cluster this harness owns (it
+# blocks every node) and the PriorityClass API; elsewhere the case is
+# skipped with the reason.
 PRIORITY_CLASS_API = "/apis/scheduling.k8s.io/v1"
 FILLER_LABEL = "perm.test/filler"
-# The press runs one notch above the case's pods. Among the pods below it on
-# the pressed node the scheduler takes those no disruption budget covers
-# first, and the case's pods are covered, so any other pod there that
-# requests CPU would go before them: the fill refuses to press while one
-# sits there. The OME control plane the eval deploys runs under the
+# The press runs one notch above the case's pods and refuses to share its
+# node with the aimed pod (a required pod anti-affinity on the identity
+# labels that pod carries), so the scheduler can seat it only by preempting
+# that very pod; it asks for no more CPU than that pod frees, so no second
+# pod has to go. Left to size alone the scheduler would pick its own victim
+# among the pods below the press: those no disruption budget covers first,
+# the youngest after, whatever pod the press was sized for. The fill still
+# refuses to press while any other pod on the node sits below the press and
+# requests CPU. The OME control plane the eval deploys runs under the
 # fixtures' class, above any press (the capability check creates the class
 # when absent and reads the pods' priority); a control-plane pod the
 # scheduler preempts anyway fails the case as apparatus, not product.
+PRESS_IDENTITY_LABELS = ("ome.io/inferenceservice", "component", "ome.io/instance-index", "ome.io/runner",
+                         "ome.io/pod-ordinal")
 PREEMPT_WAIT_S = int(60 * TIMEOUT_MULT)
 KILL_VIAS = {"delete", "evict", "preempt"}
 FAULT_RETRY_S = 5.0
@@ -13778,12 +13785,14 @@ def _node_cpu_free(node, items=None):
     return alloc - used
 
 
-def _filler_manifest(name, case_id, node, cpu_m, priority_class=""):
+def _filler_manifest(name, case_id, node, cpu_m, priority_class="", avoid=None):
     """A pod that holds `cpu_m` millicores of `node` and nothing else: pinned
     through the hostname label (a nodeName would skip the scheduler), the
     fixture image kept idle by a shell loop, no memory request, tolerating
     the pending taint that closes the node to the case. Under a priority
-    class it is the pod the scheduler preempts for."""
+    class it is the pod the scheduler preempts for, and `avoid` (labels)
+    names the one pod it refuses to share the node with: the scheduler can
+    seat it only by preempting that pod."""
     spec = {"nodeSelector": {"kubernetes.io/hostname": node},
             "tolerations": [{"key": TAINT_KEY, "operator": "Exists", "effect": "NoSchedule"}],
             "containers": [{"name": "filler", "image": _fixture_values()["OME_EVAL_NGINX_IMAGE"],
@@ -13791,6 +13800,9 @@ def _filler_manifest(name, case_id, node, cpu_m, priority_class=""):
                             "resources": {"requests": {"cpu": _qty_str("cpu", cpu_m)}}}]}
     if priority_class:
         spec["priorityClassName"] = priority_class
+    if avoid:
+        spec["affinity"] = {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [
+            {"labelSelector": {"matchLabels": dict(avoid)}, "topologyKey": "kubernetes.io/hostname"}]}}
     return {"apiVersion": "v1", "kind": "Pod",
             "metadata": {"name": name, "namespace": NS, "labels": {FILLER_LABEL: case_id}},
             "spec": spec}
@@ -13827,8 +13839,8 @@ def _preempt_cycle_reset(f, cycle):
     return True
 
 
-def _filler_create(f, name, node, cpu_m, priority_class=""):
-    r = kubectl("apply", "-f", "-", input=json.dumps(_filler_manifest(name, f["case_id"], node, cpu_m, priority_class)))
+def _filler_create(f, name, node, cpu_m, priority_class="", avoid=None):
+    r = kubectl("apply", "-f", "-", input=json.dumps(_filler_manifest(name, f["case_id"], node, cpu_m, priority_class, avoid)))
     if r.returncode == 0:
         f["fillers"].append(name)
         return True, ""
@@ -13894,11 +13906,50 @@ def _preempt_block_node(f, node):
     return False, f"the filler on {node} never bound in 3 sizings"
 
 
-def _press_need(free, victim_cpu):
-    """The press's CPU request: the node's spare (none when the node is
-    already over its allocatable) plus the aimed pod's own, so the node fits
-    it only once one pod of the aimed pod's size has gone."""
-    return max(free, 0) + victim_cpu
+def _press_identity(obj):
+    """The identity labels a case pod carries, those that tell it from every
+    other pod of the case on its node: the service, the Component, the
+    Instance index, the gang runner and the pod ordinal, as far as present."""
+    labels = ((obj or {}).get("metadata") or {}).get("labels") or {}
+    return {k: labels[k] for k in PRESS_IDENTITY_LABELS if k in labels}
+
+
+def _press_target(items, target):
+    """The aimed pod as it sits on the node now: its object among the node's
+    pods, not on its way out; None once it has left."""
+    for it in items or []:
+        meta = it.get("metadata") or {}
+        if meta.get("name") == target and meta.get("namespace", NS) == NS and not meta.get("deletionTimestamp"):
+            return it
+    return None
+
+
+def _press_shared(items, target, identity):
+    """The other pods of the namespace on the node that carry every identity
+    label of the aimed pod (finished ones aside), sorted: a press could not
+    tell them from it."""
+    out = []
+    for it in items or []:
+        meta = it.get("metadata") or {}
+        if meta.get("name") == target or meta.get("namespace", NS) != NS:
+            continue
+        if (it.get("status") or {}).get("phase") in ("Succeeded", "Failed"):
+            continue
+        labels = meta.get("labels") or {}
+        if all(labels.get(k) == v for k, v in identity.items()):
+            out.append(str(meta.get("name") or ""))
+    return sorted(out)
+
+
+def _label_words(labels):
+    return ", ".join(f"{k}={v}" for k, v in labels.items())
+
+
+def _canary_press_comps(f, acting):
+    """The Components a canary press may land on: the one victimcomp= names
+    when the operation acts on it, else every acting one."""
+    comp = f.get("victimcomp")
+    return [comp] if comp and comp in acting else sorted(acting)
 
 
 def _preempt_close_nodes(f, nodes):
@@ -13942,11 +13993,12 @@ def _node_pods_settled(node, case_id):
 def _preempt_fill(f, target, node, pod_state):
     """Take the spare CPU of every other eligible node, close every eligible
     node to the case with the pending taint, then press on the target pod's
-    node with a filler under the case's PriorityClass that needs that node's
-    spare CPU plus the target's: the scheduler has to preempt a pod there
-    (the one it picks among the pods below the press — read back by UID
-    once it is deleted, since its replacement comes back under the same
-    name), and nothing of the case can be placed anywhere until the lift."""
+    node with a filler under the case's PriorityClass that refuses to share
+    the node with the target (anti-affinity on its identity labels) and asks
+    for the target's own CPU: the scheduler has to preempt that pod and no
+    other (read back by UID once it is deleted, since its replacement comes
+    back under the same name), and nothing of the case can be placed
+    anywhere until the lift."""
     f["fired"] = True
     f["pre_alive"] = {n: {"comp": q["comp"], "inst": q["inst"], "serving": bool(q.get("ready") and q.get("serving")),
                           "uid": str(q.get("uid") or "")}
@@ -13983,6 +14035,25 @@ def _preempt_fill(f, target, node, pod_state):
                            + ", ".join(f"{name} (priority {prio}, {cpu}m)" for name, prio, cpu in exposed)
                            + " before any pod of the case; nothing but the case's pods may sit below the press there")
         return
+    live = _press_target(items, target)
+    if live is None:
+        f["infra_fail"] = f"preempt: {target} is no longer on {node}; the press has nothing to take there"
+        return
+    identity = _press_identity(live)
+    if "ome.io/inferenceservice" not in identity:
+        f["infra_fail"] = f"preempt: {target} carries no identity label the press could aim at"
+        return
+    shared = _press_shared(items, target, identity)
+    if shared:
+        f["infra_fail"] = (f"preempt: the press cannot single out {target} on {node}: {len(shared)} other pod(s) there "
+                           f"carry the same identity labels ({_label_words(identity)}): {', '.join(shared)}")
+        return
+    # The record names the pod as it is now: the press lands on this UID.
+    q = pod_state.get(target) or {}
+    was = f["pre_alive"].setdefault(target, {"comp": q.get("comp") or identity.get("component", ""),
+                                             "inst": str(q.get("inst") or identity.get("ome.io/instance-index", "0")),
+                                             "serving": bool(q.get("ready") and q.get("serving"))})
+    was["uid"] = str((live.get("metadata") or {}).get("uid") or "") or was.get("uid", "")
     f["cp_pods"] = {str((it.get("metadata") or {}).get("name") or ""): str((it.get("metadata") or {}).get("uid") or "")
                     for it in (_control_plane_pods() or [])}
     ok, msg = _preempt_close_nodes(f, nodes)
@@ -13991,15 +14062,15 @@ def _preempt_fill(f, target, node, pod_state):
         return
     f["notes"].append(f"fault armed: {msg}")
     press = _filler_name(f, "press")
-    need = _press_need(free, victim_cpu)
-    ok, msg = _filler_create(f, press, node, need, f["pc_name"])
+    need = victim_cpu   # the room the aimed pod frees: enough once it is gone, so no second pod has to go
+    ok, msg = _filler_create(f, press, node, need, f["pc_name"], avoid=identity)
     if not ok:
         f["infra_fail"] = f"preempt: {msg}"
         return
     f["press_pod"] = press
-    f["notes"].append(f"fault fired: filler {press} under {f['pc_name']} needs {need}m on {node} "
-                      f"({max(free, 0)}m spare + {victim_cpu}m of {target}); the scheduler must preempt one pod there, "
-                      f"and the taint keeps every node closed to the case until the lift")
+    f["notes"].append(f"fault fired: filler {press} under {f['pc_name']} refuses to share {node} with {target} "
+                      f"({_label_words(identity)}) and asks for its {need}m; the scheduler must preempt that pod and no "
+                      f"other ({max(free, 0)}m spare there), and the taint keeps every node closed to the case until the lift")
     print(f"    ⚡ {f['notes'][-1]}")
 
 
@@ -16076,7 +16147,7 @@ def _hook_op(case_id, yaml_file, desc, hdr):
             return _finish(case_id, desc, hdr, ctx, "HOOK_MISSED", "INFRA-FAIL", [why], [f"  ✗ {f['infra_fail']}"])
     if kind == "preempt" and f.get("victim") == "canary":
         # A surge roll keeps only its replacements: the press lands on one once it is bound.
-        aim, why = _wait_new_bound(ctx, acting, done, budget)
+        aim, why = _wait_new_bound(ctx, _canary_press_comps(f, acting), done, budget)
         if not aim:
             f["infra_fail"] = f"{kind}:{hook}: {why}"
             return _finish(case_id, desc, hdr, ctx, "HOOK_MISSED", "INFRA-FAIL", [why], [f"  ✗ {f['infra_fail']}"])
