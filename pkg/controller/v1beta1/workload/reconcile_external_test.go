@@ -8550,6 +8550,159 @@ func TestPreemptedPod_SteadyPDService_RebuildsAndSaysWhy(t *testing.T) {
 	}
 }
 
+// A pod of a settled Instance is pointed at an image that dies at every
+// start, the break a running service takes with nothing pushed. The
+// Instance serves nothing from that moment and the restart pass owns it
+// under either policy: the pod outlived its stuck-pod grace long ago, so
+// the pass that first reads the crash records one RestartTriggered event
+// naming the Instance, before the rebuild has landed, and the Instance
+// then comes back with a new pod, Ready and serving on the revision it was
+// running. The repair opens under an unavailability budget of zero
+// because the broken set serves nothing, the three peers keep the very
+// pods they served through, no pod beyond the replica count ever exists,
+// and nothing is held, escalated or counted on a ladder.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/before, instance/Ready/pod.containerRestart/before
+func TestIdleBreak_RepairIsRecordedBeforeTheInstanceReturns(t *testing.T) {
+	for _, policy := range []workloadtypes.RestartPolicy{workloadtypes.RestartPolicyRecreateInstance, workloadtypes.RestartPolicyNone} {
+		t.Run(string(policy), func(t *testing.T) {
+			const replicas, victim = int32(4), int32(3)
+			h := newRecoveryHarnessFor(t, false, constants.MainContainerName)
+			h.recorder = record.NewFakeRecorder(256)
+			h.replicas = replicas
+			policy := policy
+			h.lifecycle.RestartPolicy = &policy
+			h.useRollingBudget(workloadtypes.UpdateStrategySurgeThenDrain)
+			if !h.run(40, func() bool { return h.settledOn(h.revV1, replicas) }) {
+				h.dumpState("initial create")
+				t.Fatalf("the Component never settled on v1 with %d Instances", replicas)
+			}
+			h.settle(3)
+			peers := map[int32]types.UID{}
+			for idx := int32(0); idx < victim; idx++ {
+				peers[idx] = h.podOf(idx, "").UID
+			}
+			broken := h.podOf(victim, "").UID
+			before := h.instance(victim).Incarnation
+			h.events = nil
+			h.crashPod(victim, "", crashStartImage)
+
+			untouched := func() {
+				t.Helper()
+				if n := len(h.livePods()); n > int(replicas) {
+					h.dumpState("surge")
+					t.Fatalf("%d live pods, want at most %d: a repair rebuilds in place and never surges", n, replicas)
+				}
+				for idx, uid := range peers {
+					if pods := h.podsOf(idx); len(pods) != 1 || pods[0].UID != uid || !h.instanceInRotation(idx) {
+						h.dumpState("peer touched")
+						t.Fatalf("Instance %d, which the break did not hit, lost the pod it served through or left rotation", idx)
+					}
+				}
+				if h.sawEvent(workloadtypes.EventReasonRepairHeld) || len(h.failedWarnings) != 0 || len(h.blocks) != 0 {
+					t.Fatalf("a steady-state break was held, escalated or counted: events=%v failed=%v blocks=%+v", h.events, h.failedWarnings, h.blocks)
+				}
+			}
+			passes := 0
+			recorded := func() bool { return h.restartEvents() > 0 }
+			if !h.runWithInvariant(6, recorded, func() { untouched(); passes++ }) {
+				h.dumpState("no record")
+				t.Fatalf("no RestartTriggered event within six passes of the break; events = %v", h.events)
+			}
+			// The pod parked long after its grace, so the first pass that
+			// reads the crash is the one that records the repair, and the
+			// record comes before any rebuild.
+			if passes != 2 {
+				t.Fatalf("the repair was recorded on pass %d after the break, want the first", passes-1)
+			}
+			if h.repairedAbove(victim, before) {
+				t.Fatalf("the Instance was rebuilt before its repair was recorded")
+			}
+			key := workloadtypes.InstanceKey(workloadtypes.ComponentEngine, victim)
+			for _, e := range h.events {
+				if strings.Contains(e, string(workloadtypes.EventReasonRestartTriggered)) && !strings.Contains(e, key) {
+					t.Fatalf("the repair's record names another Instance: %q", e)
+				}
+			}
+
+			returned := func() bool { return h.repairedAbove(victim, before) && h.settledOn(h.revV1, replicas) }
+			if !h.runWithInvariant(20, returned, untouched) {
+				h.dumpState("never returned")
+				t.Fatalf("the broken Instance never came back Ready and serving on its running revision: %+v", h.instance(victim))
+			}
+			if pod := h.podOf(victim, ""); pod.UID == broken || !h.instanceInRotation(victim) {
+				t.Fatalf("the Instance returned through the pod the break hit, or out of rotation")
+			}
+			h.requirePodsRender(victim, h.revV1, goodImage)
+			if h.restartEvents() != 1 || !h.sawEvent(workloadtypes.EventReasonRestartCompleted) {
+				t.Fatalf("want one RestartTriggered and a RestartCompleted for the one repair; events = %v", h.events)
+			}
+		})
+	}
+}
+
+// The only Instance of a Component rolls in place while a break lands on
+// its pod: the running image is swapped for one that dies at every start,
+// in the same moment the fix is pushed or right after the roll's own
+// patch. The roll owns the Instance either way. No repair is recorded,
+// the roll lands the fixed image on the same pod, re-issuing its patch
+// over a swap that came second, one pod is alive throughout, and the
+// Instance ends Ready and serving on the fixed revision with nothing
+// escalated or counted on a ladder.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-inplace, instance/Ready/pod.containerRestart/boundary@T-ready-inplace, instance/Update/InPlace/pod.waiting[CrashLoopBackOff]/before, instance/Update/InPlace/pod.containerRestart/before
+func TestSingleInstanceInPlaceRoll_BrokenAtTheBump_EndsServingWithNoRepair(t *testing.T) {
+	for _, policy := range []workloadtypes.RestartPolicy{workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance} {
+		for _, afterPatch := range []bool{false, true} {
+			name := string(policy) + "/break with the push"
+			if afterPatch {
+				name = string(policy) + "/break after the roll's patch"
+			}
+			t.Run(name, func(t *testing.T) {
+				h := offTargetCrashHarness(t, false, workloadtypes.UpdateStrategyInPlaceIfPossible, 0, 1, policy, 1)
+				h.settle(3)
+				pod := h.podOf(0, "")
+				h.events = nil
+				h.setTarget(h.revFixed, fixedImage)
+				if afterPatch {
+					patched := func() bool {
+						p := h.podOf(0, "")
+						return p.Spec.Containers[0].Image == fixedImage && h.instance(0).Operation != nil
+					}
+					if !h.run(4, patched) {
+						h.dumpState("no patch")
+						t.Fatalf("the roll never patched the pod's image in place: %+v", h.instance(0))
+					}
+				}
+				h.crashPod(0, "", crashStartImage)
+
+				onePodNoRepair := func() {
+					t.Helper()
+					if n := len(h.livePods()); n != 1 {
+						h.dumpState("pod count")
+						t.Fatalf("%d live pods, want the one the roll patches in place", n)
+					}
+					if h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+						t.Fatalf("a repair was recorded for an Instance the roll owns: %v", h.events)
+					}
+					if len(h.failedWarnings) != 0 || len(h.blocks) != 0 {
+						t.Fatalf("the roll escalated or counted the break: failed=%v blocks=%+v", h.failedWarnings, h.blocks)
+					}
+				}
+				served := func() bool { return h.settledOn(h.revFixed, 1) && h.instanceInRotation(0) }
+				if !h.runWithInvariant(20, served, onePodNoRepair) {
+					h.dumpState("never served")
+					t.Fatalf("the only Instance never ended Ready and serving on the fixed revision: %+v", h.instance(0))
+				}
+				if got := h.podOf(0, ""); got.UID != pod.UID {
+					t.Fatalf("the roll replaced the pod instead of patching it in place")
+				}
+				h.requirePodsRender(0, h.revFixed, fixedImage)
+			})
+		}
+	}
+}
+
 // An operator scales a Component whose push has failed: the pushed
 // revision cannot be pulled, so its first attempt ended with an Instance
 // row at Failed while the retry ladder is still running. The scale lands
