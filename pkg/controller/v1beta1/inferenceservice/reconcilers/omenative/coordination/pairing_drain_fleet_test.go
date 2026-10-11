@@ -132,11 +132,11 @@ func TestEvaluatePairingDrain_UnpairableSourceIsNotHeld(t *testing.T) {
 	objs = append(objs, fleetPods(v1beta1.DecoderComponent, 2, 1, 1, "v2", true)...)
 
 	if allowed, _, reason := drainGate(t, isvc, v1beta1.DecoderComponent, []string{"llama-decoder-2-default-0"}, objs...); !allowed {
-		t.Fatalf("a v2 source pairs with nothing today; its drain must proceed: %s", reason)
+		t.Fatalf("a v2 source has no peer to pair with; its drain must proceed: %s", reason)
 	}
 }
 
-// Engines that predate pairing carry the empty protocol and pair with
+// Engines without a protocol label carry the empty protocol and pair with
 // anything, so a v2 decoder replacement is capacity from the moment it
 // serves and the old decoder's drain proceeds.
 func TestEvaluatePairingDrain_EmptyProtocolPeerPairsWithTheReplacement(t *testing.T) {

@@ -12,7 +12,7 @@ import (
 // serves it as a Node field selector and RegisterNodeUnschedulableIndex
 // makes the cache serve the same selector, so CordonedNodes issues one
 // List against either reader. The name is the Kubernetes API's own field
-// path, not a behavioral value, so no config surface is required.
+// path.
 const NodeUnschedulableField = "spec.unschedulable"
 
 // NodeUnschedulableIndexExtractor is the cache IndexerFunc for

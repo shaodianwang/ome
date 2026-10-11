@@ -19,7 +19,7 @@ platform application can own the binding.
 | `quotaManager.remoteAccess.name` | Keep. Existing platform ACLs and bindings refer to this role name; renaming it is an access migration. |
 | `quotaManager.remoteAccess.subjects` | Optional, with the same semantics as placement access. |
 | `quotaManager.remoteAccess.serviceAccount.create`, `.staticToken` | Removed. Authentication provisioning does not belong in the remote-permission chart. |
-| `ome.multicluster.enabled`, `.role` | Retained for compatibility. A pure control plane needs only one conceptual mode, but the binary also supports transport plus local reconciliation (`enabled=true`, empty role). The chart currently gates flags on `enabled`, and routing validation requires both `enabled=true` and `role=control-plane`. Consolidating these requires a deliberate values/CLI migration, not deleting one setting from production. |
+| `ome.multicluster.enabled`, `.role` | Retained for compatibility. A pure control plane needs only one conceptual mode, but the binary also supports transport plus local reconciliation (`enabled=true`, empty role). The chart currently gates flags on `enabled`, and routing validation requires both `enabled=true` and `role=control-plane`. Consolidating these requires a deliberate values/CLI migration, not deleting one setting from an existing install. |
 | `ome.multicluster.placementControlPlaneID` | Keep stable. Ownership marker used by derived-object GC and cache scoping; changing it can strand existing objects. |
 | `quotaManager.mode` | Keep. Management projects quotas; workload mode measures local capacity and materializes Kueue objects. |
 | `quotaManager.projection.origin` | Keep stable. Ownership marker for projected-quota sweeps and edit protection. This is independent of placement ownership. |
@@ -42,12 +42,13 @@ both processes.
 | `quotaManager.projection.execCredentials.allowedCommands` | Keep. This chart takes a list, joined into the same CLI representation. |
 | Pod annotations, `extraEnv`, `extraVolumes`, `extraVolumeMounts` | Keep when required by the chosen identity provider. An exec allowlist does not install a plugin or supply its certificates. |
 
-The string/list inconsistency is a useful follow-up cleanup: normalize to lists
-with explicit compatibility for existing controller values. The controller's
-default allowlist (`aws,gke-gcloud-auth-plugin,kubelogin`) also differs from the
-quota manager's empty allowlist. Prefer an explicit list of the commands actually
-installed; changing defaults should cover both chart and CLI consumers together.
-No change to authentication policy is bundled with the RBAC-only cleanup.
+The two charts take different shapes for the same allowlist (a comma-separated
+string and a list). The controller's default allowlist
+(`aws,gke-gcloud-auth-plugin,kubelogin`) also differs from the quota manager's
+empty allowlist. Prefer an explicit list of the commands actually installed;
+changing defaults should cover both chart and CLI consumers together.
+Authentication policy is independent of the access templates, which grant
+permissions only.
 
 ## Transport and placement tuning
 
@@ -68,7 +69,7 @@ All options below are under `ome.multicluster.config`. Each has a consumer in
 | `placement.maxConcurrentReconciles`, `.fanoutTimeout` | Keep as worker and remote-operation bounds. |
 | `placement.winnerLostGrace` | Relevant to sticky single-active placement; not a Split distribution control. |
 | `placement.observationGrace` | Keep. How long a home whose reads fail keeps its last ready count, and so its traffic share. The start of the failure is stored in the candidate status, so a restart keeps it. Empty withdraws the count at the first failed read. |
-| `placement.memberReadRetry` (`maxAttempts`, `initialBackoff`, `maxBackoff`) | Keep. Re-reads a member within one reconcile after a timeout, a dropped connection, throttling, or a server error. Each read has its own `fanoutTimeout`, so a reconcile can spend up to `maxAttempts` times that per member. |
+| `placement.memberReadRetry` (`maxAttempts`, `initialBackoff`, `maxBackoff`) | Keep. Re-reads a member within one reconcile after a timeout, a dropped connection, throttling, or a server error. Each read has its own `fanoutTimeout`, so a reconcile can spend up to `maxAttempts` times that per member, plus the backoff waits between reads. |
 | `placement.dispatcherMode`, `.dispatcherStepSize`, `.dispatcherRoundTimeout` | Candidate-dispatch tuning for single-active placement. The step/dwell knobs are unused by AllAtOnce; Split follows its apportionment path. |
 | `placement.localQueue` | Optional fallback only. A source's `ome.io/local-queue` annotation wins. Leave empty for a fleet with per-service quota leaves. |
 | `placement.memberOperatorNamespace` | Namespace of each member's `inferenceservice-config` and pinned runtime revisions. Required for SplitByCapacity, and for any mode that must resolve a pinned runtime, a sharded model, or an operator-default floor. Empty holds that resolution. |
@@ -78,17 +79,15 @@ Empty/zero entries mostly delegate to consuming-package defaults; they need not
 be repeated in GitOps overrides. They should remain documented advanced options,
 not be removed solely because one deployment does not override them.
 
-Existing timing defaults in `workloadcluster/options.go`, `backoff.go`, and
-`placement` are hardcoded in Go. Repository guidance requires config-driven
-behavior; moving those defaults into chart values is a separate compatibility
-change, including non-Helm callers. This audit flags that existing debt rather
-than introducing more defaults or changing runtime behavior.
+Timing defaults that no value above exposes live in `workloadcluster/options.go`,
+`backoff.go`, and `placement`; they apply to every caller, including non-Helm
+installs.
 
 ## Endpoint and routing options
 
 | Options under `ome.multicluster.config` | Decision and applicability |
 | --- | --- |
-| `endpoint.globalHostTemplate`, `.globalGateway`, `.routeNamespace`, `.backendPort` | Keep for Gateway API publication. Not required by an external publisher such as xDS. Empty global gateway disables the legacy endpoint path. |
+| `endpoint.globalHostTemplate`, `.globalGateway`, `.routeNamespace`, `.backendPort` | Keep for Gateway API publication. Not required by an external publisher. Empty global gateway disables the legacy endpoint path. |
 | `endpoint.gatewayBackend.rewriteHostname` | Gateway-specific per-home Host rewrite. |
 | `endpoint.gatewayBackend.tls.enabled`, `.wellKnownCACertificates` | Gateway-specific upstream TLS policy. |
 | `endpoint.gatewayBackend.endpointSlices.enabled`, `.addressRefreshInterval` | Gateway-specific fallback when ExternalName resolution is insufficient. |
@@ -98,7 +97,7 @@ than introducing more defaults or changing runtime behavior.
 | `routing.probe` (`path`, `method`, `acceptStatuses`, `gateStatuses`, `period`, `timeout`, `failureThreshold`, `successThreshold`, `allFailedPolicy`) | Optional active endpoint health checks. Omit when readiness-based health is sufficient. |
 | `routing.capacity` (`path`, `method`, `format`, `options`, `samples`, `quorum`, `period`, `timeout`, `maxAge`) | Optional endpoint-reported capacity ceiling. Independent of probing; omit when planned capacity is sufficient. |
 
-For an xDS deployment, Gateway backend settings, probes, and capacity polling
+With an external publisher, Gateway backend settings, probes, and capacity polling
 need no override unless those capabilities are deliberately used. They remain
 valid chart features for other deployments. Publisher options are backend-owned;
 the chart cannot remove URLs, TLS paths, target templates, or timeouts on behalf

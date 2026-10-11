@@ -255,8 +255,9 @@ type Reconciler struct {
 // InferenceService — this placer writes status and its finalizer, the endpoint
 // publisher writes its own finalizer — so a write can lose a resourceVersion
 // race. That is benign and self-corrects on the requeue, so it must not surface
-// as an error-level "Reconciler error" (misleading log noise). All other results
-// pass through unchanged.
+// as an error-level "Reconciler error" (misleading log noise). Every other
+// result passes through, except that the requeue is shortened to the end of
+// the earliest observation grace so the drain after it is not late.
 func (r *Reconciler) Reconcile(ctx context.Context, request ctrl.Request) (ctrl.Result, error) {
 	wake := &graceWake{}
 	res, err := r.reconcile(context.WithValue(ctx, graceWakeKey{}, wake), request)
