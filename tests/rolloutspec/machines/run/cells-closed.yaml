@@ -157,9 +157,9 @@ cells:
     outcome: transition
     to: Adopted
     guard: "a canary unit's record is short of the ladder's end with no pin, replicas are fresh, and the plan composes"
-    note: "the run was lost while the unit was mid-ladder (the record outlived the pin); it is pinned in place without a reset. A unit whose record sits at the done sentinel has nothing in flight and opens nothing"
+    note: "the run was lost while the unit was mid-ladder (the record outlived the pin); it is pinned in place without a reset. A unit whose record sits at the done sentinel has nothing in flight and opens nothing; a negative step, an external status write, is read as the sentinel on a unit that reads Stable and as the last step the recorded weight reached otherwise, so a finished unit opens nothing and a drain is adopted"
     placement: unit
-    coverage: {perm: [], unit: [TestStatusLossRecoveryReportsAdoption, TestFinishedRefCanaryOpensNoRun], kind: []}
+    coverage: {perm: [], unit: [TestStatusLossRecoveryReportsAdoption, TestFinishedRefCanaryOpensNoRun, TestAFinishedCanaryWithANegativeStepOpensNoRun], kind: []}
     status: decided
   - state: Closed
     event: ctrl.runLost

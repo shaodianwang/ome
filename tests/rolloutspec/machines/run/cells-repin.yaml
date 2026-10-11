@@ -175,16 +175,16 @@ cells:
   - state: RepinPending
     event: canary.progress
     outcome: defer
-    note: "the verb is consumed first; a step advanced past the end of the new ladder is clamped to its last step, and a finished canary stays finished"
+    note: "the verb is consumed first; a step advanced past the end of the new ladder is clamped to its last step, and a finished canary stays finished. A negative step, an external status write, is read as the last step the recorded weight reached under the old ladder before the clamp"
     placement: unit
-    coverage: {perm: [], unit: [TestRepinCASAndClamp], kind: []}
+    coverage: {perm: [], unit: [TestRepinCASAndClamp, TestARepinReadsARewrittenStepBeforeTheClamp], kind: []}
     status: decided
   - state: RepinPending
     event: canary.completed
     outcome: defer
-    note: "the verb is consumed first; a canary finished under the old ladder is kept finished by the clamp and the close is judged next pass"
+    note: "the verb is consumed first; a canary finished under the old ladder is kept finished by the clamp and the close is judged next pass. A negative step on a unit that reads Stable, an external status write, is read as finished too, so the repin cannot restart it"
     placement: unit
-    coverage: {perm: [], unit: [TestRepinCASAndClamp], kind: []}
+    coverage: {perm: [], unit: [TestRepinCASAndClamp, TestARepinReadsARewrittenStepBeforeTheClamp], kind: []}
     status: decided
   - state: RepinPending
     event: canary.rolledBack

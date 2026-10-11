@@ -135,9 +135,9 @@ cells:
     outcome: transition
     to: Adopted
     guard: "a canary unit's record is short of the ladder's end or its revert is still draining, replicas are fresh, and the plan composes"
-    note: "the pin is rebuilt around the ladder in place: no reset, no traffic movement, the record bound by TargetID; a unit whose reference does not resolve parks the open instead and the adoption is re-attempted every pass"
+    note: "the pin is rebuilt around the ladder in place: no reset, no traffic movement, the record bound by TargetID; a unit whose reference does not resolve parks the open instead and the adoption is re-attempted every pass. A negative step, an external status write, is read as the done sentinel on a unit that reads Stable, so a finished unit opens nothing"
     placement: unit
-    coverage: {perm: [], unit: [TestStatusLossRecoveryReportsAdoption, TestMidLadderRefCanaryIsAdopted, TestAdoptingRunKeepsRecordsOnlyForTheUnitInFlight, TestAdoptedRunPinsStableFromTheRolledOutRevision], kind: []}
+    coverage: {perm: [], unit: [TestStatusLossRecoveryReportsAdoption, TestMidLadderRefCanaryIsAdopted, TestAdoptingRunKeepsRecordsOnlyForTheUnitInFlight, TestAdoptedRunPinsStableFromTheRolledOutRevision, TestAFinishedCanaryWithANegativeStepOpensNoRun], kind: []}
     status: decided
   - state: NoRun
     event: ctrl.runLost
