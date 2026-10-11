@@ -11456,26 +11456,96 @@ class RollbackUnderBreakTest(unittest.TestCase):
         self.assertEqual(7.0, run._held_break_late_pod("x", self._pod("engine", 1, "b", "L9"), fire + 7.0, fire)["after"],
                          "no stamp: dated by the watch's first sight")
         hb = {"fire_at": fire, "late_pods": [rec, run._held_break_late_pod("p-engine-0-worker-0", race["p-engine-0-worker-0"], fire + 2.0, fire)]}
-        old, ppi = {"a"}, {"engine": 2}
+        old, ppi, N = {"a"}, {"engine": 2}, {"engine": 4}
         at = lambda: [r["replaced_at"] for r in hb["late_pods"]]
-        run._held_break_late_replaced(hb, dict(race), old, ppi, fire + 20.0)
+        run._held_break_late_replaced(hb, dict(race), old, ppi, N, fire + 20.0)
         self.assertEqual([None, None], at(), "the race set is alive")
         state = {"p-engine-0-worker-0": race["p-engine-0-worker-0"], "p-engine-0-leader-0": None}
-        run._held_break_late_replaced(hb, state, old, ppi, fire + 30.0)
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 30.0)
         self.assertEqual([None, None], at(), "the worker still carries the withdrawn revision")
         state = {"p-engine-0-leader-0": self._pod("engine", 0, "a", "L3")}
-        run._held_break_late_replaced(hb, state, old, ppi, fire + 36.0)
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 36.0)
         self.assertEqual([None, None], at(), "the Instance is one pod short of a set")
         state["p-engine-0-worker-0"] = self._pod("engine", 0, "a", "W3")
-        run._held_break_late_replaced(hb, state, old, ppi, fire + 38.0)
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 38.0)
         self.assertEqual([38.0, 38.0], at(), "the full set on the starting revision")
-        run._held_break_late_replaced(hb, state, old, ppi, fire + 50.0)
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 50.0)
         self.assertEqual([38.0, 38.0], at(), "dated once")
         rec = run._held_break_late_pod("p-engine-1-leader-0", self._pod("engine", 1, "b", "L8"), fire + 40.0, fire)
         hb["late_pods"].append(rec)
         state["p-engine-1-leader-0"] = self._pod("engine", 1, "a", "L9")
-        run._held_break_late_replaced(hb, state, old, ppi, fire + 60.0)
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 60.0)
         self.assertEqual([38.0, 38.0, None], at(), "a gone pod whose Instance is still a pod short is not replaced")
+
+    def test_held_moment_reads_a_gang_replaced_by_a_surge_to_another_index(self):
+        """Shaped like a two-gang push whose first replacement, promoted at
+        index 2, crashed under load: a repair had deleted that gang when the
+        rollback fired, so its rebuilt leader and worker, created two seconds
+        after the fire, carry the withdrawn revision. A gang is replaced by a
+        surge to another index and the roll removes the index it left, so the
+        pair reads replaced once index 2 holds no pod and the Component is
+        whole on the starting revision, not before."""
+        fire, pod = 1000.0, self._pod
+        old, ppi, N = {"a"}, {"engine": 2}, {"engine": 2}
+        state = {"e1-l": pod("engine", 1, "a", "L1"), "e1-w": pod("engine", 1, "a", "W1"),
+                 "e0-l": pod("engine", 0, "b", "L0b"), "e0-w": pod("engine", 0, "b", "W0b"),
+                 "e2-l": pod("engine", 2, "b", "L2b", ready=False, serving=False),
+                 "e2-w": pod("engine", 2, "b", "W2b", ready=False, serving=False)}
+        hb = {"fire_at": fire, "late_pods": [run._held_break_late_pod("e2-l", state["e2-l"], fire + 2.0, fire),
+                                             run._held_break_late_pod("e2-w", state["e2-w"], fire + 2.0, fire)]}
+        at = lambda: [r["replaced_at"] for r in hb["late_pods"]]
+        self.assertEqual([2.0, 2.0], [r["after"] for r in hb["late_pods"]])
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 5.0)
+        self.assertEqual([None, None], at(), "the rebuilt gang stands")
+        # the superseded replacement at index 0 is abandoned, the rebuilt gang comes up and serves
+        del state["e0-l"], state["e0-w"]
+        state["e2-l"], state["e2-w"] = pod("engine", 2, "b", "L2b"), pod("engine", 2, "b", "W2b")
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 20.0)
+        self.assertEqual([None, None], at(), "the gang serves on the withdrawn revision")
+        # the roll surges the gang to index 0 on the starting revision; the source still stands
+        state["e0-l"], state["e0-w"] = pod("engine", 0, "a", "L0a"), pod("engine", 0, "a", "W0a")
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 30.0)
+        self.assertEqual([None, None], at(), "the gang stands beside its replacement")
+        # the replacement serves, so the roll removes index 2
+        del state["e2-l"], state["e2-w"]
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 38.0)
+        self.assertEqual([38.0, 38.0], at(), "index 2 is empty and the Component is whole on the starting revision")
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 50.0)
+        self.assertEqual([38.0, 38.0], at(), "dated once")
+        counted, raced = run._held_break_late_split(hb["late_pods"])
+        self.assertEqual(([], ["e2-l", "e2-w"]), (counted, [r["pod"] for r in raced]))
+        notes, checks = [], []
+        self.assertEqual("PASS", run._held_break_checks(self._hb(kind="crash-load", late_pods=hb["late_pods"]), "engine", "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any(c.lstrip().startswith("ⓘ") and "e2-l" in c and "not counted" in c for c in checks), checks)
+
+    def test_held_moment_gang_replacement_needs_the_component_whole(self):
+        """The same shape under a prefill/decode service: the decoder and the
+        router, which the push never bumped, do not stand in for an engine
+        Instance, and an engine still one Instance short on the starting
+        revision reads nothing, so a gang the roll never replaced counts."""
+        fire, pod = 1000.0, self._pod
+        old, ppi, N = {"a"}, {"engine": 2, "decoder": 1, "router": 1}, {"engine": 2, "decoder": 2, "router": 2}
+        state = {"e1-l": pod("engine", 1, "a", "L1"), "e1-w": pod("engine", 1, "a", "W1"),
+                 "d0": pod("decoder", 0, "a", "D0"), "d1": pod("decoder", 1, "a", "D1"),
+                 "r0": pod("router", 0, "a", "R0"), "r1": pod("router", 1, "a", "R1")}
+        gone_l, gone_w = pod("engine", 2, "b", "L2b", ready=False, serving=False), pod("engine", 2, "b", "W2b", ready=False, serving=False)
+        hb = {"fire_at": fire, "late_pods": [run._held_break_late_pod("e2-l", gone_l, fire + 1.0, fire),
+                                             run._held_break_late_pod("e2-w", gone_w, fire + 1.0, fire)]}
+        at = lambda: [r["replaced_at"] for r in hb["late_pods"]]
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 40.0)
+        self.assertEqual([None, None], at(), "four pods of the members nobody bumped do not make the engine whole")
+        state["e0-l"] = pod("engine", 0, "a", "L0a")
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 45.0)
+        self.assertEqual([None, None], at(), "the replacement is one pod short of a set")
+        counted, raced = run._held_break_late_split(hb["late_pods"])
+        self.assertEqual((["e2-l", "e2-w"], []), ([r["pod"] for r in counted], raced))
+        notes = []
+        self.assertEqual("FAIL", run._held_break_checks(self._hb(kind="crash-load", late_pods=hb["late_pods"]), "engine", "PASS", notes, []))
+        self.assertTrue(any("2 pod(s) of the withdrawn revision created after the rollback" in n for n in notes), notes)
+        state["e0-w"] = pod("engine", 0, "a", "W0a")
+        run._held_break_late_replaced(hb, state, old, ppi, N, fire + 48.0)
+        self.assertEqual([48.0, 48.0], at(), "the engine is whole on the starting revision without index 2")
 
     def test_held_moment_symptom_reads_the_kubelet(self):
         pods = {"e0": self._pod("engine", 0, "a", "u0"), "e5": self._pod("engine", 5, "b", "u5", ready=False, serving=False),

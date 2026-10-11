@@ -4754,7 +4754,7 @@ def _rollback_held_break(case_id, yaml_file, desc, hdr):
                     if p and p.get("uid") and p.get("comp") in bumped and _pod_on_new(p, old) and p["uid"] not in new_uids:
                         new_uids[p["uid"]] = now
                         hb["late_pods"].append(_held_break_late_pod(name, p, now, hb["fire_at"]))
-                _held_break_late_replaced(hb, ctx["pod_state"], old, ppi, now)
+                _held_break_late_replaced(hb, ctx["pod_state"], old, ppi, N, now)
                 if not _rollback_settled_pods(ctx["pod_state"], ctx["agg"], N, configured, bumped, old):
                     stable = None
                     continue
@@ -4803,10 +4803,14 @@ def _held_break_late_pod(name, p, now, fire_at):
             "after": (_event_epoch(p.get("created")) or now) - fire_at, "replaced_at": None}
 
 
-def _held_break_late_replaced(hb, pod_state, old_hashes, pods_per_inst, now):
-    """Date each late pod that is gone while its Instance runs a full pod set
-    on the starting revision as replaced by the roll, at its first sight."""
-    by = None
+def _held_break_late_replaced(hb, pod_state, old_hashes, pods_per_inst, N, now):
+    """Date each late pod that is gone while the roll has replaced its
+    Instance, at its first sight. A single-pod Instance is replaced where it
+    stands: its index runs a full pod set on the starting revision. A gang is
+    replaced by a surge to another index, and the roll removes the index it
+    left once the replacement serves: its index holds no pod while the
+    Component is whole on the starting revision."""
+    by, whole = None, {}
     for rec in hb["late_pods"]:
         if rec["replaced_at"] is not None:
             continue
@@ -4815,9 +4819,23 @@ def _held_break_late_replaced(hb, pod_state, old_hashes, pods_per_inst, now):
             continue
         if by is None:
             by = _instances_by_index(pod_state, {r["comp"] for r in hb["late_pods"]})
-        pods = by.get((rec["comp"], rec["inst"]), [])
-        if len(pods) >= max(1, pods_per_inst.get(rec["comp"], 1)) and not any(_pod_on_new(p, old_hashes) for p in pods):
+        comp = rec["comp"]
+        want = max(1, pods_per_inst.get(comp, 1))
+        pods = by.get((comp, rec["inst"]), [])
+        if pods:
+            replaced = _held_break_set_on_start(pods, want, old_hashes)
+        else:
+            if comp not in whole:
+                whole[comp] = sum(1 for (c, _i), ps in by.items()
+                                  if c == comp and _held_break_set_on_start(ps, want, old_hashes)) >= max(1, N.get(comp, 1))
+            replaced = whole[comp]
+        if replaced:
             rec["replaced_at"] = now - hb["fire_at"]
+
+
+def _held_break_set_on_start(pods, want, old_hashes):
+    """A full pod set of `want` pods with none on the withdrawn revision."""
+    return len(pods) >= want and not any(_pod_on_new(p, old_hashes) for p in pods)
 
 
 def _held_break_late_split(late):
