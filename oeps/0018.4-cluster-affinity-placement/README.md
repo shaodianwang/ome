@@ -883,14 +883,16 @@ accepted plans and Ready status after migration, and compare workload identities
 to detect unintended replacement. Reject retired input in GitOps validation so
 subsequent promotions cannot restore it.
 
-Origin-marked members without execution authority stop before workload writes.
-Ordinary local services retain their execution behavior. Direct adoption keeps
-the origin handoff: the hub may observe a member before it has stamped execution
-authority, while the member controller waits for that authority. Deletion still
-permits cleanup. Execution envelopes v1, v2, and v3, ownership fencing, status
-recovery, and endpoint-publisher cleanup are separate contracts and remain
-supported. The policy metric exposes `policy` and `mode`; selector/spread labels
-and the per-cluster minimum metric are removed.
+An origin-marked member without execution authority keeps reconciling as a
+local service and reports `PlacementReplicaFloorsReady=Unknown` with reason
+`ExecutionPolicyPending`; the member rules (OMENative backend, replica floors,
+deferred model configuration) apply once a policy exists. Ordinary local
+services retain their execution behavior. Direct adoption keeps the origin
+handoff: the hub may observe a member before it has stamped execution
+authority. Deletion still permits cleanup. Execution envelopes v1, v2, and v3,
+ownership fencing, status recovery, and endpoint-publisher cleanup are separate
+contracts and remain supported. The policy metric exposes `policy` and `mode`;
+selector/spread labels and the per-cluster minimum metric are removed.
 
 Rollback must use a ClusterAffinity-capable release. Restoring an older schema
 does not restore removed restrictions or authorize a Legacy writer.

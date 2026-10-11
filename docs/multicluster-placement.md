@@ -23,8 +23,10 @@ annotation. An unsupported backend sets the advisory
 configuration updates. Existing serving resources remain intact; correcting the
 runtime or service resumes reconciliation. VirtualDeployment cannot participate.
 Member deletion still permits cleanup. Local services retain all deployment
-modes and do not gain this condition. Origin-marked members without an execution
-policy stop before workload writes, including during direct ownership handoff.
+modes and do not gain this condition. An origin-marked service without an
+execution policy, including during direct ownership handoff, keeps reconciling
+as a local service and reports `PlacementReplicaFloorsReady=Unknown` with reason
+`ExecutionPolicyPending` until the source writes the policy.
 
 The source checks each target through its identified direct member connection
 before granting workload updates, then verifies runtime dependencies and source
