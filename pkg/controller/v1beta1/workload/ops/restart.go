@@ -753,8 +753,11 @@ func rebuildFollowsTarget(input workload.ReconcileInput, plan workload.Component
 // restart is their recovery path and does not break the Instance's process
 // group. A nil readySince (Instance was last promoted before the field
 // existed) reports false; the anchor appears on the next Ready transition.
+// A pod created after readySince is not one of the pods that were Ready
+// then: its container's first run began after readySince by construction,
+// so it reports false too (podCreatedAfterReady).
 func RunnerRestartedSinceReady(pod *corev1.Pod, readySince *metav1.Time) (string, bool) {
-	if pod == nil || readySince == nil || readySince.IsZero() || pod.DeletionTimestamp != nil {
+	if pod == nil || readySince == nil || readySince.IsZero() || pod.DeletionTimestamp != nil || podCreatedAfterReady(pod, readySince) {
 		return "", false
 	}
 	for i := range pod.Status.ContainerStatuses {
@@ -785,9 +788,10 @@ func RunnerRestartedSinceReady(pod *corev1.Pod, readySince *metav1.Time) (string
 // restart before it. A container that keeps dying under load reads this
 // way from its second crash on; one the kubelet restarted once never
 // does, because the run that crashed is the run that was promoted. The
-// nil and zero readySince rules of RunnerRestartedSinceReady apply.
+// nil and zero readySince rules of RunnerRestartedSinceReady apply, and so
+// does its reading of a pod created after readySince.
 func RunnerRestartedAgainSinceReady(pod *corev1.Pod, readySince *metav1.Time) bool {
-	if pod == nil || readySince == nil || readySince.IsZero() || pod.DeletionTimestamp != nil {
+	if pod == nil || readySince == nil || readySince.IsZero() || pod.DeletionTimestamp != nil || podCreatedAfterReady(pod, readySince) {
 		return false
 	}
 	for i := range pod.Status.ContainerStatuses {
@@ -799,6 +803,15 @@ func RunnerRestartedAgainSinceReady(pod *corev1.Pod, readySince *metav1.Time) bo
 		return t != nil && t.StartedAt.After(readySince.Time)
 	}
 	return false
+}
+
+// podCreatedAfterReady reports whether pod was created after the Instance
+// entered Ready. readySince names the pods that were Ready at that time, so
+// a younger pod is a new pod, built after that set was lost or replaced: a
+// run of its container that began after readySince is its first run, not a
+// restart. A pod with no creation time recorded counts as one of that set.
+func podCreatedAfterReady(pod *corev1.Pod, readySince *metav1.Time) bool {
+	return !pod.CreationTimestamp.IsZero() && pod.CreationTimestamp.After(readySince.Time)
 }
 
 // Crash-loop repair: a wedge no other pass owns.

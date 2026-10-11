@@ -7618,7 +7618,9 @@ func nodeLossStories() []nodeLossStory {
 // node-b) and Instance 1 on nodes the failure never touches.
 func newNodeLossHarness(t *testing.T, story nodeLossStory, policy *workloadtypes.ForceDeletePolicy) *recoveryHarness {
 	t.Helper()
-	h := newRecoveryHarness(t, story.multiPod)
+	// The pods render the runner container, so the rebuilt set is read
+	// for restart evidence the way the restart pass and the roll read it.
+	h := newRecoveryHarnessFor(t, story.multiPod, constants.MainContainerName)
 	h.replicas = 2
 	restart := story.policy
 	h.lifecycle.RestartPolicy = &restart
@@ -7683,6 +7685,25 @@ func (h *recoveryHarness) requireNoGracefulDeleteOn(node string) {
 	}
 }
 
+// requireRebuiltSetNotReadAsRestarted fails when a pod of Instance idx
+// reads as restarted against the row's ReadySince: the row keeps the
+// ReadySince of the set it lost until the rebuilt set is promoted, and a
+// pod created after that time is a new pod whose first start is no restart.
+// Read this way, the rebuilt set would be drained and rebuilt once more.
+func (h *recoveryHarness) requireRebuiltSetNotReadAsRestarted(idx int32) {
+	h.t.Helper()
+	s := h.instance(idx)
+	if s == nil {
+		return
+	}
+	for _, pod := range h.podsOf(idx) {
+		if reason, restarted := workloadops.RunnerRestartedSinceReady(pod, s.ReadySince); restarted {
+			h.dumpState("rebuilt set read as restarted")
+			h.t.Fatalf("a pod of the rebuilt Instance %d reads as restarted against the ReadySince of the set it replaced: %s", idx, reason)
+		}
+	}
+}
+
 // servingElsewhere reports whether Instance 0 is Ready with no operation on
 // its running revision, every pod of it live, serving and PodReady on a
 // node other than the dead one.
@@ -7717,6 +7738,7 @@ func TestNodeLoss_ServingInstanceIsRebuiltElsewhereUnderTheForceDeletePolicy(t *
 			invariant := func() {
 				h.requirePeerInRotation(peer, peerIncarnation)
 				h.requireNoGracefulDeleteOn(nodeLossDeadNode)
+				h.requireRebuiltSetNotReadAsRestarted(0)
 			}
 
 			h.failNode(nodeLossDeadNode)
@@ -7842,7 +7864,9 @@ func (h *recoveryHarness) servingPodsOf(idx int32) int {
 // touches.
 func newWholeGangNodeLossHarness(t *testing.T, policy *workloadtypes.ForceDeletePolicy) *recoveryHarness {
 	t.Helper()
-	h := newRecoveryHarness(t, true)
+	// The pods render the runner container, so the rebuilt gang is read
+	// for restart evidence the way the restart pass and the roll read it.
+	h := newRecoveryHarnessFor(t, true, constants.MainContainerName)
 	restart := workloadtypes.RestartPolicyRecreateInstance
 	h.lifecycle.RestartPolicy = &restart
 	h.podGrace = 30 * time.Second
@@ -7925,6 +7949,7 @@ func TestNodeLoss_WholeGangOnTheDeadNodeIsRebuiltElsewhere(t *testing.T) {
 			invariant := func() {
 				h.requirePeerInRotation(peer, peerIncarnation)
 				h.requireNoGracefulDeleteOn(nodeLossDeadNode)
+				h.requireRebuiltSetNotReadAsRestarted(0)
 				if h.sawEvent(workloadtypes.EventReasonPodForceDeleted) {
 					if on := h.podsOnNode(nodeLossDeadNode); len(on) != 0 {
 						t.Fatalf("the sweep freed part of the gang and left %d pod(s) on %s", len(on), nodeLossDeadNode)
