@@ -15393,6 +15393,36 @@ class PreemptFaultTest(unittest.TestCase):
             self.assertEqual("r1", run._preempt_victim(g, {"e0": e0, "r1": None}))
         self.assertFalse(g["victim_was_serving"], "a pod taken before it ever served lowers no floor")
 
+    def test_a_pod_that_came_to_serve_before_it_was_taken_lowers_the_floor(self):
+        # The aimed surge pod was starting when the fault fired and served by
+        # the time the scheduler took it: the record follows it to the end.
+        f = self._armed()
+        f.update(pre_alive={"e2": {"comp": "engine", "inst": "2", "serving": False, "uid": "u-e2"}},
+                 aim_node="kind-worker", fire_ts=1.0, not_victim=set(), preempted=[], taken={})
+        serving = {"e2": {"alive": True, "uid": "u-e2", "comp": "engine", "inst": "2", "ready": True, "serving": True}}
+        with mock.patch.object(run, "_pod_preempted", lambda n, **_k: self.fail("a live pod is not read")):
+            self.assertIsNone(run._preempt_victim(f, serving))
+        with mock.patch.object(run, "_pod_preempted", lambda n, **_k: True), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual("e2", run._preempt_victim(f, {"e2": None}))
+        self.assertTrue(f["victim_was_serving"])
+        self.assertEqual({"e2": {"comp": "engine", "inst": "2", "serving": True}}, f["taken"])
+        self.assertEqual({"engine": 1}, run._press_took(f))
+        # Seen first on its way out, Ready and serving still: it served when it was taken.
+        g = self._armed()
+        g.update(pre_alive={"e2": {"comp": "engine", "inst": "2", "serving": False, "uid": "u-e2"}},
+                 aim_node="kind-worker", fire_ts=1.0, not_victim=set(), preempted=[], taken={})
+        leaving = {"e2": {"alive": False, "uid": "u-e2", "comp": "engine", "inst": "2", "ready": True, "serving": True}}
+        with mock.patch.object(run, "_pod_preempted", lambda n, **_k: True), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual("e2", run._preempt_victim(g, leaving))
+        self.assertTrue(g["taken"]["e2"]["serving"])
+        # A pod that never served before it went still lowers nothing.
+        h = self._armed()
+        h.update(pre_alive={"e2": {"comp": "engine", "inst": "2", "serving": False, "uid": "u-e2"}},
+                 aim_node="kind-worker", fire_ts=1.0, not_victim=set(), preempted=[], taken={})
+        with mock.patch.object(run, "_pod_preempted", lambda n, **_k: True), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual("e2", run._preempt_victim(h, {"e2": {"alive": False, "uid": "u-e2", "ready": False, "serving": False}}))
+        self.assertFalse(h["taken"]["e2"]["serving"])
+
     def test_preemption_is_read_off_the_condition_or_the_event(self):
         marked = {"status": {"conditions": [{"type": "DisruptionTarget", "reason": "PreemptionByScheduler"}]},
                   "metadata": {"deletionTimestamp": "t"}}
@@ -15630,6 +15660,23 @@ class PressAimsTrueTest(unittest.TestCase):
         self.assertTrue(any("that pod and no other" in n for n in f["notes"]), f["notes"])
         plain = run._filler_manifest("perm-p1-fill-w", "p1", "w", 100)
         self.assertNotIn("affinity", plain["spec"], "a blocking filler keeps everyone's company")
+
+    def test_the_record_takes_the_aimed_pods_serving_state_as_the_press_lands(self):
+        # The fill snapshots the pods as the fault fires; the blocking fillers
+        # and the taint then take seconds, in which the aimed surge pod passes
+        # its probes and serves. Its loss costs its Component's floor one.
+        aim = self._pod("p1-engine-2-leader-0", "engine", 2, 1, runner="leader", ordinal=0)
+        aim["status"]["conditions"] = [{"type": "Ready", "status": "True"}, {"type": run.SERVING_COND, "status": "True"}]
+        state = {"p1-engine-2-leader-0": {"alive": True, "comp": "engine", "inst": "2", "ready": False, "serving": False,
+                                          "uid": "uid-p1-engine-2-leader-0"}}
+        f, press = self._press([aim], "p1-engine-2-leader-0", spare=383550, pod_state=state)
+        self.assertIsNone(f["infra_fail"])
+        self.assertIsNotNone(press)
+        self.assertEqual({"comp": "engine", "inst": "2", "serving": True, "uid": "uid-p1-engine-2-leader-0"},
+                         f["pre_alive"]["p1-engine-2-leader-0"], "serving as the press lands, whatever it was at the fire")
+        starting = dict(aim, status=dict(aim["status"], conditions=[{"type": "Ready", "status": "False"}]))
+        f, _press = self._press([starting], "p1-engine-2-leader-0", spare=383550, pod_state=state)
+        self.assertFalse(f["pre_alive"]["p1-engine-2-leader-0"]["serving"], "a pod still starting lowers no floor")
 
     def test_the_identity_is_what_the_live_pod_carries(self):
         self.assertEqual({"ome.io/inferenceservice": "p1", "component": "router", "ome.io/instance-index": "1"},

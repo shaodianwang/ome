@@ -14054,6 +14054,8 @@ def _preempt_fill(f, target, node, pod_state):
                                              "inst": str(q.get("inst") or identity.get("ome.io/instance-index", "0")),
                                              "serving": bool(q.get("ready") and q.get("serving"))})
     was["uid"] = str((live.get("metadata") or {}).get("uid") or "") or was.get("uid", "")
+    # The fill takes seconds, in which a surge pod may come to serve: its loss then costs its floor one.
+    was["serving"] = bool(was.get("serving")) or (_pod_ready(live) and _pod_serving(live))
     f["cp_pods"] = {str((it.get("metadata") or {}).get("name") or ""): str((it.get("metadata") or {}).get("uid") or "")
                     for it in (_control_plane_pods() or [])}
     ok, msg = _preempt_close_nodes(f, nodes)
@@ -14152,10 +14154,11 @@ def _preempt_victim(f, pod_state):
     one, and more than one when the room the press needs has grown);
     gone, deleting or back under the same name with another UID now,
     confirmed by the scheduler's own record (a pod the roll drained has
-    none). Every one is kept in `taken` with the serving state it had and
-    announced with the running count; the first is the fault's victim.
-    None, with the apparatus failure recorded, once a control-plane pod
-    went instead."""
+    none). Every one is kept in `taken` with whether it served at any point
+    before it went (a pod still starting at the fire may serve by the time
+    the press takes it) and announced with the running count; the first is
+    the fault's victim. None, with the apparatus failure recorded, once a
+    control-plane pod went instead."""
     if _preempt_apparatus_hit(f):
         return None
     if not f.get("pre_alive"):
@@ -14173,8 +14176,10 @@ def _preempt_victim(f, pod_state):
             continue
         q = pod_state.get(name)
         uid = was.get("uid") or ""
-        if q is not None and q["alive"] and (not uid or str(q.get("uid") or "") == uid):
-            continue
+        if q is not None and (not uid or str(q.get("uid") or "") == uid):
+            was["serving"] = bool(was.get("serving")) or bool(q.get("ready") and q.get("serving"))
+            if q["alive"]:
+                continue
         if not _pod_preempted(name, uid=uid):
             f["not_victim"].add(name)
             continue
