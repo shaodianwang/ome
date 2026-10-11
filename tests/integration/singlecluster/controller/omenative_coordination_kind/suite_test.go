@@ -108,6 +108,9 @@ func TestOMENativeCoordinationKindController(t *testing.T) {
 		// Scheduler dimension: OME_TEST_SCHEDULER=ome-scheduler installs the gang
 		// scheduler and the fixture runtime selects it.
 		Scheduler: kindfix.SchedulerFromEnv(),
+		// Every spec runs under the shared OMENative invariant sampler,
+		// advisory: sustained violations are reported, not failed.
+		Invariants: &kindutil.InvariantSampling{},
 	})
 
 	gomega.RegisterFailHandler(ginkgo.Fail)

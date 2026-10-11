@@ -63,6 +63,9 @@ func TestOMENativePerm(t *testing.T) {
 		CRDPaths:    kindfix.OMECRDPaths(),
 		Setup:       nil, // EXTERNAL manager — no in-process controller.
 		Scheduler:   kindfix.SchedulerFromEnv(),
+		// Every case runs under the shared OMENative invariant sampler,
+		// advisory: sustained violations are reported, not failed.
+		Invariants: &kindutil.InvariantSampling{},
 	})
 
 	suiteCtx = state.Ctx

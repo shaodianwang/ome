@@ -67,6 +67,11 @@ type SuiteOpts struct {
 	// the CRDs and before the manager, and adds the PodGroup CRD to CRDPaths.
 	// Fixture runtimes select it through spec.schedulerName (see kindfix).
 	Scheduler *SchedulerInstall
+
+	// Invariants, when set, runs the shared OMENative invariant sampler
+	// around every spec and reports the invariants that stayed broken; see
+	// InvariantSampling for the advisory and enforcing modes.
+	Invariants *InvariantSampling
 }
 
 // SuiteState is the shared, cross-spec state every KIND-backed
@@ -139,7 +144,9 @@ func Suite() *SuiteState {
 //  6. Starts the in-process controller manager (if Setup is set)
 //  7. Registers the Ginkgo failure diagnostics: a failed spec dumps its
 //     pending pods and their scheduling events, and under a Scheduler
-//     install the PodGroups and the scheduler pod's log tail as well
+//     install the PodGroups and the scheduler pod's log tail as well;
+//     with Invariants set, the invariant sampler runs around every spec
+//     and reports before the diagnostics
 //  8. Stores SuiteState so test code can call Suite()
 //  9. Tears down on TestMain exit (cluster delete honors KIND_KEEP_CLUSTER=1)
 //
@@ -230,6 +237,9 @@ func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 		t.Cleanup(state.stopManager)
 	}
 
+	// The sampler's report precedes the diagnostics, so an enforced
+	// violation is explained by the same dump as any other failure.
+	registerInvariantSampler(state, opts.Invariants)
 	registerFailureDiagnostics(state, opts.Scheduler)
 
 	setActiveSuite(state)

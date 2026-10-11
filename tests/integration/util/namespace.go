@@ -3,6 +3,8 @@ package util
 import (
 	"context"
 	"fmt"
+	"sort"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -10,9 +12,43 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// ownedNamespaces are the namespaces this process created through
+// CreateNamespaceFromPrefix and has not yet deleted through DeleteNamespace.
+// Suite-wide observers read them to find the objects the running spec owns.
+var (
+	ownedMu         sync.Mutex
+	ownedNamespaces = map[string]struct{}{}
+)
+
+// OwnedNamespaces returns, in name order, the namespaces this process created
+// and still owns.
+func OwnedNamespaces() []string {
+	ownedMu.Lock()
+	defer ownedMu.Unlock()
+	out := make([]string, 0, len(ownedNamespaces))
+	for name := range ownedNamespaces {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func ownNamespace(name string) {
+	ownedMu.Lock()
+	defer ownedMu.Unlock()
+	ownedNamespaces[name] = struct{}{}
+}
+
+func disownNamespace(name string) {
+	ownedMu.Lock()
+	defer ownedMu.Unlock()
+	delete(ownedNamespaces, name)
+}
+
 // CreateNamespaceFromPrefix creates a Namespace whose name starts with
 // the given prefix and a unique suffix assigned by the apiserver via
-// metav1.GenerateName. Returns the created Namespace (with Name set).
+// metav1.GenerateName. Returns the created Namespace (with Name set) and
+// records it as owned by this process until DeleteNamespace.
 //
 // Per-test namespaces are the primary isolation mechanism — cluster-
 // scoped resources (ClusterBaseModel, AcceleratorClass) still need
@@ -23,6 +59,7 @@ func CreateNamespaceFromPrefix(ctx context.Context, c client.Client, prefix stri
 	if err := c.Create(ctx, ns); err != nil {
 		return nil, fmt.Errorf("create namespace with prefix %q: %w", prefix, err)
 	}
+	ownNamespace(ns.Name)
 	return ns, nil
 }
 
@@ -44,6 +81,7 @@ func DeleteNamespace(ctx context.Context, c client.Client, namespace string) err
 	if namespace == "" {
 		return nil
 	}
+	disownNamespace(namespace)
 
 	if err := runRegisteredCleanups(ctx, c, namespace); err != nil {
 		return fmt.Errorf("namespace %q cleanup hook: %w", namespace, err)
