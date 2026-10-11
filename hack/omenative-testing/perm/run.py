@@ -7396,9 +7396,11 @@ def _fault_readiness_fire(f, pod_state, old_hashes):
 # brings up. The aimed pod is asked on the clock, every ONCE_POLL_S, not on
 # pod events: a pod raises none between its container running and Ready,
 # the window a kill at start has. After the kill the victim is read live
-# until its restart count rises, because a roll that retires its gang at a
-# fresh index leaves nothing at the index to read at the end. The verdict
-# is the operator's end state after a fault that heals by itself.
+# until its restart count rises, and in the watcher's pods for the moment it
+# leaves rotation, because a roll that retires its gang at a fresh index, or
+# starts on the Instance the kill took out of rotation, leaves nothing at
+# the index to read at the end. The verdict is the operator's end state
+# after a fault that heals by itself.
 ONCE_POLL_S = 2.0
 # The events that say a one-shot restart was escalated instead of absorbed.
 ONCE_ESCALATION_EVENTS = {"InstanceFailed", "RepairHeld", "RetryHeld"}
@@ -7526,18 +7528,40 @@ def _once_start_tick(f, pod_state):
     if not (_fault_once(f) and f.get("form") == "start" and f.get("param") == CRASHLOOP_VICTIM):
         return
     if f["fired"]:
-        _once_bite_tick(f)
+        _once_bite_tick(f, pod_state)
     else:
         _once_fire(f, pod_state, None)
 
 
-def _once_bite_tick(f):
+def _once_left_rotation(f, pod_state):
+    """After a kill at load: the watcher showing the killed pod itself (same
+    UID, no deletion under way) out of rotation. The kubelet writes that
+    before anything can act on the pod, so it is the kill landing even when
+    a roll in flight, which starts on an Instance out of rotation first,
+    replaces the pod before its restart count is read. Latches
+    left_rotation; a pod being deleted left rotation for the roll, not for
+    the kill, and a kill at start hits a pod that was never in rotation."""
+    if f.get("left_rotation") or f.get("restart_seen") or f.get("form") != "load" or not pod_state:
+        return
+    p = pod_state.get(f.get("crash_pod"))
+    if not p or p.get("uid") != f.get("crash_uid") or not p.get("alive") or p.get("ready"):
+        return
+    now = time.time()
+    f.update(left_rotation=True, left_rotation_at=now - (f.get("fired_ts") or now))
+    print(f"    the kill landed: {f['crash_pod']} left rotation ({f['left_rotation_at']:.0f}s after the kill)")
+
+
+def _once_bite_tick(f, pod_state=None):
     """After the kill: read the victim live at most every ONCE_POLL_S until
     its restart count rises (the kill landed) or it is gone or replaced
-    unseen. Latches restart_seen; a roll that retires the victim's gang at
-    a fresh index later leaves nothing at the index to read, so the end
-    state cannot be the first reading."""
-    if not f.get("fired") or f.get("restart_seen") or f.get("victim_gone") or not f.get("crash_pod"):
+    unseen, and read the watcher's record of it for the moment it leaves
+    rotation (_once_left_rotation). Latches restart_seen; a roll that
+    retires the victim's gang at a fresh index later leaves nothing at the
+    index to read, so the end state cannot be the first reading."""
+    if not f.get("fired") or not f.get("crash_pod"):
+        return
+    _once_left_rotation(f, pod_state)
+    if f.get("restart_seen") or f.get("victim_gone"):
         return
     now = time.time()
     if now - f.get("once_poll", 0.0) < ONCE_POLL_S:
@@ -7573,10 +7597,11 @@ def _once_observe(case_id, f, pod_state, old_hashes, expect_new, N, configured, 
     """The end state a one-shot crash is judged on: the victim Instance's pods
     at the index its gang surges left it at (serving, on the expected
     revision, the victim pod replaced or not); whether the kill landed (its
-    restart read live, a repair naming the Instance, or at idle a rebuild
-    nobody asked for; under a push the roll's own replacement proves
-    nothing); the repairs and the escalations recorded for the Instance
-    since the kill; and whether every row settled with no operation open."""
+    restart read live, the victim seen leaving rotation, a repair naming
+    the Instance, or at idle a rebuild nobody asked for; under a push the
+    roll's own replacement proves nothing); the repairs and the escalations
+    recorded for the Instance since the kill; and whether every row settled
+    with no operation open."""
     comp, inst = f["crash_comp"], f["crash_inst"]
     events = _isvc_events_since(case_id, f.get("fired_ts") or 0)
     chain = _victim_index_chain(comp, inst, surges, events)
@@ -7594,8 +7619,8 @@ def _once_observe(case_id, f, pod_state, old_hashes, expect_new, N, configured, 
     return {
         "fired": bool(f.get("fired")), "kills": int(f.get("kills") or 0),
         "bitten": (bool(f.get("restart_seen")) or restarts > int(f.get("crash_restarts") or 0)
-                   or bool(repairs) or (rebuilt and not expect_new)),
-        "restarts": restarts, "rebuilt": rebuilt, "final": final,
+                   or bool(f.get("left_rotation")) or bool(repairs) or (rebuilt and not expect_new)),
+        "restarts": restarts, "rebuilt": rebuilt, "final": final, "left_rotation": bool(f.get("left_rotation")),
         "present": bool(pods),
         "serving": bool(pods) and all(p.get("ready") and p.get("serving") for _n, p in pods),
         "on_revision": on_revision, "expect_new": expect_new,
@@ -7628,12 +7653,15 @@ def _once_checks(f, out, verdict, notes, checks):
         return verdict
     if not out["bitten"]:
         f["infra_fail"] = (f"once: the kill of {f.get('crash_pod')} left no restart behind (its restart count never rose "
-                           f"while it lived, and no repair named {comp} Instance {inst})")
+                           f"while it lived, it never left rotation, and no repair named {comp} Instance {inst})")
         return verdict
     if f.get("restart_seen") or out["restarts"] > int(f.get("crash_restarts") or 0):
         how = f"the kubelet restarted it (restart count {out['restarts']})"
     elif out["repairs"]:
         how = "a repair named it"
+    elif out.get("left_rotation"):
+        how = (f"it left rotation {f.get('left_rotation_at', 0):.0f}s after the kill, and its pod was replaced "
+               f"before its restart count was read")
     else:
         how = "its pod was replaced"
     checks.append(f"  ✓ {label}: {who}'s runner was killed once; {how}")
@@ -7757,7 +7785,7 @@ def _idle_once(ctx, f, hdr):
         p = ctx["pod_state"].get(pod)
         if left_at is None and p is not None and not p["ready"]:
             left_at = now - t0
-        _once_bite_tick(f)
+        _once_bite_tick(f, ctx["pod_state"])
         bitten = bool(f.get("restart_seen")) or rebuilds > 0 or left_at is not None
         back = bitten and bool(pods()) and all(q.get("ready") and q.get("serving") for _n, q in pods())
         stable = (stable or now) if back else None
@@ -10131,7 +10159,7 @@ def _fault_tick(ctx):
         _repeat_observe(f, ctx["pod_state"])
     if f["fired"]:
         if _fault_once(f):
-            _once_bite_tick(f)   # the victim is read live until its restart shows
+            _once_bite_tick(f, ctx["pod_state"])   # the victim is read until its restart or its leaving rotation shows
         _node_lift_tick(ctx, f, time.time())
         _ctrl_back_tick(f, time.time())
         if f.get("push_heal"):

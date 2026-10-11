@@ -19158,21 +19158,71 @@ class CrashOnceApparatusTest(unittest.TestCase):
             run._once_bite_tick(replaced)
         self.assertTrue(replaced["victim_gone"], "a pod of the same name with another UID is not the victim")
 
+    def test_a_victim_the_watcher_saw_leave_rotation_is_a_kill_that_landed(self):
+        """A kill at load takes the victim out of rotation, and a roll in
+        flight starts on an Instance out of rotation first, so the roll can
+        replace the pod before its restart count is read. The watcher's
+        record of the killed pod itself, not being deleted, out of rotation
+        is the kill landing; the roll's replacement alone still proves
+        nothing."""
+        name, f = "p1-engine-1-leader-0", self._fired(form="load")
+        out_of_rotation = {name: _gang_pod(name, "1", "leader", False, "u1l")}
+        with mock.patch.object(run, "_pod_main_state", lambda n: (True, True, 0, "another-uid")), \
+                mock.patch.object(run, "ONCE_POLL_S", 0.0):
+            run._once_bite_tick(f, out_of_rotation)   # the live read already finds the roll's replacement
+        self.assertTrue(f.get("left_rotation"), "Ready False on the killed pod, with no deletion under way, is the kill landing")
+        self.assertTrue(f["victim_gone"])
+        after, surges = self._after_the_roll(), [("engine", "1", "2", "new")]
+        seen = self._observe(f, after, True, surges=surges)
+        self.assertTrue(seen["bitten"], "a victim seen out of rotation is bitten though the roll replaced it before a restart was read")
+        checks = []
+        out = dict(seen, side="old", op="push", rp="RecreateInstance")
+        self.assertEqual("PASS", run._once_checks(f, out, "PASS", [], checks))
+        self.assertNotIn("infra_fail", f)
+        self.assertTrue(any("runner was killed once" in c and "left rotation" in c for c in checks), checks)
+        blind = self._observe(self._fired(form="load"), after, True, surges=surges)
+        self.assertFalse(blind["bitten"], "a replacement the watcher never saw leave rotation is still no proof")
+
+    def test_only_the_killed_pod_itself_out_of_rotation_and_not_being_deleted_is_a_landing(self):
+        name = "p1-engine-1-leader-0"
+
+        def latched(form="load", gone=False, **over):
+            f = self._fired(form=form)
+            rec = None if gone else dict(_gang_pod(name, "1", "leader", False, "u1l"), **over)
+            with mock.patch.object(run, "_pod_main_state", lambda n: (True, False, 0, "u1l")), \
+                    mock.patch.object(run, "ONCE_POLL_S", 0.0):
+                run._once_bite_tick(f, {name: rec})
+            return bool(f.get("left_rotation"))
+
+        self.assertTrue(latched())
+        self.assertFalse(latched(alive=False), "a pod being deleted left rotation for the roll, not for the kill")
+        self.assertFalse(latched(uid="n1l"), "a pod of the same name with another UID is the roll's replacement")
+        self.assertFalse(latched(ready=True), "a pod still in rotation shows nothing")
+        self.assertFalse(latched(gone=True))
+        self.assertFalse(latched(form="start"), "a kill at start hits a pod that was never in rotation")
+        f = self._fired(form="load")
+        states = iter([(True, False, 0, "u1l"), (True, False, 1, "u1l")])
+        with mock.patch.object(run, "_pod_main_state", lambda n: next(states)), mock.patch.object(run, "ONCE_POLL_S", 0.0):
+            run._once_bite_tick(f, {name: _gang_pod(name, "1", "leader", False, "u1l")})
+            run._once_bite_tick(f, {name: _gang_pod(name, "1", "leader", False, "u1l")})
+        self.assertEqual((True, True, 1), (f["left_rotation"], f["restart_seen"], f["bitten_restarts"]),
+                         "the restart count is still read live after the pod was seen out of rotation")
+
     def test_start_tick_and_fault_tick_keep_reading_the_bite_after_the_kill(self):
-        ticks = []
-        with mock.patch.object(run, "_once_bite_tick", lambda f: ticks.append(f["case_id"])):
+        ticks, watched = [], {"p2-engine-0-default-0": _gang_pod("p2-engine-0-default-0", "0", "default", True, "u0")}
+        with mock.patch.object(run, "_once_bite_tick", lambda f, pod_state=None: ticks.append((f["case_id"], pod_state))):
             fired = run._fault_new("p1", {"fault": "crashloop:old", "form": "start", "once": 1})
             fired["fired"] = True
             run._once_start_tick(fired, {})
-            self.assertEqual(["p1"], ticks)
+            self.assertEqual([("p1", {})], ticks)
             pushed = run._fault_new("p2", {"fault": "crashloop:new", "form": "load", "once": 1})
             pushed["fired"] = True
-            run._fault_tick({"fault": pushed, "trigger_ts": 1.0, "pod_state": {}, "pods_per_inst": {}, "old_hashes": {"old"}})
-            self.assertEqual(["p1", "p2"], ticks)
+            run._fault_tick({"fault": pushed, "trigger_ts": 1.0, "pod_state": watched, "pods_per_inst": {}, "old_hashes": {"old"}})
+            self.assertEqual([("p1", {}), ("p2", watched)], ticks, "the bite is read against the watcher's pods")
             plain = run._fault_new("p3", {"fault": "crashloop:old", "form": "load"})
             plain["fired"] = True
             run._fault_tick({"fault": plain, "trigger_ts": 1.0, "pod_state": {}, "pods_per_inst": {}, "old_hashes": {"old"}})
-            self.assertEqual(["p1", "p2"], ticks, "a persistent break is not read for a bite")
+            self.assertEqual(2, len(ticks), "a persistent break is not read for a bite")
 
     def _after_the_roll(self):
         """The roll retired index 1; its replacement stands at index 2, Ready
