@@ -1474,6 +1474,11 @@ type recoveryHarness struct {
 	// routed Services and the headless Service carry EndpointSlices that
 	// mirror the pods, so rotation and availability read as on a cluster.
 	routed bool
+	// auditWriteRefusals is how many writes of the owner's audit ledger
+	// ConfigMap the apiserver answers with a conflict before it takes them
+	// again: the ledger is one object per owner, and the passes of the
+	// owner's other Components write it in the same second.
+	auditWriteRefusals int
 	// migrations is the owner's status.migrations: the records the passes
 	// select work from and write back through the MutateMigration seam.
 	migrations []workloadtypes.MigrationRecord
@@ -2297,6 +2302,9 @@ func setPodCondition(pod *corev1.Pod, condType corev1.PodConditionType, status c
 // interceptCreate stamps the UID the API server mints onto a new pod; the
 // delete wave preconditions every pod delete on the UID it observed.
 func (h *recoveryHarness) interceptCreate(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+	if err := h.refuseAuditLedgerWrite(obj); err != nil {
+		return err
+	}
 	if pod, ok := obj.(*corev1.Pod); ok {
 		if h.admissionDown {
 			return webhookUnreachableCreateError()
@@ -2443,6 +2451,9 @@ func (h *recoveryHarness) interceptList(ctx context.Context, cl client.WithWatch
 // stopped the hidden finalizer is what keeps the object there at all -
 // only the kubelet model takes it off once its node is back.
 func (h *recoveryHarness) interceptUpdate(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+	if err := h.refuseAuditLedgerWrite(obj); err != nil {
+		return err
+	}
 	if pod, ok := obj.(*corev1.Pod); ok && pod.DeletionTimestamp != nil {
 		stored := &corev1.Pod{}
 		if err := cl.Get(ctx, client.ObjectKeyFromObject(pod), stored); err == nil {
@@ -2453,6 +2464,17 @@ func (h *recoveryHarness) interceptUpdate(ctx context.Context, cl client.WithWat
 		}
 	}
 	return cl.Update(ctx, obj, opts...)
+}
+
+// refuseAuditLedgerWrite is the apiserver answering a write of the owner's
+// audit ledger ConfigMap with a conflict while auditWriteRefusals stands.
+func (h *recoveryHarness) refuseAuditLedgerWrite(obj client.Object) error {
+	cm, ok := obj.(*corev1.ConfigMap)
+	if !ok || h.auditWriteRefusals <= 0 || !strings.HasSuffix(cm.Name, audit.ConfigMapNameSuffix) {
+		return nil
+	}
+	h.auditWriteRefusals--
+	return apierrors.NewConflict(corev1.Resource("configmaps"), cm.Name, fmt.Errorf("the object has been modified"))
 }
 
 // finishTermination is the kubelet termination model's node half: once
@@ -2646,6 +2668,20 @@ func (h *recoveryHarness) useNodes(names ...string) {
 		if err := h.c.Create(h.ctx, node); err != nil {
 			h.t.Fatalf("create node %s: %v", name, err)
 		}
+	}
+}
+
+// addNodes brings more nodes into the node model, each with a live
+// kubelet, beside the ones already declared.
+func (h *recoveryHarness) addNodes(names ...string) {
+	h.t.Helper()
+	for _, name := range names {
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
+		setNodeReady(node, corev1.ConditionTrue, h.clk.Now())
+		if err := h.c.Create(h.ctx, node); err != nil {
+			h.t.Fatalf("create node %s: %v", name, err)
+		}
+		h.nodeNames = append(h.nodeNames, name)
 	}
 }
 
@@ -7797,6 +7833,151 @@ func (h *recoveryHarness) servingPodsOf(idx int32) int {
 		}
 	}
 	return n
+}
+
+// newWholeGangNodeLossHarness is the harness with two gang Instances
+// converged on v1, the leader and the worker of Instance 0 both on
+// node-a: the node model places Instance 0 while node-a is the only node,
+// and Instance 1 on the nodes added after it, which the failure never
+// touches.
+func newWholeGangNodeLossHarness(t *testing.T, policy *workloadtypes.ForceDeletePolicy) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarness(t, true)
+	restart := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle.RestartPolicy = &restart
+	h.podGrace = 30 * time.Second
+	h.forceDelete = policy
+	h.recorder = record.NewFakeRecorder(256)
+	h.useNodes(nodeLossDeadNode)
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(30, func() bool { return h.settledOn(h.revV1, 1) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never converged on v1")
+	}
+	h.addNodes("node-b", "node-c")
+	h.replicas = 2
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(30, func() bool { return h.settledOn(h.revV1, 2) }) {
+		h.dumpState("scale to two")
+		t.Fatalf("the second Instance never converged on v1")
+	}
+	on := h.podsOnNode(nodeLossDeadNode)
+	if len(on) != len(h.desired.Runners) {
+		h.dumpState("placement")
+		t.Fatalf("node model placed %d pod(s) on %s, want the whole gang of Instance 0", len(on), nodeLossDeadNode)
+	}
+	for _, pod := range on {
+		if !strings.Contains(pod.Name, "-engine-0-") {
+			h.dumpState("placement")
+			t.Fatalf("pod %s sits on %s, want only Instance 0 there", pod.Name, nodeLossDeadNode)
+		}
+	}
+	return h
+}
+
+// runAllowingPassErrors is runWithInvariant for a story in which a pass
+// may fail: each pass error is collected for the caller instead of ending
+// the test, as the controller's backoff would only run the pass again.
+func (h *recoveryHarness) runAllowingPassErrors(max int, pred func() bool, inv func()) (bool, []error) {
+	h.t.Helper()
+	var errs []error
+	for i := 0; i < max; i++ {
+		inv()
+		if pred() {
+			return true, errs
+		}
+		if _, err := h.stepResult(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	inv()
+	return pred(), errs
+}
+
+// The whole gang on the node that stops. The sweep reads the gang as one
+// set: every member is freed on the pass that frees the first, whatever
+// the audit ledger answers for one of them, so no repair ever opens on a
+// half-swept gang and no graceful delete is issued on the dead node. The
+// ledger is one object per owner: a write that loses the race to another
+// Component's pass is retried, and one refused past the retries fails the
+// pass only after the whole set is freed.
+//
+// Cells: instance/Ready/pod.nodeLost[NodeNotReady]/before, instance/Restart/Drain/pod.nodeLost[NodeNotReady]/before
+func TestNodeLoss_WholeGangOnTheDeadNodeIsRebuiltElsewhere(t *testing.T) {
+	policy := &workloadtypes.ForceDeletePolicy{
+		NodeUnreachableThreshold: nodeLossThreshold,
+		OverdueSlack:             nodeLossSlack,
+	}
+	for _, tc := range []struct {
+		name          string
+		auditRefusals int
+		failedPasses  int
+	}{
+		{name: "both members freed in one pass"},
+		{name: "one refused audit write is retried", auditRefusals: 1},
+		{name: "an audit write refused past the retries fails the pass after the whole set is freed", auditRefusals: 6, failedPasses: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newWholeGangNodeLossHarness(t, policy)
+			peer := podIdentities(h.podsOf(1))
+			peerIncarnation := h.instance(1).Incarnation
+			before := h.instance(0).Incarnation
+			invariant := func() {
+				h.requirePeerInRotation(peer, peerIncarnation)
+				h.requireNoGracefulDeleteOn(nodeLossDeadNode)
+				if h.sawEvent(workloadtypes.EventReasonPodForceDeleted) {
+					if on := h.podsOnNode(nodeLossDeadNode); len(on) != 0 {
+						t.Fatalf("the sweep freed part of the gang and left %d pod(s) on %s", len(on), nodeLossDeadNode)
+					}
+				}
+			}
+
+			h.failNode(nodeLossDeadNode)
+			failedAt := h.clk.Now()
+			h.auditWriteRefusals = tc.auditRefusals
+
+			freed := func() bool { return len(h.podsOnNode(nodeLossDeadNode)) == 0 }
+			ok, errs := h.runAllowingPassErrors(10, freed, invariant)
+			if !ok {
+				h.dumpState("node down past the threshold")
+				t.Fatalf("the gang on %s was never force-deleted after the node went silent under a configured policy", nodeLossDeadNode)
+			}
+			if len(errs) != tc.failedPasses {
+				t.Fatalf("%d pass(es) failed, want %d: %v", len(errs), tc.failedPasses, errs)
+			}
+			if elapsed := h.clk.Now().Sub(failedAt); elapsed > nodeLossThreshold+recoveryStepFloor {
+				t.Fatalf("stale pods freed %v after the node went silent, want within the %v threshold plus one pass", elapsed, nodeLossThreshold)
+			}
+
+			if !h.runWithInvariant(40, func() bool { return h.servingElsewhere(nodeLossDeadNode) }, invariant) {
+				h.dumpState("rebuild off the dead node")
+				t.Fatalf("Instance 0 never came back Ready and serving on other nodes while the kubelet of %s was down", nodeLossDeadNode)
+			}
+			h.requirePodsRender(0, h.revV1, goodImage)
+			if s := h.instance(0); s.Incarnation <= before {
+				t.Fatalf("RecreateInstanceOnPodRestart rebuilds the whole gang under a bumped incarnation, got %d (was %d)", s.Incarnation, before)
+			}
+
+			rebuilt := podIdentities(h.podsOf(0))
+			h.recoverNode(nodeLossDeadNode)
+			for i := 0; i < 3; i++ {
+				h.step()
+				invariant()
+			}
+			if on := h.podsOnNode(nodeLossDeadNode); len(on) != 0 {
+				t.Fatalf("%d stale pod object(s) on %s after its kubelet returned", len(on), nodeLossDeadNode)
+			}
+			if !h.settledOn(h.revV1, 2) {
+				h.dumpState("after the node returned")
+				t.Fatalf("the Component did not stay settled on v1 after the node returned")
+			}
+			for _, pod := range h.podsOf(0) {
+				if !rebuilt[wedgeKey(pod)] {
+					t.Fatalf("pod %s of the rebuilt Instance was replaced again after the node returned", pod.Name)
+				}
+			}
+		})
+	}
 }
 
 // TestScaleDown_RemovesTheInstanceThatServesNothingFirst: four Instances
