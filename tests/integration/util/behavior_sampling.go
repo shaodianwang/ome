@@ -205,3 +205,16 @@ func (s *PodSnapshot) OnRevision(component v1beta1.ComponentType, revisionHash s
 	}
 	return n
 }
+
+// GracefulDeleteInFlight reports whether pod carries a deletion only a
+// live kubelet can finish: a deletion timestamp with a grace window
+// still to run. A force delete stamps the timestamp too, with a grace of
+// zero, in the instant before the API server removes the object; a
+// sampler that reads that instant must not take it for a graceful
+// delete.
+func GracefulDeleteInFlight(pod *corev1.Pod) bool {
+	if pod == nil || pod.DeletionTimestamp == nil {
+		return false
+	}
+	return pod.DeletionGracePeriodSeconds == nil || *pod.DeletionGracePeriodSeconds > 0
+}

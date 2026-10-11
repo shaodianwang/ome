@@ -7,6 +7,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -97,16 +98,19 @@ var _ = ginkgo.Describe("OMENative force-delete frees a whole gang on a dead nod
 		}
 
 		// From the node's death to the rebuild, no original member may ever
-		// carry a deletion timestamp: a graceful delete on a dead kubelet is
-		// the drain that strands the gang. The sweep removes a pod by force,
-		// which takes the object away in one step.
+		// be deleted gracefully: on a dead kubelet that is the drain that
+		// strands the gang. The sweep's force delete stamps a deletion
+		// timestamp too, with a grace of zero, in the instant before the API
+		// server removes the object, so the sampler reads the grace and not
+		// the timestamp alone.
 		stop := util.StartSampler(suiteCtx, kindPollInterval, func(g Gomega) {
 			for _, pod := range listOMENativePods(g, ns.Name, isvcName) {
 				if _, old := original[pod.UID]; !old {
 					continue
 				}
-				g.Expect(pod.DeletionTimestamp).To(BeNil(),
-					"member %s on the dead node %s was deleted gracefully; the dead kubelet can never finish it", pod.Name, gangNode)
+				g.Expect(util.GracefulDeleteInFlight(&pod)).To(BeFalse(),
+					"member %s (uid %s) on the dead node %s was deleted gracefully (deletion timestamp %v, grace %ds); the dead kubelet can never finish it",
+					pod.Name, pod.UID, gangNode, pod.DeletionTimestamp, ptr.Deref(pod.DeletionGracePeriodSeconds, -1))
 			}
 		})
 		defer stop()
