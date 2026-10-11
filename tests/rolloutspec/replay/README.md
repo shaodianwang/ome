@@ -20,7 +20,7 @@ go test ./tests/rolloutspec/replay/... -count=1 -timeout 300s
 go test ./tests/rolloutspec/replay/... -run TestReplayMatchesGolden -update   # rewrite goldens
 ```
 
-Four gates run here:
+Five gates run here:
 
 | test | proves |
 |---|---|
@@ -28,6 +28,7 @@ Four gates run here:
 | `TestReplayIsDeterministic` | ten replays of each scenario are byte-identical |
 | `TestArrowCoverage` | every cited arrow exists and is workload-lane; reports how much of the table is driven |
 | `TestCellCitationsResolve` | every cited cell is a key of the expanded grid |
+| `TestOperatorInvariantsOverTheCorpus` | the operator invariants (capacity, bounded waits, status truth, single owner) hold on every tick of every scenario, up to the recorded advisory classes |
 
 A scenario is loaded through `tests/rolloutspec`, so an event, variant,
 arrow or cell the instance table does not declare fails the load. The
