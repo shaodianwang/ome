@@ -8706,6 +8706,15 @@ def _instance_pods(pod_state, comp, inst):
             if p and p["alive"] and p.get("comp") == comp and str(p.get("inst", "0")) == str(inst)]
 
 
+def _instance_serves(pod_state, comp, inst):
+    """True when the Instance serves: it has an alive pod and every one of
+    them is Ready and carries the serving gate, the bar the product reads a
+    pod set against. A gang whose leader waits while a member still carries
+    the gate it was given when the gang was whole does not serve."""
+    pods = _instance_pods(pod_state, comp, inst)
+    return bool(pods) and all(p.get("ready") and p.get("serving") for _n, p in pods)
+
+
 def _instance_rebuilt(pods, pre_uids):
     """True when the Instance's alive pods are all Ready and serving and none
     of them is a pod the fault hit (every UID is new)."""
@@ -22795,8 +22804,12 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
             if now - last_wait_poll >= 3.0:
                 last_wait_poll = now
                 waiting = _broken_waiting_instances(ctx, scomp, pre_indices)
-            served = [i for i in list(new_instances) + [inst] if any(
-                p.get("ready") and p.get("serving") for _n, p in _instance_pods(ctx["pod_state"], scomp, i))]
+            # An Instance serves as a whole: the broken gang's untouched
+            # member keeps the gate it had until the repair takes it down,
+            # and alone it puts nothing in rotation.
+            served = [i for i in new_instances if _instance_serves(ctx["pod_state"], scomp, i)]
+            if _instance_serves(ctx["pod_state"], comp, inst):
+                served.append(inst)
             if served and waits_served_at is None:
                 waits_served_at = now - op_ts
                 print(f"    {scomp} Instance(s) {served} served while the key was kept away ({waits_served_at:.0f}s after the scale)")
@@ -22947,8 +22960,7 @@ def _broken_scale(case_id, yaml_file, desc, hdr):
                 checks.append(f"  ✗ {comp} (not scaled): healthy Instance(s) {changed} lost or gained pods during the scale")
             else:
                 checks.append(f"  ✓ {comp} (not scaled): every healthy Instance kept its pods")
-        serving_now = (lambda ps: bool(ps) and all(q.get("ready") and q.get("serving") for _n, q in ps))(
-            _instance_pods(ctx["pod_state"], comp, inst))
+        serving_now = _instance_serves(ctx["pod_state"], comp, inst)
         verdict = _broken_fate_checks(f, expect, now_pods[comp].get(inst, set()), broken_uids, rebuilt_at,
                                       _isvc_events_since(case_id, ctx["trigger_ts"]), verdict, notes, checks,
                                       serving=serving_now or waits_served_at is not None)

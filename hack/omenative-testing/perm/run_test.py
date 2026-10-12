@@ -16908,6 +16908,25 @@ class BrokenOperationTest(unittest.TestCase):
         ctx["pod_state"]["e4"].update(serving=True, hash="new")
         self.assertEqual({"4": (True, False)}, run._broken_new_instances(ctx, "engine", {"0", "1", "2", "3"}))
 
+    def test_an_instance_serves_as_a_whole(self):
+        """The reading the waits cells latch on: every alive pod of the
+        Instance Ready and gated. A gang's untouched worker, still gated
+        beside a leader waiting on the key, does not make the gang serve."""
+        pods = {"e0l": {"alive": True, "ready": False, "serving": False, "inst": "0", "comp": "engine", "uid": "u0l"},
+                "e0w": {"alive": True, "ready": True, "serving": True, "inst": "0", "comp": "engine", "uid": "u0w"},
+                "e1": {"alive": True, "ready": True, "serving": True, "inst": "1", "comp": "engine", "uid": "u1"},
+                "e2": {"alive": True, "ready": True, "serving": False, "inst": "2", "comp": "engine", "uid": "u2"},
+                "e3": {"alive": False, "ready": True, "serving": True, "inst": "3", "comp": "engine", "uid": "u3"}}
+        self.assertFalse(run._instance_serves(pods, "engine", "0"), "the leader waits; the worker's gate alone serves nothing")
+        self.assertTrue(run._instance_serves(pods, "engine", 1))
+        self.assertFalse(run._instance_serves(pods, "engine", "2"), "Ready without the gate is not in rotation")
+        self.assertFalse(run._instance_serves(pods, "engine", "3"), "a pod on its way out is not counted")
+        self.assertFalse(run._instance_serves(pods, "engine", "4"), "no pod, nothing serving")
+        pods["e0l"].update(ready=True, serving=True)
+        self.assertTrue(run._instance_serves(pods, "engine", "0"))
+        src = inspect.getsource(run._broken_scale)
+        self.assertIn('_instance_serves(ctx["pod_state"], comp, inst)', src, "the latch and the fate reading share the bar")
+
     def test_a_scale_up_beside_a_key_kept_away_states_that_both_instances_wait(self):
         key = " fault=configkey:missing during=idle inst=0"
         self.assertEqual([], self._errs(self.UP + key + " expect=waits"))
@@ -20696,6 +20715,92 @@ class BrokenScaleOnTheWindowTest(unittest.TestCase):
         self.assertTrue(any("new Instance(s) ['4'] wait on the key kept away" in c for c in out["checks"]), out["checks"])
         self.assertTrue(any("the rows waiting on the key read Failed naming" in c for c in out["checks"]), out["checks"])
         self.assertTrue(any("Instance 0 waits on the key kept away across the scale-up" in c for c in out["checks"]), out["checks"])
+
+    def _gang_ctx(self):
+        """Two gang Instances of a leader and a worker each, settled and serving."""
+        pods = {}
+        for i in range(2):
+            pods[f"e{i}l"] = dict(self._pod(str(i), f"u{i}l"), runner="leader")
+            pods[f"e{i}w"] = dict(self._pod(str(i), f"u{i}w"), runner="worker")
+        return {"case_id": "p1", "N": {"engine": 2, "decoder": 0, "router": 0}, "configured": {"engine"},
+                "pods_per_inst": {"engine": 2, "decoder": 0, "router": 0},
+                "old_hashes": {"old"}, "pod_state": pods, "agg": {"engine": (2, 2, 0)},
+                "measures": {"engine": (2, 0, 0)}, "peaks": {"engine": 2}, "closed": False,
+                "fault": {"kind": "configkey", "cm_name": "cm", "cm_key": "k", "infra_fail": None, "notes": []}}
+
+    def _key_bites_the_leader(self, ctx):
+        """The key goes and the leader of Instance 0 is restarted: it waits on
+        the key, the worker beside it keeps the gate it had, and the status
+        publishes the row Restarting at once, before any repair opens."""
+        ctx["fault"].update(crash_comp="engine", crash_inst="0", crash_uid="u0l", crash_pod="e0l")
+        ctx["pod_state"]["e0l"].update(ready=False, serving=False)
+        ctx["agg"]["engine"] = (2, 1, 0)
+        ctx["trigger_ts"] = time.time()
+        return {"bitten_at": 2.0, "reported_at": 3.0, "acted_on": "its row reads Restarting", "row": None}
+
+    GANG_ROWS = [("0", False, "Restarting"), ("1", True, "Ready")]
+
+    def _gang_up_under_the_key(self, rebuilt_serves):
+        """A scale-up of a gang service under the key kept away, landing on
+        the published Restarting with the broken gang's old pods still there.
+        The new gang comes up with its leader waiting; then the repair
+        rebuilds Instance 0, waiting on the same key, or (rebuilt_serves)
+        Ready and gated as if the key were back."""
+        hdr = {"mode": "scaledown", "to_e": 3, "ceil_e": 3, "inst": 0, "expect": "waits", "during": "idle"}
+        ctx = self._gang_ctx()
+        reads, settles = [], []
+
+        def read_one(ctx):
+            reads.append(1)
+            if len(reads) == 1:
+                ctx["pod_state"]["e2l"] = dict(self._pod("2", "u2l", ready=False, serving=False), runner="leader")
+                ctx["pod_state"]["e2w"] = dict(self._pod("2", "u2w", ready=True, serving=False), runner="worker")
+                ctx["agg"]["engine"] = (3, 1, 0)
+                ctx["measures"]["engine"] = (3, 0, 0)
+                ctx["peaks"]["engine"] = 3
+            elif len(reads) == 2:
+                ctx["pod_state"]["e0l"]["alive"] = ctx["pod_state"]["e0w"]["alive"] = False
+                ctx["pod_state"]["e0bl"] = dict(self._pod("0", "u0bl", ready=rebuilt_serves, serving=rebuilt_serves), runner="leader")
+                ctx["pod_state"]["e0bw"] = dict(self._pod("0", "u0bw", ready=True, serving=rebuilt_serves), runner="worker")
+                ctx["agg"]["engine"] = (3, 1 + int(rebuilt_serves), 0)
+
+        def key_pod(name):
+            leader = name.endswith("l")
+            waits = leader and not (name == "e0bl" and rebuilt_serves) and name != "e1l"
+            env = [{"name": "V", "valueFrom": {"configMapKeyRef": {"name": "cm", "key": "k"}}}] if leader else []
+            state = {"waiting": {"reason": run.CONFIGKEY_WAITING}} if waits else {"running": {}}
+            return {"spec": {"containers": [{"name": run.MAIN_CONTAINER, "env": env}]},
+                    "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER, "state": state}]}}
+
+        def settle(case_id, want, configured, budget_s, waiting=(), down=()):
+            settles.append(set(waiting))
+            return True, "settled"
+        with mock.patch.multiple(run, _get_pod=key_pod, IDLE_HOLD_S=0):
+            out = self._drive(hdr, ctx, lambda ctx, hdr: self._key_bites_the_leader(ctx), read_one,
+                              lambda case_id, c: self.GANG_ROWS, settle, self.REPAIR)
+        return out, settles
+
+    def test_a_broken_gangs_untouched_member_does_not_serve_the_key_kept_away(self):
+        """The scale lands within seconds of the break, on the published
+        Restarting, while the broken gang's worker still carries the gate
+        it had: the gang's leader waits on the key, so the gang does not
+        serve, and the verdict passes once the repair rebuilds it waiting."""
+        out, settles = self._gang_up_under_the_key(rebuilt_serves=False)
+        self.assertEqual("PASS", out["verdict"], out["notes"])
+        self.assertEqual("CONVERGED", out["state"])
+        self.assertEqual([{("engine", "0"), ("engine", "2")}], settles)
+        self.assertFalse(any("served while the key was kept away" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("new Instance(s) ['2'] wait on the key kept away" in c for c in out["checks"]), out["checks"])
+        self.assertTrue(any("Instance 0 waits on the key kept away across the scale-up and the hold, never serving "
+                            "(rebuilt by the repair" in c for c in out["checks"]), out["checks"])
+
+    def test_a_broken_gang_rebuilt_ready_and_gated_served_the_key_kept_away(self):
+        """The same scale, with the rebuilt gang coming up Ready and gated
+        as a whole: that is the Instance serving, and the verdict says so."""
+        out, _settles = self._gang_up_under_the_key(rebuilt_serves=True)
+        self.assertEqual("FAIL", out["verdict"])
+        self.assertIn("configkey: engine Instance 0 served while the key was kept away", out["notes"])
+        self.assertTrue(any("got ['2'] (waiting ['2'], one served" in c for c in out["checks"]), out["checks"])
 
     def test_a_scale_up_landing_between_the_old_pod_and_the_rebuilt_one_sees_one_new_instance(self):
         out = self._up(rebuilt_pod_up=False)
