@@ -131,6 +131,10 @@ CANARY_STEP_KINDS = [
     "capacity ahead of traffic", "traffic step", "manual gate", "timed soak", "analysis gate",
     "promote", "abort", "rollback mid-ladder", "re-target mid-ladder", "resume", "plan or run edit",
 ]
+# How a canary group carries its ladder: in the group, or in a RolloutPolicy
+# the group names; the engine resolves both into one plan, so a cell proved
+# in one form alone reads as empty in the other.
+CANARY_FORMS = ["inline", "policy-referenced"]
 # Axis values no header can express today; they stay empty until a verb exists.
 NOT_DERIVABLE = [
     "the scheduler (default or the gang scheduler): an environment setting of the lane, not a header key",
@@ -349,7 +353,7 @@ def _duration(v):
 
 
 def _cells(v):
-    return all(re.match(r"^canary/[A-Za-z]+(\[[A-Za-z]+\])?/[A-Za-z0-9]+(\[[A-Za-z]+\])?$", c)
+    return all(re.match(r"^canary/[A-Za-z]+(\[[A-Za-z]+\])?/[A-Za-z0-9]+(\[[A-Za-z]+\])?(\[policyRef\])?$", c)
                for c in str(v).split(","))
 
 
@@ -413,6 +417,7 @@ class Case:
     overlap: list
     canary_steps: list
     canary_cells: list
+    canary_form: str
     parked: str
     issue: int
     outcome: str
@@ -494,6 +499,9 @@ FIELD = {
     "width": re.compile(r"worker:\s*\{\s*size:\s*([0-9]+)"),
 }
 GROUP_KIND = re.compile(r"^\s+(blueGreen|rollingUpdate|maintainRatio|canary):")
+# A group naming its canary ladder through a RolloutPolicy instead of
+# carrying it.
+POLICY_REF_LINE = re.compile(r"^\s+policyRef:\s*\{[^}]*progression:\s*canary\b")
 
 
 def body_facts(text):
@@ -502,7 +510,7 @@ def body_facts(text):
     canary steps. A Component section runs from its `  <name>:` line to the
     next line indented by less than four spaces."""
     facts = {"strategy": {}, "surge": {}, "unavailable": {}, "restart": {}, "width": 0,
-             "groups": [], "steps": []}
+             "groups": [], "steps": [], "referenced": False}
     component = None
     for line in text.split("\n"):
         opened = COMPONENT_LINE.match(line)
@@ -517,6 +525,9 @@ def body_facts(text):
             facts["groups"].append(set())
         elif STEP_LINE.match(line):
             facts["steps"].append(line)
+        elif POLICY_REF_LINE.match(line) and facts["groups"]:
+            facts["groups"][-1].add("canary")
+            facts["referenced"] = True
         elif GROUP_KIND.match(line) and facts["groups"]:
             facts["groups"][-1].add(GROUP_KIND.match(line).group(1))
         elif facts["steps"] and line.strip() and not GROUP_KIND.match(line):
@@ -557,6 +568,7 @@ def classify(path, description, header, reason, body, problems):
     operation, detail, second = classify_operation(header, mode, size)
     faults = classify_faults(header, mode, pods, strategy, verbs)
     canary_steps = classify_canary_steps(header, body["steps"], verbs) if mode == "canary" or "canary" in verbs_group(body) else []
+    group = classify_group(body["groups"])
     parked, issue = classify_parked(header)
     return Case(
         id=path.stem, folder=path.parent.name, description=description, header=header, reason=reason,
@@ -565,7 +577,7 @@ def classify(path, description, header, reason, body, problems):
         mode=mode, operation=operation, operation_detail=detail, second_operation=second,
         faults=faults,
         fault_lifted=fault_lifted(header, verbs),
-        group=classify_group(body["groups"]),
+        group=group,
         strategy=strategy,
         budget=classify_budget(strategy, body["surge"].get("engine"), body["unavailable"].get("engine")),
         restart_policy=body["restart"].get("engine", "unset"),
@@ -573,6 +585,7 @@ def classify(path, description, header, reason, body, problems):
         overlap=classify_overlap(header, mode, operation, second, faults, verbs),
         canary_steps=canary_steps,
         canary_cells=str(header.get("cell", "")).split(",") if header.get("cell") else [],
+        canary_form=("policy-referenced" if body["referenced"] else "inline") if group == "canary" else "-",
         parked=parked, issue=issue,
         outcome=classify_outcome(header),
         invariants_off="inv_off" in header,
@@ -1234,6 +1247,17 @@ def render_canary(cases):
     out += ["### Step kind x fault row", ""]
     out += table(["step kind"] + [fault_row_label(r) for r in rows_present],
                  [[kind] + [by_fault.get((kind, r), 0) or "." for r in rows_present] for kind in CANARY_STEP_KINDS])
+    # The form is its own axis: a folder or a step kind proved inline alone
+    # shows an empty policy-referenced cell.
+    by_folder = Counter((c.folder, c.canary_form) for c in canaries)
+    folders = sorted({c.folder for c in canaries})
+    out += ["### Canary form x folder", ""]
+    out += table(["folder"] + CANARY_FORMS,
+                 [[f] + [by_folder.get((f, form), 0) or "." for form in CANARY_FORMS] for f in folders])
+    by_form = Counter((kind, c.canary_form) for c in canaries for kind in c.canary_steps)
+    out += ["### Step kind x canary form", ""]
+    out += table(["step kind"] + CANARY_FORMS,
+                 [[kind] + [by_form.get((kind, form), 0) or "." for form in CANARY_FORMS] for kind in CANARY_STEP_KINDS])
     grid = defaultdict(set)
     for c in canaries:
         for cell in c.canary_cells:
@@ -1273,11 +1297,11 @@ def render_cases(cases):
         rows.append([c.id, c.folder, c.shape_family, c.gang_width or "-", c.size, c.operation,
                      c.second_operation or "-", fault_row_label(c.fault_rows()[0]) if c.faults else "none",
                      c.faults[0][3] if c.faults else "-", c.group, c.strategy, c.budget, c.restart_policy,
-                     c.timing, ", ".join(c.overlap) or "-", ", ".join(c.canary_steps) or "-",
+                     c.timing, ", ".join(c.overlap) or "-", ", ".join(c.canary_steps) or "-", c.canary_form,
                      (c.parked + (f" #{c.issue}" if c.issue else "")) or "-", c.outcome or "-"])
     return out + table(["case", "folder", "shape", "W", "N", "operation", "second", "fault", "on",
                         "group", "strategy", "budget", "restart", "timing", "overlap",
-                        "canary steps", "parked", "outcome"], rows)
+                        "canary steps", "canary form", "parked", "outcome"], rows)
 
 
 def render_markdown(cases, with_cases=False):
@@ -1368,7 +1392,7 @@ def unknown_axes(case):
     checks = [("operation", case.operation, OPERATIONS + OTHER_OPERATIONS),
               ("group", case.group, GROUPS), ("strategy", case.strategy, STRATEGIES),
               ("budget", case.budget, BUDGETS), ("restart_policy", case.restart_policy, RESTART_POLICIES),
-              ("timing", case.timing, TIMINGS)]
+              ("timing", case.timing, TIMINGS), ("canary_form", case.canary_form, CANARY_FORMS + ["-"])]
     checks += [("fault", kind, REVISION_BOUND_FAULTS + UNBOUND_FAULTS) for kind, _f, _s, _c in case.faults]
     return [(axis, value) for axis, value, known in checks if value not in known]
 

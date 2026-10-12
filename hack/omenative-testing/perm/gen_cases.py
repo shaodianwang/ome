@@ -524,10 +524,18 @@ def _render_canary_step(s, ind="              "):
     return out
 
 
+# The group key an inline ladder sits under; the referenced form puts the
+# policy's name there instead.
+CANARY_GROUP_KEY = "          canary:"
+# The in-use delete guard a case's policy carries, so the teardown removes
+# the policy in the same pass as the service that still names it.
+POLICY_DELETE_ANNOTATION = 'ome.io/allow-in-use-delete: "true"'
+
+
 def canary_block(steps, components=("engine",), prometheus=None, ready_timeout=None):
     lines = ["  rollout:", "    groups:",
              f"        - components: [{', '.join(components)}]",
-             "          canary:"]
+             CANARY_GROUP_KEY]
     if prometheus is not None:
         lines.append(f"            prometheus: {flow(prometheus)}")
     if ready_timeout is not None:
@@ -538,6 +546,28 @@ def canary_block(steps, components=("engine",), prometheus=None, ready_timeout=N
     for s in steps:
         lines += _render_canary_step(s)
     return "\n".join(lines)
+
+
+def canary_policy_ref(coord, policy_name):
+    """The referenced form of a rendered inline canary group: the group
+    naming a same-namespace RolloutPolicy in place of its ladder, and the
+    RolloutPolicy document carrying that ladder unchanged, so both forms
+    resolve to one plan. Returns (group text, policy document)."""
+    head, found, ladder = coord.partition(CANARY_GROUP_KEY + "\n")
+    if not found:
+        raise ValueError("not a rendered inline canary group")
+    indent = CANARY_GROUP_KEY[:-len("canary:")]
+    group = head + f"{indent}policyRef: {{ name: {policy_name}, progression: canary }}"
+    # Under the policy's `canary:` (two columns in) the ladder sits where it
+    # sat under the group's, less the group's indent.
+    shift = len(indent) - 2
+    doc = ["apiVersion: ome.io/v1beta1", "kind: RolloutPolicy", "metadata:", f"  name: {policy_name}",
+           "  # Teardown deletes the case's documents in one pass, the policy with the",
+           "  # service that still references it.",
+           f"  annotations: {{ {POLICY_DELETE_ANNOTATION} }}",
+           "spec:", "  canary:"]
+    doc += [line[shift:] for line in ladder.rstrip("\n").split("\n")]
+    return group, "\n".join(doc) + "\n"
 
 
 def canary_steps(policy, *pairs):

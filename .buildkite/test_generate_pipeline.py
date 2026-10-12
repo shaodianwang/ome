@@ -1472,7 +1472,9 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-ctrlrestart", "engine-mn", "")], 6)
         self.assertEqual(shard_counts[("gen-ctrlrestart", "pd", "")], 4)
         self.assertEqual(shard_counts[("gen-ctrlrestart", "pd-mn", "")], 4)
-        self.assertEqual(shard_counts[("gen-canary-crash", "engine", "")], 4)
+        # The crash and fault-new families run a few of their cells in the
+        # policy-referenced form as well, on their engine lanes: one shard more each.
+        self.assertEqual(shard_counts[("gen-canary-crash", "engine", "")], 5)
         self.assertEqual(shard_counts[("gen-canary-crash", "pd", "")], 12)
         self.assertEqual(shard_counts[("gen-canary-second-rev", "engine", "")], 3)
         self.assertEqual(shard_counts[("gen-canary-second-rev", "pd", "")], 8)
@@ -1486,7 +1488,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-canary-fault-old", "engine-mn", "")], 6)
         self.assertEqual(shard_counts[("gen-canary-fault-old", "pd", "")], 61)
         self.assertEqual(shard_counts[("gen-canary-fault-old", "pd-mn", "")], 6)
-        self.assertEqual(shard_counts[("gen-canary-fault-new", "engine", "")], 10)
+        self.assertEqual(shard_counts[("gen-canary-fault-new", "engine", "")], 11)
         self.assertEqual(shard_counts[("gen-canary-fault-new", "engine-mn", "")], 6)
         self.assertEqual(shard_counts[("gen-canary-fault-new", "pd", "")], 19)
         self.assertEqual(shard_counts[("gen-canary-fault-new", "pd-mn", "")], 5)
@@ -1609,7 +1611,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-lift", "engine-mn", "")], 3)
         self.assertEqual(shard_counts[("gen-lift", "pd", "")], 2)
         self.assertEqual(shard_counts[("gen-lift", "pd-mn", "")], 2)
-        self.assertEqual(job_count, 1144)
+        self.assertEqual(job_count, 1146)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin
@@ -2195,7 +2197,7 @@ class TestEvalTargeted(PipelineTestCase):
         # The fixture round, 5% sampled under the pinned commit: the pin
         # moves with the corpus like the full and smoke totals.
         # The three settled-unit and aged-record cases redraw the 5% sample; the total holds only for a fixed corpus.
-        self.assertEqual(sum(gp._job_count(document) for document in batches), 419)
+        self.assertEqual(sum(gp._job_count(document) for document in batches), 426)
 
 
 class TestEvalVerdicts(unittest.TestCase):
@@ -3186,9 +3188,9 @@ class TestEvalMode(PipelineTestCase):
         committed = sorted(case for _, _, cases in self.groups for case in cases)
         default = sorted(case for child in self.runner_jobs(self.full, scheduler="") for case in self.cases_of(child))
         self.assertEqual(default, committed)
-        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 1144)
-        self.assertEqual(len(self.runner_jobs(self.full)), 2615)
-        self.assertEqual(len(self.full), 2629)
+        self.assertEqual(len(self.runner_jobs(self.full, scheduler="")), 1146)
+        self.assertEqual(len(self.runner_jobs(self.full)), 2619)
+        self.assertEqual(len(self.full), 2633)
         self.assertEqual(len(self.smoke), 203)
         self.assertEqual(len(self.smoke_batches), 3)
         self.assertEqual(sum(gp._job_count(document) for document in self.smoke_batches), 313)
@@ -3360,7 +3362,7 @@ class TestPipelineUploads(PipelineTestCase):
     def test_todays_corpus_uploads_within_the_limit_and_the_total_is_pinned(self):
         self.assert_uploads_are_well_formed(self.batches, self.children)
         self.assertGreater(len(self.batches), 2)
-        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2740)
+        self.assertEqual(sum(gp._job_count(document) for document in self.batches), 2744)
 
     def test_the_full_round_records_its_verdicts_after_every_eval_group(self):
         last = self.batches[-1]

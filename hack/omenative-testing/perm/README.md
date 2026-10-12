@@ -345,7 +345,18 @@ A canary group carries its body inline or names a same-namespace
 body before anything reads the plan, so both forms drive the same steps and
 verdicts. The referenced twins of three inline cases (p1957, p1955 and p1956
 mirror p1836, p1825 and p1820) ship the policy as the case file's second
-document and name their cells with the `[policyRef]` variant.
+document and name their cells with the `[policyRef]` variant. The generated
+canary families carry the same twins for a few of their rows
+(`CANARY_POLICY_TWINS` in `generate_cases.py`, two or three per family): the
+inline case under its own header, fleet and reason, with the ladder moved
+into a `RolloutPolicy` shipped as the second document, every cell id ending
+in `[policyRef]` and `policyRef` closing the description; the twins are
+minted after the family's other rows, so the inline ids keep their places.
+A policy ladder with an analysis gate must name a metric provider bound in
+the operator's configuration, which the inline rows do not carry, so the
+twins stay on timed and manual ladders; the coverage ledger lists the form
+as its own axis, where the analysis gate reads as empty under the referenced
+form rather than covered.
 
 The harness asserts the **status-level** contract (phase progression, per-step
 traffic weights stepping to 100 on the canary revision) and **per-revision pod
@@ -3070,7 +3081,10 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `isvcs/MANIFEST.md` (per-dimension counts, the
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives
-  every `gen-canary-*` folder the canary pod budget and Prometheus. The
+  every `gen-canary-*` folder the canary pod budget and Prometheus. Each
+  `gen-canary-*` folder also carries the policy-referenced twins of a few
+  of its rows (`CANARY_POLICY_TWINS`), minted after every other row of the
+  folder (see *Canary*). The
   broken-Instance operations (`p7600`–`p7799`, continued at `p9400`–`p9499`
   and `p10100`–`p10299`) → `isvcs/gen-fault-scale/` (one Instance broken,
   then the engine scaled down by one, by two, to one, or up by one) and
@@ -3238,8 +3252,11 @@ operations and shape families with no case anywhere, then counts per axis
 value, then every hole by name), crosses the operations and faults with the
 group policy, update strategy, budget and restart policy, places every
 event on its timing hook (`settling`, `rotating`, the canary states, `paused`,
-...), tallies the overlaps and the canary step kinds, and lists the parked
-cases with their issues.
+...), tallies the overlaps and the canary step kinds, crosses the form a
+canary group carries its ladder in (inline, or named through a
+`RolloutPolicy`) with the folders and the step kinds, so a cell proved in
+one form alone reads as empty in the other, and lists the parked cases with
+their issues.
 
 The operator stories of the marathon goal live in `STORIES` at the top of
 the script, one predicate over a parsed case per story; the report prints the

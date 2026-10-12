@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **7040**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -20,12 +20,12 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | gen-imagepull | 60 | p3400..p3459 |
 | gen-node | 196 | p4200..p4395 |
 | gen-ctrlrestart | 104 | p4600..p4703 |
-| gen-canary-crash | 48 | p5200..p5247 |
-| gen-canary-second-rev | 32 | p5250..p5281 |
-| gen-canary-podkill | 55 | p5290..p5344 |
-| gen-canary-fault-old | 343 | p6400..p11642 |
-| gen-canary-fault-new | 154 | p6600..p6753 |
-| gen-canary-fault-gate | 173 | p9050..p9222 |
+| gen-canary-crash | 50 | p5200..p5249 |
+| gen-canary-second-rev | 34 | p5250..p5283 |
+| gen-canary-podkill | 57 | p5290..p5346 |
+| gen-canary-fault-old | 346 | p6400..p11645 |
+| gen-canary-fault-new | 157 | p6600..p6756 |
+| gen-canary-fault-gate | 175 | p9050..p9224 |
 | gen-rollback | 488 | p5800..p11087 |
 | gen-crashloop-new | 88 | p5000..p5087 |
 | gen-crashloop-group | 72 | p5400..p5471 |
@@ -58,7 +58,7 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| engine | 2103 |
+| engine | 2117 |
 | engine-mn | 1955 |
 | pd | 1615 |
 | pd-mn | 1353 |
@@ -71,7 +71,7 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | InPlaceIfPossible | 602 |
 | InPlaceOnly | 281 |
 | RecreatePod | 1261 |
-| SurgeThenDrain | 4004 |
+| SurgeThenDrain | 4018 |
 
 ### By failure verb / phase
 
@@ -173,10 +173,10 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:load@traffic | 16 |
 | crashloop:load@up1 | 16 |
 | crashloop:new:crashAfterSoak | 16 |
-| crashloop:new:crashInSoak | 16 |
+| crashloop:new:crashInSoak | 17 |
 | crashloop:new:crashInSoak:rebump-fix | 4 |
 | crashloop:new:crashInSoak:rollback | 4 |
-| crashloop:new:crashStart | 8 |
+| crashloop:new:crashStart | 10 |
 | crashloop:new:crashStart:rebump-fix | 4 |
 | crashloop:new:crashStart:rollback | 4 |
 | crashloop:new:crashloop:load once | 12 |
@@ -201,14 +201,14 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:start:once@up1 | 10 |
 | crashloop:start:router@idle | 1 |
 | crashloop:start:router@last | 1 |
-| crashloop:start:router@mid | 2 |
-| crashloop:start@canary | 16 |
+| crashloop:start:router@mid | 3 |
+| crashloop:start@canary | 17 |
 | crashloop:start@capacity | 16 |
 | crashloop:start@delete | 20 |
 | crashloop:start@down1 | 20 |
 | crashloop:start@down2 | 8 |
 | crashloop:start@edit | 26 |
-| crashloop:start@gate | 4 |
+| crashloop:start@gate | 5 |
 | crashloop:start@idle | 202 |
 | crashloop:start@move-accept | 16 |
 | crashloop:start@move-accept:healed | 10 |
@@ -216,12 +216,12 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:start@move-surge | 16 |
 | crashloop:start@move-surge:healed | 6 |
 | crashloop:start@move-surge:once | 6 |
-| crashloop:start@prestart | 16 |
+| crashloop:start@prestart | 17 |
 | crashloop:start@promote | 8 |
 | crashloop:start@sibling | 24 |
 | crashloop:start@soak | 8 |
 | crashloop:start@toone | 8 |
-| crashloop:start@traffic | 16 |
+| crashloop:start@traffic | 17 |
 | crashloop:start@up1 | 20 |
 | crashonce:new:load | 32 |
 | crashonce:new:start | 32 |
@@ -307,7 +307,7 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | imagepull:new:imagePull:rollback | 4 |
 | imagepull:new:imagepull lifted | 6 |
 | imagepull:new:never | 6 |
-| imagepull:new:router:parked | 3 |
+| imagepull:new:router:parked | 4 |
 | imagepull:old:after-settle:push | 12 |
 | imagepull:once@delete | 6 |
 | imagepull:once@down1 | 6 |
@@ -320,7 +320,7 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | imagepull:router@mid | 2 |
 | imagepull:settling | 50 |
 | imagepull@analysis | 8 |
-| imagepull@canary | 16 |
+| imagepull@canary | 17 |
 | imagepull@capacity | 16 |
 | imagepull@delete | 16 |
 | imagepull@down1 | 16 |
@@ -424,8 +424,8 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | podkill:settling:worker | 12 |
 | podkill@auto | 3 |
 | podkill@auto x2 | 18 |
-| podkill@gate | 4 |
-| podkill@held | 4 |
+| podkill@gate | 5 |
+| podkill@held | 5 |
 | podkill@heldpaused | 4 |
 | podkill@paused | 4 |
 | preempt:edit | 6 |
@@ -490,8 +490,8 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | readinessLost@before-edit | 6 |
 | readinessLostOnce@before-edit | 6 |
 | readinessLostOnce@edited-runtime | 6 |
-| rebump@canary-serving@0 | 8 |
-| rebump@canary-staging | 8 |
+| rebump@canary-serving@0 | 9 |
+| rebump@canary-staging | 9 |
 | repeat:ctrlrestart:canary | 6 |
 | repeat:ctrlrestart:delete | 6 |
 | repeat:ctrlrestart:edit | 6 |
@@ -573,7 +573,7 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 2415 |
-| None | 2857 |
+| None | 2871 |
 | RecreateInstance | 1754 |
 
 ### By pause
@@ -581,14 +581,14 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 6732 |
+| off | 6746 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 6846 |
+| (no pause around a repair) | 6860 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -597,7 +597,7 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 6846 |
+| (no pause around a repair) | 6860 |
 | fix | 90 |
 | none | 90 |
 
@@ -607,10 +607,17 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 54 |
 | canary | 30 |
-| none | 6000 |
+| none | 6014 |
 | ratio | 16 |
 | rolling | 892 |
 | seq | 34 |
+
+### By canary form (mode=canary rows)
+
+| value | cases |
+|---|---|
+| inline | 908 |
+| policy-referenced | 14 |
 
 ### By mid-roll edit (gen-switch)
 
@@ -757,7 +764,7 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 5094 |
+| (no break) | 5108 |
 | decoder | 166 |
 | engine | 1648 |
 | router | 118 |
@@ -1068,8 +1075,8 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | metric breach, persistent, running | 12 |
 | sibling broken, one-shot, new | 10 |
 | sibling broken, one-shot, running | 24 |
-| sibling broken, persistent, new | 13 |
-| sibling broken, persistent, running | 24 |
+| sibling broken, persistent, new | 14 |
+| sibling broken, persistent, running | 25 |
 
 ### By shape family (canary-fault-gate)
 
@@ -1080,7 +1087,7 @@ Total generated cases: **7026**. The whole-corpus per-PR cap (hand + generated) 
 | engine+decoder+router gang | 74 |
 | engine+decoder+router single | 109 |
 | engine+router gang | 74 |
-| engine+router single | 114 |
+| engine+router single | 116 |
 
 ### Ids kept empty (cells of the matrix that are no case)
 

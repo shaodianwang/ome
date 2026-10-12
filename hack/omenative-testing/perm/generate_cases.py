@@ -9069,12 +9069,91 @@ def emit_lift(add):
                 cell=("lift", "imagepull", "after-settle", "old", "push", topo, w, router, rp))
 
 
+# ── the policy-referenced twins of the canary families ───────────────────────
+# A canary group carries its ladder inline or names a same-namespace
+# RolloutPolicy, and the engine resolves the reference into the same body
+# before anything reads it, so the two forms must drive the same steps and end
+# the same way. Each canary family runs a few of its cells in both forms: the
+# twin is the inline case under the same header, fleet and reason, with the
+# ladder moved into a RolloutPolicy the case ships as its second document and
+# every grid cell marked with the referenced variant, so one verdict reads
+# against the other. A policy ladder with an analysis gate must name a metric
+# provider bound in the operator's configuration, which the inline rows do
+# not carry, so the twins stay on timed and manual ladders. Minted after every
+# other row of the family, so the inline ids keep their places.
+# (folder: the matrix keys of the inline rows that get a twin)
+CANARY_POLICY_TWINS = {
+    "gen-canary-crash": [
+        ("storm", "crashloop", "start", "engine", 1, "None", 1),
+        ("storm", "imagepull", "start", "engine", 1, "None", 1),
+    ],
+    "gen-canary-second-rev": [
+        ("retarget", "rebump", "canary-staging", "engine", 1, None),
+        ("retarget", "rebump", "canary-serving@0", "engine", 1, None),
+    ],
+    "gen-canary-podkill": [
+        ("podkill", "gate", "engine", "None"),
+        ("podkill", "held", "engine", "None"),
+    ],
+    "gen-canary-fault-old": [
+        ("fault-old", "prestart", "crashloop", "start", "engine", 1, "None", 1, None),
+        ("fault-old", "traffic", "crashloop", "start", "engine", 1, "None", 1, None),
+        ("fault-old", "gate", "crashloop", "start", "engine", 1, "None", 1, None),
+    ],
+    "gen-canary-fault-new": [
+        ("fault-new", "crashStart", "rollback", "engine", 1, "None", None),
+        ("fault-new", "crashStart", "rebump-fix", "engine", 1, "None", None),
+        ("fault-new", "crashInSoak", "rollback", "engine", 1, "None", None),
+    ],
+    "gen-canary-fault-gate": [
+        ("gate-sibling-running", "router", "crashloop", "start", "None", "mid", False, "engine", lib.NR),
+        ("gate-sibling-park", "engine"),
+    ],
+}
+# The word that ends a twin's description and the variant on each of its cells.
+POLICY_TWIN_TAG = "policyRef"
+
+
+def _policy_twin_body(name, case_comps, coord, runtime):
+    group, policy = lib.canary_policy_ref(coord, f"{name}-policy")
+    return lib.render(name, case_comps, coord=group, runtime=runtime, docs=[policy])
+
+
+def emit_canary_policy_twins(add, inline_rows):
+    """One policy-referenced twin per selected inline row: the same header,
+    fleet, reason and runtime, the group naming the RolloutPolicy the case
+    ships with the ladder the inline group carried, every cell with the
+    referenced variant. inline_rows maps (folder, matrix key) to the rows
+    add() saw; a key naming no row or more than one, a row with a body or a
+    runtime of its own, or an analysis-gated ladder stops the generation."""
+    for folder, keys in CANARY_POLICY_TWINS.items():
+        for key in keys:
+            rows = inline_rows.get((folder, key), [])
+            if len(rows) != 1:
+                sys.exit(f"{folder}: {len(rows)} inline rows carry the twin key {key}; exactly one is needed")
+            row = rows[0]
+            if row["body"] or row["dedicated"]:
+                sys.exit(f"{folder}: the twin key {key} names a row with a body or a runtime of its own, "
+                         f"which the twin cannot carry")
+            if "analysis:" in row["coord"]:
+                sys.exit(f"{folder}: the twin key {key} names an analysis-gated ladder; a policy ladder with a gate "
+                         f"must name a bound metric provider, which the inline row does not carry")
+            cells = ",".join(f"{c}[{POLICY_TWIN_TAG}]" for c in str(row["kv"]["cell"]).split(","))
+            add(folder, f"{row['desc']} {POLICY_TWIN_TAG}", dict(row["kv"], cell=cells), row["case_comps"],
+                row["reason"], dict(row["meta"], twin=row["name"]), cell=(POLICY_TWIN_TAG,) + key,
+                body=functools.partial(_policy_twin_body, case_comps=row["case_comps"], coord=row["coord"],
+                                       runtime=row["runtime"]))
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
     outputs = {}
     counters = {f: lo for f, (lo, _hi) in GEN_BLOCKS.items()}
     rows = []   # (folder, case id, kv, meta) for the manifest
+    # (folder, matrix key) -> the canary rows add() saw, for their
+    # policy-referenced twins.
+    inline_rows = {}
     kept_empty = []   # (folder, case id, description, why) of the ids minted with no case
     parked_used = set()
 
@@ -9122,6 +9201,10 @@ def build_outputs():
                       else dedicated_runtime(rt_name, metrics=(runtime == lib.CSR_METRICS),
                                              gang=any(c["w"] > 0 for c in case_comps or [])))
             runtime = rt_name
+        if folder in CANARY_POLICY_TWINS and "twin" not in meta:
+            inline_rows.setdefault((folder, cell), []).append(dict(
+                name=name, desc=desc, kv=kv, case_comps=case_comps, reason=reason, meta=meta, coord=coord or "",
+                body=body, runtime=runtime, dedicated=dedicated or edit_runtime))
         text = body(name) if body else lib.render(name, case_comps, coord=coord, runtime=runtime)
         if before:
             text = before + "\n---\n" + text
@@ -9182,6 +9265,7 @@ def build_outputs():
     _emit_plain_ops(add)
     _emit_leftover_singles(add)
     _emit_tail_cells(add)
+    emit_canary_policy_twins(add, inline_rows)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -9459,6 +9543,9 @@ def manifest(rows, kept_empty=()):
     lines += table("By pause moment", tally(lambda kv, m: m.get("moment", "(no pause around a repair)")))
     lines += table("By push while paused", tally(lambda kv, m: m.get("push", "(no pause around a repair)")))
     lines += table("By coordination", tally(lambda kv, m: kv.get("co", "none")))
+    lines += table("By canary form (mode=canary rows)",
+                   tally(lambda kv, m: "policy-referenced" if "twin" in m else "inline",
+                         where=lambda kv, m: kv.get("mode") == "canary"))
     edits = {}
     for _f, _n, _kv, m in rows:
         if "edit" in m and _f == "gen-switch":

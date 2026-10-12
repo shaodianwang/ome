@@ -1,0 +1,33 @@
+# p5346: [gen] canary podkill held engine N=8 rp None policyRef  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 co=none topo=engine canary=auto bump=engine img=example.com/canary-test/missing:none during=canary-staging verb=podkill verb2=rebump-fix during2=canary-failed victim=stable victimcomp=engine terminal=Stable cell=canary/Staging/capacityDropped[stable][policyRef]
+# reason: one old-revision engine pod is deleted by hand while the new revision is held at the capacity gate by an image that cannot start; its replacement comes back labelled as what it runs (the image its revision's pods ran, never the new template under the old label), and after a fixed image once the gate has parked the roll finishes with every Instance on the final revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p5346 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          policyRef: { name: p5346-policy, progression: canary }
+---
+apiVersion: ome.io/v1beta1
+kind: RolloutPolicy
+metadata:
+  name: p5346-policy
+  # Teardown deletes the case's documents in one pass, the policy with the
+  # service that still references it.
+  annotations: { ome.io/allow-in-use-delete: "true" }
+spec:
+  canary:
+    readyTimeout: "90s"
+    steps:
+      - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+      - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+      - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+      - { capacity: "100%", traffic: 100 }

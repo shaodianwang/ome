@@ -1,0 +1,37 @@
+# p9223: [gen] canary gate sibling router crashloop:start persists at mid engine router N=8 rp None policyRef  mode=canary Ne=8 Nd=0 Nr=2 ceil_e=9 ceil_d=0 ceil_r=2 fault=crashloop:canary-serving@1 co=none topo=engine canary=auto form=start victims=1 victimcomp=router nophase=Failed cell=canary/Serving[soak]/siblingBroken[router][policyRef]
+# reason: one running-revision router Instance crashes at every start while the second step soaks on engine+router single (8 Instances), under restart policy None; the router is not rolled by the engine ladder, so the repair owns it: it is rebuilt, Ready and serving on its running revision with a RestartTriggered event naming it, the other router Instance keeps serving, and the ladder walks every step to Stable
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p9223 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          policyRef: { name: p9223-policy, progression: canary }
+---
+apiVersion: ome.io/v1beta1
+kind: RolloutPolicy
+metadata:
+  name: p9223-policy
+  # Teardown deletes the case's documents in one pass, the policy with the
+  # service that still references it.
+  annotations: { ome.io/allow-in-use-delete: "true" }
+spec:
+  canary:
+    steps:
+      - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+      - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+      - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+      - { capacity: "100%", traffic: 100 }

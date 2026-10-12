@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+from collections import Counter
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -22,8 +23,8 @@ def counts(ne=2, nd=0, nr=0, ceil_e=None):
     return dict(Ne=ne, Nd=nd, Nr=nr, ceil_e=ceil_e if ceil_e is not None else ne + 1, ceil_d=nd, ceil_r=nr)
 
 
-def body(cid, comps, coord=None):
-    return gen_cases.render(cid, comps, coord=coord)
+def body(cid, comps, coord=None, docs=()):
+    return gen_cases.render(cid, comps, coord=coord, docs=docs)
 
 
 def engine(n=2, w=0, life=None):
@@ -49,7 +50,7 @@ class Corpus:
         self.root = Path(self.dir.name) / "isvcs"
         self.n = 9000
 
-    def write(self, desc="a case", comps=None, coord=None, reason=None, folder="scratch", **kv):
+    def write(self, desc="a case", comps=None, coord=None, reason=None, folder="scratch", docs=(), **kv):
         self.n += 1
         cid = f"p{self.n}"
         fields = dict(counts())
@@ -57,7 +58,7 @@ class Corpus:
         lines = [header(cid, desc, **fields)]
         if reason:
             lines.append(f"# reason: {reason}")
-        text = "\n".join(lines) + "\n" + body(cid, comps if comps is not None else engine(), coord)
+        text = "\n".join(lines) + "\n" + body(cid, comps if comps is not None else engine(), coord, docs)
         path = self.root / folder / f"{cid}.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
@@ -479,6 +480,18 @@ class BodyFactsTest(unittest.TestCase):
         case = self.corpus.write(mode="canary", canary="auto", coord=gen_cases.canary_block(steps), topo="engine")
         self.assertEqual("canary", case.group)
 
+    def test_a_group_naming_its_ladder_through_a_policy_is_the_referenced_form(self):
+        steps = gen_cases.canary_steps("auto", ("50%", 50), ("100%", 100))
+        inline = self.corpus.write(mode="canary", canary="auto", coord=gen_cases.canary_block(steps), topo="engine")
+        group, policy = gen_cases.canary_policy_ref(gen_cases.canary_block(steps), "p1-policy")
+        referenced = self.corpus.write(mode="canary", canary="auto", coord=group, docs=[policy], topo="engine")
+        self.assertEqual(("canary", "inline"), (inline.group, inline.canary_form))
+        self.assertEqual(("canary", "policy-referenced"), (referenced.group, referenced.canary_form))
+        self.assertEqual(inline.canary_steps, referenced.canary_steps)
+        self.assertEqual("-", self.corpus.write(topo="engine").canary_form)
+        self.assertEqual("-", self.corpus.write(comps=pd(), coord=gen_cases.coord_for("rolling"), topo="pd",
+                                                co="rolling", **counts(2, 2, 2)).canary_form)
+
     def test_strategy_budget_and_restart_policy_come_from_the_engine_lifecycle(self):
         case = self.corpus.write(comps=engine(life=gen_cases.lifecycle(strat="RecreatePod", surge=0, unavail="50%",
                                                                        restart="RecreateInstanceOnPodRestart")), topo="engine")
@@ -738,6 +751,23 @@ class LedgerTest(unittest.TestCase):
         self.assertIn("unknown value mode=teleport", err.getvalue())
         self.assertIn("story 2 has no case", err.getvalue())
 
+    def test_the_canary_form_is_its_own_axis(self):
+        steps = gen_cases.canary_steps("auto", ("50%", 50), ("100%", 100))
+        group, policy = gen_cases.canary_policy_ref(gen_cases.canary_block(steps), "p1-policy")
+        self.corpus.write(mode="canary", canary="auto", coord=gen_cases.canary_block(steps), topo="engine", folder="one-form")
+        self.corpus.write(mode="canary", canary="auto", coord=gen_cases.canary_block(steps), topo="engine", folder="both-forms")
+        self.corpus.write(mode="canary", canary="auto", coord=group, docs=[policy], topo="engine", folder="both-forms")
+        cases = self.corpus.cases()
+        text = coverage.render_markdown(cases, with_cases=True)
+        self.assertIn("### Canary form x folder", text)
+        self.assertIn("| both-forms | 1 | 1 |", text)
+        self.assertIn("| one-form | 1 | . |", text, "a folder proved inline alone shows an empty referenced cell")
+        self.assertIn("### Step kind x canary form", text)
+        self.assertIn("| timed soak | 2 | 1 |", text)
+        self.assertIn("| manual gate | . | . |", text)
+        self.assertEqual({"inline": 2, "policy-referenced": 1},
+                         dict(Counter(c["canary_form"] for c in json.loads(coverage.render_json(cases))["cases"])))
+
     def test_markdown_and_json_render_a_small_corpus(self):
         self.corpus.write(fault="crashloop:old", form="start", topo="engine", reason="the fix lands")
         cases = self.corpus.cases()
@@ -823,6 +853,21 @@ class CommittedCorpusTest(unittest.TestCase):
         for case in packed:
             self.assertEqual("", case.parked, f"{case.id}: nothing is parked")
             self.assertIn("packed pool", case.operation_detail, case.id)
+
+    def test_every_canary_family_runs_cells_in_both_forms(self):
+        for folder in ("canary", "gen-canary-crash", "gen-canary-second-rev", "gen-canary-podkill",
+                       "gen-canary-fault-old", "gen-canary-fault-new", "gen-canary-fault-gate"):
+            self.assertEqual({"inline", "policy-referenced"}, {c.canary_form for c in self.by_folder[folder]}, folder)
+        referenced = [c for c in self.cases if c.canary_form == "policy-referenced"]
+        self.assertEqual(17, len(referenced))
+        inline = {(c.folder, c.description): c for c in self.cases if c.canary_form == "inline"}
+        for twin in referenced:
+            if not twin.folder.startswith("gen-"):
+                continue   # the hand-written twins word their own descriptions
+            mirror = inline[(twin.folder, twin.description.removesuffix(" policyRef"))]
+            self.assertEqual((mirror.shape_family, mirror.operation, mirror.faults, mirror.timing, mirror.canary_steps),
+                             (twin.shape_family, twin.operation, twin.faults, twin.timing, twin.canary_steps), twin.id)
+            self.assertEqual([f"{c}[policyRef]" for c in mirror.canary_cells], twin.canary_cells, twin.id)
 
     def test_the_corpus_markdown_renders(self):
         text = coverage.render_markdown(self.cases)

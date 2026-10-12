@@ -5891,12 +5891,13 @@ def _canary_hook_ok(v):
     return hook in CANARY_HOOKS and (not at or at.isdigit())
 
 
-_CELL_ID = re.compile(r"^canary/[A-Za-z]+(\[[A-Za-z]+\])?/[A-Za-z0-9]+(\[[A-Za-z]+\])?$")
+_CELL_ID = re.compile(r"^canary/[A-Za-z]+(\[[A-Za-z]+\])?/[A-Za-z0-9]+(\[[A-Za-z]+\])?(\[policyRef\])?$")
 
 
 def _cell_ok(v):
     """Header validator for cell=: a comma-separated list of grid cell ids,
-    each canary/<State>[gate]/<event>[variant]."""
+    each canary/<State>[gate]/<event>[variant], ending in [policyRef] when
+    the case's group names its ladder through a RolloutPolicy."""
     return bool(str(v)) and all(_CELL_ID.match(c) for c in str(v).split(","))
 
 

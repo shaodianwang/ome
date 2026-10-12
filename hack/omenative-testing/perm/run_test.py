@@ -460,6 +460,108 @@ class ReferencedCanarySpecTest(unittest.TestCase):
             self.assertEqual([], run.validate_case_file(ref_path), ref_id)
 
 
+class GeneratedPolicyTwinsTest(unittest.TestCase):
+    """Each generated canary family runs a few of its cells in both forms:
+    after every other row of the family the generator mints a twin of each
+    selected inline case whose group names a RolloutPolicy, shipped as the
+    case's second document with the ladder the inline group carried. The
+    twin reads the same as its inline case in everything but the form, so
+    the two verdicts compare one to one."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, cls.rows = generate_cases.build_outputs()
+        cls.twins = [(f, n, kv, m) for f, n, kv, m in cls.rows if m.get("twin")]
+        cls.inline = {n: (f, kv, m) for f, n, kv, m in cls.rows if not m.get("twin")}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _written(self, folder, name):
+        """The rendered case under a scratch tree, as the harness reads it."""
+        path = Path(self.tmp.name) / folder / f"{name}.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.outputs[f"{folder}/{name}.yaml"])
+        return path
+
+    @staticmethod
+    def _ladder(path):
+        lines = [line.strip() for line in Path(path).read_text().splitlines()]
+        return lines[lines.index("steps:") + 1:]
+
+    def test_every_canary_family_carries_its_selected_twins_after_its_other_rows(self):
+        self.assertEqual({folder: len(keys) for folder, keys in generate_cases.CANARY_POLICY_TWINS.items()},
+                         dict(collections.Counter(f for f, *_ in self.twins)))
+        for folder, name, _kv, _m in self.twins:
+            others = [int(x[1:]) for f, x, _kv2, mm in self.rows if f == folder and not mm.get("twin")]
+            self.assertGreater(int(name[1:]), max(others), f"{folder}/{name}: minted after the family's other rows")
+            self.assertTrue(any(lo <= int(name[1:]) < hi for lo, hi in generate_cases.id_blocks(folder)), name)
+
+    def test_each_twin_mirrors_its_inline_case_in_everything_but_the_form(self):
+        tag = generate_cases.POLICY_TWIN_TAG
+        for folder, name, kv, m in self.twins:
+            inline_folder, _inline_kv, inline_m = self.inline[m["twin"]]
+            self.assertEqual(folder, inline_folder, name)
+            self.assertEqual(dict(inline_m, twin=m["twin"]), m, f"{name}: the manifest tallies the twin with its inline case")
+            twin_path, inline_path = self._written(folder, name), self._written(folder, m["twin"])
+            _, hdr = run.parse_header(twin_path)
+            _, inline_hdr = run.parse_header(inline_path)
+            self.assertEqual(",".join(f"{c}[{tag}]" for c in str(inline_hdr["cell"]).split(",")), hdr["cell"], name)
+            strip = lambda h: {k: v for k, v in h.items() if k != "cell"}
+            self.assertEqual(strip(inline_hdr), strip(hdr), name)
+            self.assertEqual([], run.validate_case_file(twin_path), name)
+            text, inline_text = twin_path.read_text(), inline_path.read_text()
+            self.assertEqual(inline_text.splitlines()[1], text.splitlines()[1], f"{name}: the same reason on line two")
+            self.assertEqual(self._ladder(inline_path), self._ladder(twin_path), name)
+            # The fleet is the inline case's; only the group's ladder moved.
+            isvc, _, policy = text.partition("\n---\n")
+            fleet = lambda doc: doc[doc.index("\nspec:"):doc.index("  rollout:")]
+            self.assertEqual(fleet(inline_text), fleet(isvc), name)
+            self.assertTrue(isvc.endswith(f"\n          policyRef: {{ name: {name}-policy, progression: canary }}"), name)
+            self.assertNotIn("\n          canary:", isvc, f"{name}: the group carries the reference alone")
+            self.assertIn("kind: RolloutPolicy", policy, name)
+            self.assertIn(f"\n  name: {name}-policy\n", policy, name)
+            self.assertIn(gen_cases.POLICY_DELETE_ANNOTATION, policy, name)
+            self.assertNotIn("analysis:", text, f"{name}: a policy ladder with a gate needs a bound metric provider")
+            # The ledger reads the two alike, the form apart.
+            twin_case, inline_case = coverage.read_case(twin_path), coverage.read_case(inline_path)
+            self.assertEqual(("policy-referenced", "inline"), (twin_case.canary_form, inline_case.canary_form), name)
+            differ = {"id", "description", "header", "canary_cells", "canary_form"}
+            facts = lambda c: {k: v for k, v in coverage.case_json(c).items() if k not in differ}
+            self.assertEqual(facts(inline_case), facts(twin_case), name)
+            self.assertEqual(f"{inline_case.description} {tag}", twin_case.description, name)
+            self.assertEqual([f"{c}[{tag}]" for c in inline_case.canary_cells], twin_case.canary_cells, name)
+
+    def test_the_referenced_form_of_a_rendered_group(self):
+        steps = gen_cases.canary_steps("auto", ("50%", 50), ("100%", 100))
+        group, policy = gen_cases.canary_policy_ref(
+            gen_cases.canary_block(steps, components=["engine", "decoder"], ready_timeout="90s"), "p1-policy")
+        self.assertEqual("  rollout:\n    groups:\n        - components: [engine, decoder]\n"
+                         "          policyRef: { name: p1-policy, progression: canary }", group)
+        self.assertEqual("apiVersion: ome.io/v1beta1\nkind: RolloutPolicy\nmetadata:\n  name: p1-policy\n"
+                         "  # Teardown deletes the case's documents in one pass, the policy with the\n"
+                         "  # service that still references it.\n"
+                         '  annotations: { ome.io/allow-in-use-delete: "true" }\n'
+                         'spec:\n  canary:\n    readyTimeout: "90s"\n    steps:\n'
+                         '      - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }\n'
+                         '      - { capacity: "100%", traffic: 100 }\n', policy)
+        with self.assertRaises(ValueError):
+            gen_cases.canary_policy_ref(gen_cases.coord_for("rolling"), "p1-policy")
+
+    def test_a_twin_key_the_generator_cannot_meet_stops_the_generation(self):
+        for key, words in ((("storm", "no", "such", "row"), "0 inline rows carry the twin key"),
+                           (("gate-metric", "canary", "persist", "mid", "engine", 0), "analysis-gated ladder"),
+                           (("stable-break", "configkey lifted", "idle", "engine", 0, "None"), "a body or a runtime of its own")):
+            folder = "gen-canary-fault-gate" if key[0] == "gate-metric" else "gen-canary-fault-old"
+            with self.subTest(key=key):
+                with mock.patch.dict(generate_cases.CANARY_POLICY_TWINS, {folder: [key]}):
+                    with self.assertRaises(SystemExit) as stop:
+                        with contextlib.redirect_stderr(io.StringIO()):
+                            generate_cases.build_outputs()
+                self.assertIn(words, str(stop.exception))
+
+
 class MaxUnavailableResolutionTest(unittest.TestCase):
     """The capacity floor is N minus the budget the engine resolves: an
     integer as it is, a percent rounded up and clamped to the fleet, the
@@ -4150,7 +4252,8 @@ class LeftoverSinglesTest(unittest.TestCase):
                          {(kv["topo"], kv["Nr"]) for f, _n, kv, _m in self.fam if f == "gen-canary-podkill"})
         self.assertEqual({"repaired", "relocated"}, {kv["expect"] for f, _n, kv, _m in self.fam if f == "gen-node"})
         for folder, name, kv, m in self.fam:
-            others = [int(x[1:]) for f, x, _kv, mm in self.rows if f == folder and not mm.get("single") and not mm.get("tail")]
+            others = [int(x[1:]) for f, x, _kv, mm in self.rows
+                      if f == folder and not mm.get("single") and not mm.get("tail") and not mm.get("twin")]
             self.assertGreater(int(name[1:]), max(others), f"{folder}/{name}: minted after the family's other rows")
             self.assertEqual("none", kv["co"], name)
             text = self.outputs[f"{folder}/{name}.yaml"]
@@ -4272,7 +4375,7 @@ class LedgerTailCellsTest(unittest.TestCase):
 
     def test_every_tail_row_follows_every_other_row_of_its_family(self):
         for folder, name, _kv, _m in self.tail:
-            others = [int(x[1:]) for f, x, _kv2, mm in self.rows if f == folder and not mm.get("tail")]
+            others = [int(x[1:]) for f, x, _kv2, mm in self.rows if f == folder and not mm.get("tail") and not mm.get("twin")]
             self.assertGreater(int(name[1:]), max(others), f"{folder}/{name}")
             self.assertTrue(any(lo <= int(name[1:]) < hi for lo, hi in generate_cases.id_blocks(folder)), name)
 
@@ -10396,7 +10499,7 @@ class GeneratedStoryFamiliesTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.outputs, rows = generate_cases.build_outputs()
-        cls.rows = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder and "row" not in m]
+        cls.rows = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder and "row" not in m and not m.get("twin")]
                     for folder in ("gen-canary-crash", "gen-canary-second-rev", "gen-canary-podkill")}
 
     def _line2(self, folder, name):
@@ -10509,7 +10612,7 @@ class GeneratedCanaryFaultFamiliesTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.outputs, rows = generate_cases.build_outputs()
-        cls.rows = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder and "row" not in m]
+        cls.rows = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder and "row" not in m and not m.get("twin")]
                     for folder in ("gen-canary-fault-old", "gen-canary-fault-new")}
 
     def _line2(self, folder, name):
@@ -20502,7 +20605,7 @@ class GeneratedCanaryGateFamilyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.outputs, rows = generate_cases.build_outputs()
-        cls.fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-canary-fault-gate"]
+        cls.fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-canary-fault-gate" and not m.get("twin")]
 
     def test_every_case_is_an_engine_unit_canary_with_an_end_state(self):
         self.assertEqual(173, len(self.fam))
@@ -22596,7 +22699,7 @@ class CanaryBesideEveryFaultFamiliesTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.outputs, rows = generate_cases.build_outputs()
-        cls.fam = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder and "row" in m]
+        cls.fam = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder and "row" in m and not m.get("twin")]
                    for folder in ("gen-canary-fault-old", "gen-canary-fault-new", "gen-canary-podkill")}
 
     def test_counts_shapes_and_the_continuation_block(self):
