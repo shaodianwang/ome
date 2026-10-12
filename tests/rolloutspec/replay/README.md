@@ -655,25 +655,33 @@ or determinism forced a change, and they are the ones to review.
    create is observed as soon as the object exists; a delete is observed
    when the object leaves the apiserver, whether the scenario's
    `pod.deleted` took it out or the force-delete sweep did.
-9. **The deadline park/rearm step and the published pod count are
+9. **The deadline park/rearm step and the published pod counters are
    modelled, the rest of the aggregate pass is not.** The adapter parks
    every in-flight deadline before the dispatcher when paused, and parks or
    rearms admission-held deadlines after it on every reconcile; the driver
-   does both. The adapter also writes each row's `PodCount` from the pass's
-   pod observation, which the next pass reads; the driver hands the engine
-   the previous pass's count on every row the same way, without rendering
-   it. The other counters and the conditions the same aggregate pass
-   publishes are not computed.
+   does both. The adapter also runs its status publication after the pass,
+   which counts the pod set the pass started from onto each row; the driver
+   runs the same publisher (`workload.ComponentObservation.
+   TakeInlineV1Publication`, fed the rows the pass left, the headless
+   Service's rotation and the availability window) and hands the engine the
+   `PodCount` and `ServingPodCount` it wrote on every row of the next pass,
+   without rendering them. The other counters it writes (`ReadyPodCount`,
+   `ScheduledPodCount`, `AvailablePodCount`, `Admitted`, `NodesOccupied`),
+   the phase it projects and the conditions are not carried: no pass reads
+   them, except the available count behind the migration tail, which stays
+   the adapter's (see **What is not modelled yet**).
 10. **An event may carry only the arguments it declares.** The parser
     rejects anything else, so a mistyped argument fails the load instead
     of silently doing nothing, and `timer.operationDeadline` requires its
     slack rather than defaulting to one the harness invented.
-11. **A row line omits `ReadyPodCount`, `ScheduledPodCount` and
-    `NodesOccupied`.** Those are materialized only on the status
-    publication path, which runs outside `workload.Reconcile`, and the
-    workload package's removable-field audit forbids reading them
-    anywhere else. A trace cannot honestly report a field the run never
-    writes.
+11. **A row line carries no published counter.** The publication's
+    counters are handed to a pass on the rows it reads and never stored:
+    every row write starts from the stored row, so a trace line, which
+    renders a write, shows one only when a stamp copies it into the row,
+    and none does. `ReadyPodCount`, `ScheduledPodCount` and
+    `NodesOccupied` are not handed to a pass at all, and the workload
+    package's removable-field audit forbids reading them anywhere but
+    the publication path.
 12. **The teardown deadline is a driver stand-in, not the adapter's
     code.** The check is three lines the adapter runs ahead of its
     dispatch — deletion instant plus deadline, a Warning, the finalizer

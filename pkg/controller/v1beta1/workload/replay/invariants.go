@@ -24,9 +24,9 @@ type TickView struct {
 	// Now is the injected clock after the tick's events.
 	Now time.Time
 	// Rows are the owner's rows after the pass, each carrying the PodCount
-	// the status publication wrote for the next pass to read: the count of
-	// the pod set the pass started from, before its own creates and
-	// deletes.
+	// and ServingPodCount the status publication wrote for the next pass
+	// to read: counted over the pod set the pass started from, before its
+	// own creates, deletes and gate writes.
 	Rows []types.InstanceStatus
 	// RetryBlocks are the owner's per-revision retry blocks after the pass.
 	RetryBlocks []types.RetryBlock
@@ -212,7 +212,8 @@ func CheckBoundedWaits(view TickView) []Finding {
 // that is Ready and serving; a Failed row has none, unless its LastFailure
 // names a replacement attempt beside a serving source; and a row's
 // PodCount is the number of pods the apiserver lists for its Instance.
-// ServingPodCount is not published by the driver and is not compared.
+// The published ServingPodCount is set beside the reading of the pods by
+// CompareReadings, not here.
 func CheckStatusTruth(view TickView) []Finding {
 	var findings []Finding
 	for i := range view.Rows {

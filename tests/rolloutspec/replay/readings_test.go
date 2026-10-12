@@ -33,6 +33,17 @@ var knownReadingClasses = map[string]string{
 	// reading need the gate.
 	"podReadyAndServing/coordination=true/podreadiness=false": "a pod the scenario reported Ready before the engine wrote its gate; a real kubelet holds PodReady False until the declared gate is True, so the replay's pod.ready event is what makes this shape",
 	"podReadyAndServing/coordination=false/podreadiness=true": "a pod being deleted, or one reported Ready while still Pending, whose conditions still read healthy: coordination excludes it on its deletion timestamp or phase, podreadiness counts its conditions; the reading excludes a deleting pod and ignores the phase",
+
+	// The persisted serving count is the publication's count of the pod
+	// set the pass started from, read one pass later; the reading counts
+	// the pods as they are now.
+	"persistedServingCount/row<reading": "the pods entered rotation after the pass's starting pod set was counted: the gate was written or PodReady folded this pass; the published count trails by one pass",
+	"persistedServingCount/row>reading": "the pods left rotation after the pass's starting pod set was counted: a drain took the gate off, a delete or a crash took the pod; the published count trails by one pass",
+
+	// types.RecreateOfDarkRow reads the persisted count on a Failed row;
+	// the reading reads this pass's routable members (OutOfRotation).
+	"recreateOfDarkRow/row=true/reading=false": "a Failed row whose pods are all being deleted, or whose pod came back into rotation after the count: the counter reads a set with nothing serving as dark; the reading needs a live member before it calls a set out of rotation, and a pod being deleted is not one",
+	"recreateOfDarkRow/row=false/reading=true": "a gang whose leader stopped serving while a worker still carries PodReady and the gate, or a pod that left rotation after the count: the counter counts every pod of the set, the reading counts the routable members alone, and no Service publishes a worker",
 }
 
 // TestReadingBesideTodaysReadersOverTheCorpus replays every scenario with

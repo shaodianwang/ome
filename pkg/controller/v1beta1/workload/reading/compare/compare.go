@@ -69,17 +69,25 @@ func Compare(pods []*corev1.Pod, desired int32, row *types.InstanceStatus, ctx r
 		evidence.PodSetUnavailableOnParkedMember(pods, desired, ctx.Now, ctx.UnreadyGrace), r.UnavailableOnParkedMember())
 
 	if row != nil {
-		// RecreateOfDarkRow reads the persisted counter only on a Failed row
-		// that is not an update continuation, so the comparison is made
-		// there alone, under a non-surge strategy so the counter decides.
+		// A row is dark when none of its pods serves, whatever its phase
+		// says: a Failed row whose source pod still serves is not dark,
+		// and publishes Ready. A pod serves when its PodReady condition
+		// and the serving gate are both True, so its Service can publish
+		// it; a gang worker is never published and does not count.
+		// RecreateOfDarkRow reads this from the persisted serving count,
+		// one pass old, on a Failed row that is not an update
+		// continuation, so the comparison is made there alone, under a
+		// non-surge strategy so the counter decides; the reading reads it
+		// from this pass's pods (OutOfRotation), with no grace and no
+		// phase.
 		if types.StateOf(row) == types.StateFailed && !types.UpdateContinuation(row) {
 			dark := types.RecreateOfDarkRow(row, types.UpdateStrategyRecreatePod)
-			if dark != r.ServesNothing() {
+			if dark != r.OutOfRotation() {
 				out = append(out, Disagreement{
 					Reader: ReaderRecreateOfDarkRow,
-					Class:  fmt.Sprintf("recreateOfDarkRow/row=%t/reading=%t", dark, r.ServesNothing()),
-					Detail: fmt.Sprintf("the Failed row persisted %d serving pods one pass ago; this pass the pods read servesNothing=%t",
-						row.ServingPodCount, r.ServesNothing()),
+					Class:  fmt.Sprintf("recreateOfDarkRow/row=%t/reading=%t", dark, r.OutOfRotation()),
+					Detail: fmt.Sprintf("the Failed row persisted %d serving pods one pass ago; this pass the pods read outOfRotation=%t",
+						row.ServingPodCount, r.OutOfRotation()),
 				})
 			}
 		}

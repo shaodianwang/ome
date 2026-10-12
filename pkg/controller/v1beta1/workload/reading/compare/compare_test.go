@@ -98,6 +98,35 @@ func TestCompare_CraftedSetsDisagreePerReader(t *testing.T) {
 			},
 		},
 		{
+			name:    "Failed row whose pod came back a pass after the row persisted zero",
+			pods:    pods(shape(podName)),
+			desired: 1,
+			row:     failedRow(0),
+			want: map[string]string{
+				compare.ReaderRecreateOfDarkRow:    "recreateOfDarkRow/row=true/reading=false",
+				compare.ReaderPersistedServingPods: "persistedServingCount/row<reading",
+			},
+		},
+		{
+			// The counter and the reading both read a pod still coming up
+			// as not serving; the grace the reading waits out before it
+			// calls a set out of service plays no part in a dark row.
+			name:    "Failed row dark on a pod still coming up",
+			pods:    pods(shape(podName, neverReady)),
+			desired: 1,
+			row:     failedRow(0),
+			want:    map[string]string{},
+		},
+		{
+			// A Failed row whose source pod still serves is not dark, by
+			// the counter it published and by the pods.
+			name:    "Failed row whose source still serves beside a failed replacement",
+			pods:    pods(shape(podName)),
+			desired: 1,
+			row:     failedRow(1),
+			want:    map[string]string{},
+		},
+		{
 			name:    "pod came back a pass after the row persisted zero",
 			pods:    pods(shape(podName)),
 			desired: 1,
