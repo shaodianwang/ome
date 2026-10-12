@@ -11,6 +11,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -112,6 +113,7 @@ func TestMigratedPlacementSurvivesSchemaUpgrade(t *testing.T) {
 	if _, err := envtest.InstallCRDs(cfg, envtest.CRDInstallOptions{CRDs: []*apiextensionsv1.CustomResourceDefinition{current}}); err != nil {
 		t.Fatal(err)
 	}
+	awaitUpgradedSchema(t, cl, stored[2])
 	for i, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			before := stored[i]
@@ -153,24 +155,35 @@ func TestMigratedPlacementSurvivesSchemaUpgrade(t *testing.T) {
 		if err := cl.Update(t.Context(), source); err != nil {
 			t.Fatal(err)
 		}
-		removals := []*v1beta1.PlacementSpec{nil, {Mode: v1beta1.PlacementModeSingle}, {Policy: v1beta1.PlacementPolicy("Legacy"), Mode: v1beta1.PlacementModeSingle}}
-		refused := func(p *v1beta1.PlacementSpec) bool {
+		for _, p := range []*v1beta1.PlacementSpec{nil, {Mode: v1beta1.PlacementModeSingle}, {Policy: v1beta1.PlacementPolicy("Legacy"), Mode: v1beta1.PlacementModeSingle}} {
 			changed := source.DeepCopy()
 			changed.Spec.Placement = p
-			return cl.Update(t.Context(), changed, client.DryRunAll) != nil
-		}
-		// A replaced CRD's transition rules reach the apiserver's validators
-		// through its informer after the resource is already discoverable; the
-		// rules are in force once the first removal is refused.
-		if err := wait.PollUntilContextTimeout(t.Context(), eventuallyPoll, eventuallyTimeout, true, func(context.Context) (bool, error) {
-			return refused(removals[0]), nil
-		}); err != nil {
-			t.Fatal("schema allowed ClusterAffinity policy removal")
-		}
-		for _, p := range removals {
-			if !refused(p) {
-				t.Fatal("schema allowed ClusterAffinity policy removal")
+			if err := cl.Update(t.Context(), changed, client.DryRunAll); !apierrors.IsInvalid(err) {
+				t.Fatalf("schema allowed ClusterAffinity policy removal: %v", err)
 			}
 		}
 	})
+}
+
+// awaitUpgradedSchema returns once the apiserver validates InferenceServices
+// against the replaced schema. InstallCRDs only waits for discovery to list the
+// resource, which a CRD that was already served satisfies at once, while the
+// apiserver swaps its validators later, when its informer delivers the updated
+// CRD. The replaced schema refuses to drop a ClusterAffinity policy, so a
+// dry-run that removes the policy from a service is accepted until the new rules
+// are in force and refused as invalid from then on.
+func awaitUpgradedSchema(t *testing.T, cl client.Client, service *v1beta1.InferenceService) {
+	t.Helper()
+	key := client.ObjectKeyFromObject(service)
+	err := wait.PollUntilContextTimeout(t.Context(), eventuallyPoll, eventuallyTimeout, true, func(ctx context.Context) (bool, error) {
+		probe := &v1beta1.InferenceService{}
+		if err := cl.Get(ctx, key, probe); err != nil {
+			return false, err
+		}
+		probe.Spec.Placement = nil
+		return apierrors.IsInvalid(cl.Update(ctx, probe, client.DryRunAll)), nil
+	})
+	if err != nil {
+		t.Fatalf("apiserver still serves the previous schema: %v", err)
+	}
 }
