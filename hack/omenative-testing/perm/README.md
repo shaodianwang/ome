@@ -1296,10 +1296,12 @@ as a second document) or the readiness switch — and the pushed member's
 `instanceReadyTimeout` bounds each attempt so a revision that never comes
 up parks its row `Failed` within the wait. The runner then waits, reading
 the InferenceReplica: `stuck=failed` is the first
-failed attempt (an Instance row reads `Failed`, or the retry block for the
-pushed revision records a started attempt), `stuck=held` is the retry
-ladder spent (a retry block in state `Held`, or the hold the status derives
-from it). The ladder's length is the cluster's lifecycle configuration
+failed attempt (an Instance row the controller holds `Failed`: the word
+`Failed`, or `Ready` with a failed replacement attempt kept on the row,
+which the status publishes while the pods of the old revision still serve;
+or the retry block for the pushed revision records a started attempt),
+`stuck=held` is the retry ladder spent (a retry block in state `Held`, or
+the hold the status derives from it). The ladder's length is the cluster's lifecycle configuration
 (every attempt waits out the stuck-pod grace, then its backoff), so the
 wait for `held` has its own budget (`STUCK_HELD_WAIT_S`, scaled). A push
 that never reaches the named state within budget ends the case as `FAIL`
@@ -1308,9 +1310,12 @@ with the operation not applied.
 Then the operation, judged on what the engine promises:
 
 - **a scale-down** (`to_e=` below N; `to_d=` too when the decoder is a
-  bumped member) removes the Instances that are not Ready first, highest
-  index first within that tier, then Ready Instances highest index first,
-  so a stuck Instance goes before a healthy one. The verdict snapshots the
+  bumped member) removes the Instances that serve nothing first, then a
+  stuck one that still serves through its pods, then the highest index, so
+  a stuck Instance goes before a healthy one. A row's phase is read as the
+  controller holds it: the status publishes `Ready` over an Instance whose
+  replacement attempt failed while its old pods still serve, and that
+  Instance still goes first. The verdict snapshots the
   rows at the moment the scale lands and asserts exactly those Instances
   went and the rest stayed; that no survivor lost its running-revision pods
   to be rebuilt on the same revision; that under `held` no survivor was

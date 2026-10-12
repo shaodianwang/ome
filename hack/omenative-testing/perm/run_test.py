@@ -3309,7 +3309,11 @@ class WindowReadersTest(unittest.TestCase):
         with mock.patch.object(run, "_ir_by_component", lambda c: items(blocks=[{"state": "Held", "targetRevision": "r2"}])):
             self.assertIn("still Held", run._leftover_hold("p999"))
         with mock.patch.object(run, "_ir_by_component", lambda c: items(rows=[{"index": 3, "phase": "Failed"}])):
-            self.assertEqual("engine Instance 3 row Failed", run._leftover_hold("p999"))
+            self.assertEqual("engine Instance 3 row reads Failed", run._leftover_hold("p999"))
+        kept = {"index": 0, "phase": "Ready", "runningRevision": "p999-engine-aaaaaaaa", "targetRevision": "p999-engine-bbbbbbbb"}
+        with mock.patch.object(run, "_ir_by_component", lambda c: items(rows=[kept])):
+            self.assertIn("engine Instance 0 row reads Ready after a failed replacement attempt", run._leftover_hold("p999"),
+                          "a row the status publishes Ready over a failed replacement attempt is still a Failed row left behind")
 
 
 def _win(kind="webhook", op="push", lift="after-hold", form="", **over):
@@ -7646,7 +7650,7 @@ class StuckOperationTest(unittest.TestCase):
     @staticmethod
     def _ir(component, rows=(), blocks=(), hold=None, current="rev-a", update="rev-b", replicas=None):
         status = {"currentRevision": current, "updateRevision": update,
-                  "instanceStatuses": [{"index": i, "phase": ph} for i, ph in rows]}
+                  "instanceStatuses": [r if isinstance(r, dict) else {"index": r[0], "phase": r[1]} for r in rows]}
         if blocks:
             status["retryBlocks"] = list(blocks)
         if hold:
@@ -7759,6 +7763,10 @@ class StuckOperationTest(unittest.TestCase):
         self.assertIn("1 failed attempt(s) (Backoff)", run._stuck_signal({"engine": backoff}, {"engine"}, "failed"))
         self.assertIn("Instance 1 reads Failed", run._stuck_signal({"engine": held}, {"engine"}, "failed"))
         self.assertEqual("", run._stuck_signal({"engine": fresh}, {"engine"}, "failed"))
+        published = self._ir("engine", rows=[(0, "Ready"), {"index": 1, "phase": "Ready", "runningRevision": "rev-a", "targetRevision": "rev-b"}])
+        self.assertIn("Instance 1 reads Ready after a failed replacement attempt", run._stuck_signal({"engine": published}, {"engine"}, "failed"),
+                      "the status publishes Ready over the failed attempt while the old pod serves; the push has failed all the same")
+        self.assertEqual("", run._stuck_signal({"engine": published}, {"engine"}, "held"))
         self.assertEqual("", run._stuck_signal({"decoder": held}, {"engine"}, "held"), "only the bumped members count")
 
     def test_stuck_signal_held_waits_for_every_bumped_component(self):
@@ -7793,7 +7801,9 @@ class StuckOperationTest(unittest.TestCase):
         self.assertIn("retry block Held", out["engine"])
         self.assertEqual("", out["decoder"])
         self.assertEqual("", run._push_unlanded({"engine": silent}, {"engine"})["engine"])
-        self.assertIn("Failed row(s) 0", run._push_unlanded({"engine": failed}, {"engine"})["engine"])
+        self.assertIn("row(s) the controller holds Failed: 0", run._push_unlanded({"engine": failed}, {"engine"})["engine"])
+        published = self._ir("engine", rows=[{"index": 0, "phase": "Ready", "runningRevision": "rev-a", "targetRevision": "rev-b"}])
+        self.assertIn("row(s) the controller holds Failed: 0", run._push_unlanded({"engine": published}, {"engine"})["engine"])
         self.assertEqual("", run._push_unlanded({}, {"engine"})["engine"])
 
     def test_scale_victims_take_the_broken_rows_first_then_the_highest_index(self):
@@ -7823,6 +7833,64 @@ class StuckOperationTest(unittest.TestCase):
         self.assertEqual(["1"], run._scale_victims(serving_stuck, 1), "a row that serves nothing goes before a higher index that serves")
         self.assertEqual(["1", "2"], run._scale_victims(serving_stuck, 2))
         self.assertEqual(["1"], run._scale_victims([("0", "Ready"), ("1", "Failed"), ("2", "Ready")], 1), "a pair reads serving from its phase")
+
+    def test_a_row_is_failed_by_its_word_or_by_the_attempt_it_keeps(self):
+        """The status publishes Ready over an Instance whose replacement
+        attempt failed while its old pods still serve, and keeps the attempt
+        on the row: no operation, the revision it runs, the revision the
+        attempt was for as its target. The controller holds that row Failed,
+        as it holds a row whose word is Failed. A Ready row with no target,
+        one whose target is the revision it runs, one with an operation
+        open, and the publication's other words are not Failed; the failure
+        record alone says nothing, it outlives the attempt it names."""
+        kept = {"index": 0, "phase": "Ready", "runningRevision": "p999-engine-aaaaaaaa", "targetRevision": "p999-engine-bbbbbbbb",
+                "lastFailure": {"reason": "ImagePullBackOff", "podName": "p999-engine-0-1"}, "podCount": 1, "servingPodCount": 1}
+        self.assertEqual("reads Ready after a failed replacement attempt (the controller holds it Failed)", run._row_failed(kept))
+        self.assertEqual("reads Failed", run._row_failed({"index": 0, "phase": "Failed"}))
+        self.assertEqual("reads Failed", run._row_failed(dict(kept, phase="Failed")))
+        self.assertEqual("", run._row_failed(None))
+        self.assertEqual("", run._row_failed({"index": 0, "phase": "Ready"}))
+        self.assertEqual("", run._row_failed({"index": 0, "phase": "Ready", "runningRevision": "p999-engine-aaaaaaaa"}))
+        self.assertEqual("", run._row_failed(dict(kept, targetRevision="p999-engine-aaaaaaaa")),
+                         "an attempt at the revision it runs keeps the word Failed or is nothing")
+        self.assertEqual("", run._row_failed(dict(kept, operation={"type": "Update"})), "an operation open is an attempt in flight")
+        self.assertEqual("", run._row_failed(dict(kept, targetRevision="", lastFailure={"reason": "Evicted"})),
+                         "a failure record on a promoted row is history")
+        self.assertEqual("", run._row_failed({"index": 0, "phase": "Restarting", "runningRevision": "p999-engine-aaaaaaaa"}))
+        self.assertEqual("", run._row_failed({"index": 0, "phase": "Pending", "runningRevision": "p999-engine-aaaaaaaa",
+                                              "targetRevision": "p999-engine-bbbbbbbb"}))
+
+    def test_scale_rows_read_the_phase_as_the_controller_holds_it(self):
+        """Three single-pod Instances; the push took Instance 0, whose
+        replacement cannot be pulled while its old pod serves. The status
+        publishes its row Ready with the attempt kept on it; the plan reads
+        it Failed, serving through its pod, and a scale-down takes it first,
+        then the highest index, as it does when the word is Failed. The
+        controller's first pass stamps it Deleting and the plan still names
+        it. A clean Ready at 0 loses the highest index alone."""
+        def pod(inst, ready, h):
+            return {"comp": "engine", "inst": inst, "alive": True, "ready": ready, "hash": h, "uid": f"e{inst}{h}"}
+        ctx = {"pods_per_inst": {"engine": 1}, "old_hashes": {"aaaaaaaa"}, "pod_state": {
+            "e0": pod("0", True, "aaaaaaaa"), "e0r": pod("0", False, "bbbbbbbb"),
+            "e1": pod("1", True, "aaaaaaaa"), "e2": pod("2", True, "aaaaaaaa"), "gone": None}}
+        kept = {"index": 0, "phase": "Ready", "runningRevision": "p999-engine-aaaaaaaa", "targetRevision": "p999-engine-bbbbbbbb",
+                "lastFailure": {"reason": "ImagePullBackOff"}}
+        clean = [{"index": 1, "phase": "Ready", "runningRevision": "p999-engine-aaaaaaaa"},
+                 {"index": 2, "phase": "Ready", "runningRevision": "p999-engine-aaaaaaaa"}]
+        rows = run._scale_rows(ctx, "engine", {"engine": self._ir("engine", rows=[kept] + clean)})
+        self.assertEqual([("0", "Failed", True), ("1", "Ready", True), ("2", "Ready", True)], rows)
+        self.assertEqual(["0"], run._scale_victims(rows, 1), "the Instance whose replacement failed goes first, its old pod serving")
+        self.assertEqual(["0", "2"], run._scale_victims(rows, 2))
+        self.assertEqual(rows, run._scale_rows(ctx, "engine", {"engine": self._ir("engine", rows=[dict(kept, phase="Failed")] + clean)}),
+                         "the word Failed and the Ready published over it plan alike")
+        first = run._first_pass_rows(rows, [("0", "Deleting", False), ("1", "Ready", True), ("2", "Ready", True)])
+        plans = run._removal_plans({"at the scale": rows, "at the controller's first pass": first}, 2)
+        self.assertEqual({"at the scale": ["0"], "at the controller's first pass": ["0"]}, plans)
+        self.assertEqual(("at the scale", [], []), run._removal_outcome_by_rows(plans, {}, {"0", "1", "2"}, {"1", "2"}, {"1", "2"}))
+        self.assertEqual("still stuck", run._stuck_rows_fate(rows, [("0", "Deleting", False), ("1", "Ready", True), ("2", "Ready", True)]))
+        plain = run._scale_rows(ctx, "engine", {"engine": self._ir("engine", rows=[dict(clean[0], index=0)] + clean)})
+        self.assertEqual([("0", "Ready", True), ("1", "Ready", True), ("2", "Ready", True)], plain)
+        self.assertEqual(["2"], run._scale_victims(plain, 1), "a clean fleet loses its highest index")
 
     def test_removal_plans_count_a_surge_row_over_the_replica_count(self):
         """Two gangs under SurgeThenDrain carry a third row, the failed
@@ -12477,8 +12545,12 @@ class CrashloopNewFaultTest(unittest.TestCase):
         self.assertTrue(said[0].startswith("RetryHeld:"))
         failed = {"engine": {"hold": None, "rows": [{"index": 0, "phase": "Ready"}, {"index": 3, "phase": "Failed", "lastFailure": "CrashLoopBackOff"}]}}
         status, said = run._crash_new_why(failed, [], "engine")
-        self.assertEqual("Instance 3 row Failed (CrashLoopBackOff)", status)
+        self.assertEqual("Instance 3 row reads Failed (CrashLoopBackOff)", status)
         self.assertEqual([], said)
+        kept = {"engine": {"hold": None, "rows": [{"index": 0, "phase": "Ready", "runningRevision": "p999-engine-aaa",
+                                                   "targetRevision": "p999-engine-bbb", "lastFailure": "ImagePullBackOff"}]}}
+        self.assertEqual("Instance 0 row reads Ready after a failed replacement attempt (the controller holds it Failed) (ImagePullBackOff)",
+                         run._crash_new_why(kept, [], "engine")[0], "the status publishes Ready over the failed attempt while the old pod serves")
         self.assertEqual((None, []), run._crash_new_why({"engine": {"hold": None, "rows": [{"index": 0, "phase": "Updating"}]}}, [], "engine"))
         self.assertEqual((None, []), run._crash_new_why({}, [], "engine"))
 
@@ -12525,7 +12597,7 @@ class CrashloopNewFaultTest(unittest.TestCase):
         # A Failed row beside the opening hold still says why.
         plan = snap("Plan")
         plan["engine"]["rows"] = [{"index": 0, "phase": "Failed", "lastFailure": "CrashLoopBackOff"}]
-        self.assertEqual("Instance 0 row Failed (CrashLoopBackOff)", run._crash_new_why(plan, [], "engine")[0])
+        self.assertEqual("Instance 0 row reads Failed (CrashLoopBackOff)", run._crash_new_why(plan, [], "engine")[0])
 
     def test_peer_state_is_converged_held_or_rolling(self):
         ctx = {"old_hashes": {"old"}, "N": {"decoder": 2}, "agg": {"decoder": (2, 2, 2)},
@@ -14287,12 +14359,28 @@ class CapacityHoldReadersTest(unittest.TestCase):
         with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "inferencereplicas" in a, _ir_items("engine", rows))])), \
                 mock.patch.object(run, "_isvc_events_since", lambda *a, **kw: []):
             hold = run._broken_revision_hold("p1", {"engine"}, {"old1"}, 0)
-            self.assertIn("Instance 2 Failed: InstanceReadyTimeout", hold)
+            self.assertIn("Instance 2 reads Failed: InstanceReadyTimeout", hold)
             self.assertEqual("", run._broken_revision_hold("p1", {"engine"}, {"old1", "new1"}, 0))
         with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "inferencereplicas" in a, _ir_items("engine", []))])), \
                 mock.patch.object(run, "_isvc_events_since",
                                   lambda *a: [("InstanceFailed", "OMENative component=engine instance=2 Failed: InstanceReadyTimeout")]):
             self.assertTrue(run._broken_revision_hold("p1", {"engine"}, {"old1"}, 0).startswith("InstanceFailed"))
+
+    def test_broken_revision_hold_reads_the_row_as_the_controller_holds_it(self):
+        """The status publishes Ready over the Instance whose replacement
+        attempt failed while its old pod serves, with the attempt kept on
+        the row; the roll holds on that row as it holds on a Failed word."""
+        kept = {"index": 0, "phase": "Ready", "runningRevision": "p999-engine-aaaaaaaa", "targetRevision": "p999-engine-bbbbbbbb",
+                "lastFailure": {"reason": "ImagePullBackOff", "message": "Back-off pulling image"}}
+        rows = {"engine": [kept, {"index": 1, "phase": "Ready", "runningRevision": "p999-engine-aaaaaaaa"}]}
+        with mock.patch.object(run, "_ir_rows", lambda c: rows), mock.patch.object(run, "_isvc_events_since", lambda c, s: []):
+            self.assertEqual("engine Instance 0 reads Ready after a failed replacement attempt (the controller holds it Failed): "
+                             "ImagePullBackOff Back-off pulling image", run._broken_revision_hold("p999", {"engine"}, {"aaaaaaaa"}, 0))
+            self.assertEqual("", run._broken_revision_hold("p999", {"engine"}, {"aaaaaaaa", "bbbbbbbb"}, 0),
+                             "an attempt at a revision the fleet already runs is not the push holding")
+        with mock.patch.object(run, "_ir_rows", lambda c: {"engine": [dict(kept, phase="Failed")]}), \
+                mock.patch.object(run, "_isvc_events_since", lambda c, s: []):
+            self.assertTrue(run._broken_revision_hold("p999", {"engine"}, {"aaaaaaaa"}, 0).startswith("engine Instance 0 reads Failed: ImagePullBackOff"))
 
 
 class ReadinessVerdictTest(unittest.TestCase):
@@ -16947,6 +17035,12 @@ class BrokenOperationTest(unittest.TestCase):
         self.assertTrue(run._row_not_healthy({"phase": "Ready", "podCount": 1, "servingPodCount": 0}))
         self.assertTrue(run._row_not_healthy({"phase": "Restarting", "podCount": 1, "servingPodCount": 1}))
         self.assertFalse(run._row_not_healthy({"phase": "Ready"}))
+        self.assertTrue(run._row_not_healthy({"phase": "Ready", "podCount": 1, "servingPodCount": 1,
+                                              "runningRevision": "p999-engine-aaaaaaaa", "targetRevision": "p999-engine-bbbbbbbb"}),
+                        "a Ready row that keeps a failed replacement attempt is Failed to the controller")
+        self.assertFalse(run._row_not_healthy({"phase": "Ready", "podCount": 1, "servingPodCount": 1,
+                                               "runningRevision": "p999-engine-aaaaaaaa", "targetRevision": "p999-engine-aaaaaaaa",
+                                               "operation": {"type": "Update"}}))
 
     def test_removals_take_the_broken_rows_first_then_the_highest_index(self):
         rows = [("0", False), ("1", True), ("2", True), ("3", True)]
@@ -18261,7 +18355,7 @@ class RuntimeEditBreakTest(unittest.TestCase):
         converged = inference_replica("engine", 3, current="rev-b", update="rev-b")
         converged["status"]["rolloutHold"] = {"gate": "Held"}
         by = {"engine": held, "decoder": retry, "router": failed}
-        self.assertEqual({"engine": "rolloutHold gate=Held", "decoder": "retry block Backoff", "router": "Failed row(s) 2"},
+        self.assertEqual({"engine": "rolloutHold gate=Held", "decoder": "retry block Backoff", "router": "row(s) the controller holds Failed: 2"},
                          run._push_unlanded(by, {"engine", "decoder", "router"}))
         self.assertEqual({"engine": ""}, run._push_unlanded({"engine": converged}, {"engine"}),
                          "a converged revision pair says the push landed, whatever is left in the status")
@@ -20476,7 +20570,7 @@ class CanaryGateFaultTest(unittest.TestCase):
                 mock.patch.object(run, "_isvc_events_since", lambda cid, since, **kw: []):
             run._sibling_park_track(ctx, {"router"}, track, 200.0)
         self.assertIn("router", track["why"])
-        self.assertIn("row Failed", track["why"]["router"][0])
+        self.assertIn("row reads Failed", track["why"]["router"][0])
         self.assertNotIn("served", track)
         checks = []
         self.assertEqual("PASS", run._sibling_park_checks(ctx, {"router"}, track, "PASS", [], checks))

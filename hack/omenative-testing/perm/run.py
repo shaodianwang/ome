@@ -8251,6 +8251,28 @@ def _row_serving_short(row, ppi=1):
         return False
 
 
+def _row_failed(row):
+    """How the engine holds a row as Failed, whatever word the status
+    publishes; "" when it does not. The word Failed is read as it stands.
+    Over a Failed row whose replacement attempt at another revision failed
+    while the pods on the revision it runs still serve, the status
+    publishes Ready and keeps the attempt on the row: no operation open,
+    the revision it runs, and the revision the attempt was for as its
+    target. No promote leaves a Ready row with a target revision other
+    than the one it runs, so that shape is the publication's alone, and
+    the engine still holds the row Failed: a scale-down takes it first and
+    the retry ladder and the holds read it as before. The failure record
+    is not read; it stays on a row after a later attempt lands."""
+    row = row or {}
+    phase = str(row.get("phase") or "")
+    if phase == "Failed":
+        return "reads Failed"
+    running, target = str(row.get("runningRevision") or ""), str(row.get("targetRevision") or "")
+    if phase == "Ready" and row.get("operation") is None and running and target and target != running:
+        return "reads Ready after a failed replacement attempt (the controller holds it Failed)"
+    return ""
+
+
 def _row_unsettled_why(row):
     """"" when a row is settled: Ready with no operation open. Otherwise why
     it is not, in the engine's own terms. An operation open is the engine
@@ -11066,13 +11088,14 @@ def _ir_snapshot(case_id):
 def _crash_new_why(snapshot, events, victim):
     """(status, said) of what the product says about the crashing
     revision: the victim Component's rolloutHold from a gate that says why
-    (CRASH_NEW_WHY_GATES) or a victim Instance row at Failed (None when
-    neither), and what named the victim Component — the hold or escalation
-    events naming it, else that rolloutHold, which names the Component by
-    standing on its InferenceReplica, until an event does."""
+    (CRASH_NEW_WHY_GATES) or a victim Instance row the engine holds Failed
+    (_row_failed; None when neither), and what named the victim Component
+    — the hold or escalation events naming it, else that rolloutHold,
+    which names the Component by standing on its InferenceReplica, until
+    an event does."""
     comp = snapshot.get(victim) or {}
     hold = comp.get("hold")
-    failed = [row for row in comp.get("rows", []) if str(row.get("phase")) == "Failed"]
+    failed = [row for row in comp.get("rows", []) if _row_failed(row)]
     said = [f"{reason}: {msg}" for reason, msg in events
             if reason in CRASH_NEW_WHY_EVENTS and f"component={victim}" in msg]
     status = None
@@ -11082,7 +11105,7 @@ def _crash_new_why(snapshot, events, victim):
             said = [f"rolloutHold gate={hold.get('gate')} on {victim}: {str(hold.get('reason'))[:120]}"]
     elif failed:
         row = failed[0]
-        status = f"Instance {row.get('index')} row Failed" + (f" ({row.get('lastFailure')})" if row.get("lastFailure") else "")
+        status = f"Instance {row.get('index')} row {_row_failed(row)}" + (f" ({row.get('lastFailure')})" if row.get("lastFailure") else "")
     return status, said
 
 
@@ -13237,19 +13260,20 @@ def _ceiling_checks(ctx, verdict, notes, checks):
 
 def _broken_revision_hold(case_id, bumped, old_hashes, since):
     """What says the roll holds on the broken revision: a bumped Component's
-    row on a revision outside old_hashes reads Failed (its recorded failure
-    is the reason), or an InstanceFailed event names one since the bump.
-    "" while nothing holds."""
+    row on a revision outside old_hashes is Failed as the engine holds it
+    (_row_failed; its recorded failure is the reason), or an InstanceFailed
+    event names one since the bump. "" while nothing holds."""
     rows = _ir_rows(case_id)
     for comp in sorted(bumped):
         for row in rows.get(comp, []):
-            if str(row.get("phase") or "") != "Failed":
+            why = _row_failed(row)
+            if not why:
                 continue
             rev = str(row.get("targetRevision") or row.get("runningRevision") or "")
             if rev and _revision_hash(rev) in old_hashes:
                 continue
             fail = row.get("lastFailure") or {}
-            return (f"{comp} Instance {row.get('index')} Failed: {fail.get('reason') or '?'} "
+            return (f"{comp} Instance {row.get('index')} {why}: {fail.get('reason') or '?'} "
                     f"{str(fail.get('message') or '')[:120]}").strip()
     for reason, msg in _isvc_events_since(case_id, since):
         if reason == "InstanceFailed" and any(f"component={c} " in msg for c in bumped):
@@ -15575,8 +15599,8 @@ def _expected_creations(ctx, acting, target=None):
 
 def _leftover_hold(case_id):
     """What the status still holds once the operation is done: a
-    Component's rollout hold, a retry block still Held, a row at Failed.
-    "" when nothing is left."""
+    Component's rollout hold, a retry block still Held, a row the engine
+    holds Failed (_row_failed). "" when nothing is left."""
     for comp, item in sorted(_ir_by_component(case_id).items()):
         status = item.get("status") or {}
         hold = status.get("rolloutHold")
@@ -15586,8 +15610,9 @@ def _leftover_hold(case_id):
             if block.get("state") == RETRY_BLOCK_HELD:
                 return f"{comp} retry block for {block.get('targetRevision', '?')} still {RETRY_BLOCK_HELD}"
         for row in _instance_rows(status):
-            if str(row.get("phase")) == "Failed":
-                return f"{comp} Instance {row.get('index')} row Failed"
+            why = _row_failed(row)
+            if why:
+                return f"{comp} Instance {row.get('index')} row {why}"
     return ""
 
 
@@ -21909,9 +21934,9 @@ def _stuck_signal(by_comp, bumped, stuck):
     block in state Held (or the hold the status derives from it), and the
     signal names each; one Component held ahead of the others is not yet
     the moment, since an operation landing then meets a push still rolling
-    on the rest. failed: a bumped Component has an Instance row that reads
-    Failed, or a retry block for the pushed revision that records a
-    started attempt."""
+    on the rest. failed: a bumped Component has an Instance row the engine
+    holds Failed (_row_failed), or a retry block for the pushed revision
+    that records a started attempt."""
     if stuck == "held":
         held = []
         for comp in sorted(bumped):
@@ -21926,8 +21951,9 @@ def _stuck_signal(by_comp, bumped, stuck):
             continue
         status = item.get("status") or {}
         for row in _instance_rows(status):
-            if row.get("phase") == "Failed":
-                return f"{comp} Instance {row.get('index', '?')} reads Failed"
+            why = _row_failed(row)
+            if why:
+                return f"{comp} Instance {row.get('index', '?')} {why}"
         for b in _retry_blocks(item):
             try:
                 attempts = int(b.get("attemptsStarted") or 0)
@@ -21958,7 +21984,8 @@ def _held_signal(item, comp):
 def _push_unlanded(by_comp, bumped):
     """Per bumped Component, how the status still reports the push that
     has not landed: the update revision differs from the current one and a
-    hold, a retry block or a Failed row says why. {comp: reason or ""}."""
+    hold, a retry block or a row the engine holds Failed (_row_failed) says
+    why. {comp: reason or ""}."""
     out = {}
     for comp in sorted(bumped):
         item = by_comp.get(comp)
@@ -21971,9 +21998,9 @@ def _push_unlanded(by_comp, bumped):
         blocks = _retry_blocks(item or {})
         if blocks:
             why.append("retry block " + ", ".join(f"{b.get('state', '?')}" for b in blocks))
-        failed = [str(r.get("index", "?")) for r in _instance_rows(status) if r.get("phase") == "Failed"]
+        failed = [str(r.get("index", "?")) for r in _instance_rows(status) if _row_failed(r)]
         if failed:
-            why.append("Failed row(s) " + ",".join(failed))
+            why.append("row(s) the controller holds Failed: " + ",".join(failed))
         if item and current and update and current != update and why:
             out[comp] = "; ".join(why)
         else:
@@ -22146,9 +22173,11 @@ def _running_ready(ctx, comp):
 
 def _scale_rows(ctx, comp, by_comp):
     """The Component's rows as a scale-down's plan reads them: (index,
-    phase, serving) per row, serving read off the pods (_serving_indices)."""
+    phase, serving) per row, the phase as the engine holds it (_row_failed:
+    a Ready row that keeps a failed replacement attempt is Failed) and
+    serving read off the pods (_serving_indices)."""
     serving = _serving_indices(ctx, comp, ctx.get("old_hashes") or set())
-    return [(str(r.get("index", "?")), str(r.get("phase") or ""), str(r.get("index", "?")) in serving)
+    return [(str(r.get("index", "?")), "Failed" if _row_failed(r) else str(r.get("phase") or ""), str(r.get("index", "?")) in serving)
             for r in _instance_rows((by_comp.get(comp) or {}).get("status") or {})]
 
 
@@ -22499,19 +22528,21 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     names. What the engine promises and the verdict reads:
     a scale-down removes the Instances that serve nothing first, then a
     stuck one that still serves through its pods with the surge row it
-    heads, then the highest index, and never rebuilds a survivor on the
-    running revision; a scale to one, the least count the API admits,
-    takes every row but one in that order — a surge row is one over the
-    replica count — and converges on the replica count the controller
-    accepted, read from the InferenceReplica, never assumed. The victims
-    are judged from the rows the controller first planned from after the
-    scale, read off the InferenceReplica once its observedGeneration
-    reaches the generation that carries the scaled count: a failed pair
-    the abandon finished before that pass yields the ordinary order, a
-    pair still present yields the pair, and the verdict says which; a
-    scale-up while held starts nothing (the new index waits as an empty
-    slot) and while failed starts the new Instance on the pushed
-    revision when the retry window admits it, never on the running
+    heads (its row read as the engine holds it, _row_failed: the status
+    publishes Ready over an Instance whose replacement attempt failed
+    while its pods still serve), then the highest index, and never
+    rebuilds a survivor on the running revision; a scale to one, the least
+    count the API admits, takes every row but one in that order — a surge
+    row is one over the replica count — and converges on the replica
+    count the controller accepted, read from the InferenceReplica, never
+    assumed. The victims are judged from the rows the controller first
+    planned from after the scale, read off the InferenceReplica once its
+    observedGeneration reaches the generation that carries the scaled
+    count: a failed pair the abandon finished before that pass yields the
+    ordinary order, a pair still present yields the pair, and the verdict
+    says which; a scale-up while held starts nothing (the new index waits
+    as an empty slot) and while failed starts the new Instance on the
+    pushed revision when the retry window admits it, never on the running
     revision; the healthy survivors keep serving throughout; the sibling
     Components the push never touched stay as they were; and the status
     keeps reporting the push that has not landed. A scale that touches no
@@ -22691,7 +22722,8 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
                 snapshots["at the controller's first pass"] = _first_pass_rows(rows_at_op[c], rows_fp)
                 fate = _stuck_rows_fate(rows_at_op[c], rows_fp)
                 checks.append(f"  ⓘ {c}: when the controller first saw the scale ({after_s:.1f}s after it, IR generation {generation}) "
-                              f"the rows read [{', '.join(f'{row[0]}:{row[1]}' for row in rows_fp)}]"
+                              f"the rows read [{', '.join(f'{row[0]}:{row[1]}' for row in rows_fp)}] "
+                              f"(phases as the controller holds them)"
                               + (f"; the Instance(s) stuck at the scale were {fate}" if fate else ""))
             else:
                 snapshots["right after the scale"] = rows_after_op[c]
@@ -22812,10 +22844,11 @@ def _index_key(index):
 
 def _row_not_healthy(row):
     """True when a row reports its Instance short of healthy: a phase other
-    than Ready, or fewer serving pods than it has."""
+    than Ready, a failed replacement attempt kept on a Ready row (the
+    engine holds it Failed, _row_failed), or fewer serving pods than it has."""
     if not row:
         return False
-    if str(row.get("phase") or "") != "Ready":
+    if str(row.get("phase") or "") != "Ready" or _row_failed(row):
         return True
     try:
         return int(row.get("servingPodCount") or 0) < int(row.get("podCount") or 0)
