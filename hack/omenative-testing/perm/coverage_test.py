@@ -1177,5 +1177,139 @@ class PodkillHookCellsTest(unittest.TestCase):
         self.assertEqual([], [p for c in (back, down, gang, pd_gang) for p in c.problems])
 
 
+class PairingMatrixTest(unittest.TestCase):
+    """The pairing transition matrix: a pairing case on single pods with no
+    other knob is one cell of shape x strategy pair x slow side x budget x
+    sequence x grouping, read off its header and body; any other pairing
+    case lies outside the matrix and says why; the removed cells each have a
+    reason; the committed corpus drives every cell of the product."""
+
+    ST, RP, IP = "SurgeThenDrain", "RecreatePod", "InPlaceIfPossible"
+    DELAY = {"env": [{"name": "TEST_STARTUP_DELAY", "value": "40"}]}
+
+    def setUp(self):
+        self.corpus = Corpus()
+        self.addCleanup(self.corpus.close)
+
+    def _life(self, strat, mu):
+        return gen_cases.lifecycle(strat=strat, surge=1 if strat == self.ST else 0, unavail=mu)
+
+    def _pd(self, ne, nd, e=ST, d=ST, mu_e=0, mu_d=0, slow=()):
+        return [gen_cases.comp("engine", ne, 0, self._life(e, mu_e), runner=self.DELAY if "engine" in slow else None),
+                gen_cases.comp("decoder", nd, 0, self._life(d, mu_d), runner=self.DELAY if "decoder" in slow else None)]
+
+    def _rollout(self, start, grouped=True, members="engine, decoder"):
+        lines = ["  rollout:"]
+        if start:
+            lines.append(f"    pairingProtocol: {start}")
+        if grouped:
+            lines += ["    groups:", f"        - components: [{members}]", "          blueGreen: {}"]
+        return "\n".join(lines) if len(lines) > 1 else None
+
+    def _case(self, ne=2, nd=2, start="pair-v1", grouped=True, comps=None, **kv):
+        fields = dict(mode="pairing", proto="pair-v2", topo="pd", co="bluegreen" if grouped else "none")
+        fields.update(counts(ne, nd, 0, ceil_e=ne + 1))
+        fields.update(kv)
+        return self.corpus.write(comps=comps if comps is not None else self._pd(ne, nd),
+                                 coord=self._rollout(start, grouped), **fields)
+
+    def test_a_protocol_swap_in_one_group_is_its_cell(self):
+        case = self._case(comps=self._pd(2, 2, slow=("engine",)))
+        self.assertEqual(("2x2", self.ST, self.ST, "engine", 0, "v1 to v2", "one group"), case.pairing_cell)
+        self.assertEqual("", case.pairing_outside)
+        self.assertEqual(("push", "pairing protocol -> pair-v2"), (case.operation, case.operation_detail))
+        both = self._case(ne=6, nd=2, comps=self._pd(6, 2, slow=("engine", "decoder")))
+        self.assertEqual(("6P2D", self.ST, self.ST, "both", 0, "v1 to v2", "one group"), both.pairing_cell)
+
+    def test_sequences_are_read_from_the_patches_and_the_starting_protocol(self):
+        self.assertEqual("v1 to v2 to v3", self._case(proto2="pair-v3").pairing_cell[5])
+        self.assertEqual("v1 to v2 then back", self._case(proto2="pair-v1").pairing_cell[5])
+        self.assertEqual("v1 to empty", self._case(proto="clear").pairing_cell[5])
+        adopted = self._case(start="", grouped=False, proto="pair-v1")
+        self.assertEqual(("empty to v1", "none"), adopted.pairing_cell[5:])
+        self.assertEqual("cleared mid-transition", self._case(proto2="clear").pairing_outside)
+        self.assertEqual("clear of an empty protocol or a second change after it",
+                         self._case(start="", proto="clear").pairing_outside)
+
+    def test_the_budget_axis_is_the_surging_sides_and_the_rest_run_under_one(self):
+        in_place = self._case(comps=self._pd(2, 2, e=self.IP, d=self.ST, mu_e=1, mu_d=0))
+        self.assertEqual((self.IP, self.ST, "none", 0), in_place.pairing_cell[1:5])
+        recreate = self._case(comps=self._pd(2, 2, e=self.RP, d=self.RP, mu_e=1, mu_d=1))
+        self.assertEqual((self.RP, self.RP, "none", 1), recreate.pairing_cell[1:5])
+        self.assertEqual("drain-first budget other than one",
+                         self._case(comps=self._pd(2, 2, e=self.RP, d=self.RP, mu_e="100%", mu_d="100%")).pairing_outside)
+        self.assertEqual("surge budget outside the axis",
+                         self._case(comps=self._pd(2, 2, mu_e=1, mu_d=0)).pairing_outside)
+        self.assertEqual("surge budget outside the axis",
+                         self._case(comps=self._pd(2, 2, mu_e=2, mu_d=2)).pairing_outside)
+
+    def test_cases_outside_the_matrix_say_why(self):
+        self.assertEqual("gang or engine-only shape", self._case(topo="pd-mn").pairing_outside)
+        self.assertEqual("shape 4x4", self._case(ne=4, nd=4).pairing_outside)
+        self.assertEqual("strategies InPlaceIfPossible/InPlaceIfPossible",
+                         self._case(comps=self._pd(2, 2, e=self.IP, d=self.IP, mu_e=1, mu_d=1)).pairing_outside)
+        self.assertEqual("canary group", self._case(canary="auto").pairing_outside)
+        self.assertEqual("pod kill", self._case(pkill=1).pairing_outside)
+        self.assertEqual("pause", self._case(pause="true").pairing_outside)
+        self.assertEqual("scale", self._case(scale_d=4).pairing_outside)
+        self.assertEqual("admission negative", self._case(expect="reject", reason="X").pairing_outside)
+        router = self.corpus.write(comps=self._pd(2, 2), coord=self._rollout("pair-v1", members="engine, decoder, router"),
+                                   mode="pairing", proto="pair-v2", topo="pd", co="bluegreen", **counts(2, 2, 0, ceil_e=3))
+        self.assertEqual("one group", router.pairing_cell[6], "a group over the router too still spans both")
+        rolling = self.corpus.write(comps=self._pd(2, 2), coord=gen_cases.coord_for("rolling"),
+                                    mode="pairing", proto="pair-v2", topo="pd", co="rolling", **counts(2, 2, 0, ceil_e=3))
+        self.assertEqual("a group other than one blueGreen group over both", rolling.pairing_outside)
+        self.assertIsNone(self.corpus.write(topo="engine").pairing_cell, "a case of another mode has no cell")
+
+    def test_the_removed_cells_each_have_a_reason_and_the_product_is_what_is_left(self):
+        removed = coverage.pairing_removed_by_reason()
+        self.assertEqual({reason for reason, _p in coverage.PAIRING_REMOVED}, set(removed))
+        self.assertTrue(all(n > 0 for n in removed.values()))
+        self.assertEqual(1600, len(coverage.pairing_all_cells()))
+        self.assertEqual(1600 - sum(removed.values()), len(coverage.pairing_product_cells()))
+        self.assertEqual(528, len(coverage.pairing_product_cells()))
+        ungrouped_swap = ("2x2", self.ST, self.ST, "none", 0, "v1 to v2", "none")
+        self.assertIn("admission rejects", coverage.pairing_removed_reason(ungrouped_swap))
+        self.assertEqual("", coverage.pairing_removed_reason(("2x2", self.ST, self.ST, "none", 0, "v1 to v2", "one group")))
+
+    def test_floors_follow_the_strategies(self):
+        self.assertEqual({"engine": 6, "decoder": 1},
+                         coverage.pairing_floors(("6P2D", self.ST, self.RP, "none", 0, "v1 to v2", "one group")))
+        self.assertEqual({"engine": 1, "decoder": 5},
+                         coverage.pairing_floors(("2P6D", self.IP, self.ST, "none", 1, "v1 to v2", "one group")))
+        self.assertEqual({"engine": 0, "decoder": 0},
+                         coverage.pairing_floors(("1x1", self.RP, self.RP, "none", 1, "v1 to v2", "one group")))
+
+    def test_the_new_header_keys_are_classified(self):
+        self.assertTrue(coverage.HEADER_CHECKS["inv_hard"]("L"))
+        self.assertTrue(coverage.HEADER_CHECKS["inv_hard"]("L,M"))
+        self.assertFalse(coverage.HEADER_CHECKS["inv_hard"]("A"))
+        self.assertTrue(coverage.HEADER_CHECKS["hold_max"](240))
+        self.assertFalse(coverage.HEADER_CHECKS["hold_max"](0))
+        case = self._case(hold_max=240, inv_hard="L")
+        self.assertEqual([], case.problems)
+
+    def test_the_committed_corpus_drives_every_cell_and_the_check_names_an_empty_one(self):
+        cases = coverage.load_cases()
+        self.assertEqual([], coverage.pairing_empty_cells(cases))
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = coverage.check([self._case()])
+        self.assertEqual(1, rc)
+        self.assertIn("pairing cell has no case: 1x1 / surge+surge / slow none / maxUnavailable 0 / v1 to v2 / one group",
+                      err.getvalue())
+        self.assertNotIn("2x2 / surge+surge / slow none / maxUnavailable 0 / v1 to v2 / one group", err.getvalue())
+
+    def test_the_ledger_renders_the_matrix(self):
+        text = coverage.render_markdown(coverage.load_cases())
+        self.assertIn("## Pairing transitions", text)
+        self.assertIn("| 6P2D | surge + surge | 8/8 | 8/8 | 8/8 | 4/4 | 4/4 |", text)
+        self.assertIn("| p12106 | 6P2D / surge+surge / slow engine / maxUnavailable 0 / v1 to v2 / one group |", text)
+        self.assertIn("### Empty cells\n\nNone.", text)
+        data = json.loads(coverage.render_json(coverage.load_cases()))
+        self.assertEqual([], data["pairing_empty_cells"])
+        self.assertEqual(528, len(data["pairing_cells"]))
+
+
 if __name__ == "__main__":
     unittest.main()

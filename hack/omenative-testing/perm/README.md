@@ -126,7 +126,8 @@ perm/
 │   ├── gen-webhook/ gen-conflict/  — generated window faults: the admission webhook unreachable, a competing writer
 │   ├── gen-crash-once/  — generated: a crash that happens exactly once (once=1), at start or after Ready, on either revision, the engine's or a sibling's
 │   ├── gen-lift/        — generated: a cause kept to the end of the case or taken away after a while (the config key, readiness and image pull, on either revision)
-│   └── gen-stale-record/ gen-canary-stale-record/  — generated: a stale revision record (the engine's rolled-out record written back to the revision before the one it runs) on the settled service and under every operation, and under a canary's gate on the shapes the hand-written cases leave
+│   ├── gen-stale-record/ gen-canary-stale-record/  — generated: a stale revision record (the engine's rolled-out record written back to the revision before the one it runs) on the settled service and under every operation, and under a canary's gate on the shapes the hand-written cases leave
+│   └── gen-pairing/     — generated: the pairing-protocol transition matrix of a prefill/decode service (shape x strategy pair x slow side x budget x sequence x grouping), the pairable floor hard on both sides
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -249,6 +250,10 @@ unrelated regressions cannot hide behind the parking. `inv_on=J,K` selects
 the two opt-in invariants (J, no auto-recovery record in the audit ledger;
 K, no node exclusion on a pod), which run on every case of a family whose
 story forbids them and nowhere else (see *Continuous invariants*).
+`inv_hard=L` (or `L,M`) turns an advisory reading hard for the case: a
+sustained dip of the pairable floor (L) or a traffic target with no pod
+behind it (M) then fails it instead of being reported, which is what the
+generated pairing family asks for (see *Pairing protocol*).
 
 ## How a case runs (`run.py`)
 
@@ -847,7 +852,8 @@ Both assume OME (+ bundled prometheus) in ns `ome` (see `perf/prom-delay-proxy.y
 
 ### Pairing protocol (`mode=pairing`)
 
-`isvcs/pairing/` (p800+, hand-written; no generator mints into it) covers
+`isvcs/pairing/` (p800+, hand-written) and the generated `isvcs/gen-pairing/`
+(p13000+, the transition matrix below) cover
 `spec.rollout.pairingProtocol`: the trigger is a **patch of the protocol
 field** (not an annotation bump) — the token rides every engine+decoder
 revision, so the patch alone re-mints and rolls both pairing Components
@@ -857,7 +863,13 @@ revision, so the patch alone re-mints and rolls both pairing Components
   whatever the case YAML declares (`""→X` adoption, `X→""` clear, `X→Y`
   coordinated swap). `proto2=` re-patches once ≥1 new-cohort pod is READY —
   a re-target over a partially-landed intermediate (converge on the FINAL
-  cohort, no Instance stranded on the intermediate — the X-2 shape).
+  cohort, no Instance stranded on the intermediate — the X-2 shape). A
+  `proto2=` equal to the protocol the case starts on is a rollback
+  mid-transition: the pods already on the new protocol are replaced, the
+  pods that never moved stay, and the case converges when every pod
+  carries the starting protocol and none runs a revision of the abandoned
+  cohort (the starting revision may come back under its old hash, so the
+  label tells the cohorts apart where the hash cannot).
 - `hold=1` — assert a `status…rolloutHold` with `gate=Pairing` is observed
   mid-transition. Only shapes where the denial spans a startup cycle can
   assert this: the acting Component must keep ≥2 serving instances through
@@ -865,6 +877,17 @@ revision, so the patch alone re-mints and rolls both pairing Components
   wall, and last-hop), e.g. an in-place engine racing ahead of a surging
   decoder. Drain-first shapes shed to ≤1 serving and get admitted by the
   escapes in under a sampling tick — holds there are reported ⓘ only.
+- `hold_max=<s>` — every Pairing hold is a bounded wait: the harness samples
+  `rolloutHold` every tick, keeps the span of each `gate=Pairing` hold per
+  bumped Component, and fails the case when the longest span exceeds the
+  bound or a hold is still reported once the transition converged (two
+  more samples absorb the status writer's lag). Without it the longest
+  hold is reported.
+- `inv_hard=L` — the pairable floor (invariant L) is hard for the case: on
+  every tick each side keeps desired minus maxUnavailable pairable
+  serving pods, a pod being pairable when a serving pod of the other
+  Component runs its protocol or either protocol is empty; a dip that
+  lasts the floor debounce fails the case.
 - `pkill=1` — delete the LAST old-cohort decoder pod mid-transition and
   assert full recovery + convergence. Such cases carry `inv_off=C` and
   `order_soft=1`, and the decoder's capacity floor is exempt in-handler (the
@@ -896,6 +919,41 @@ old pairs still serve: `p12106`/`p12107` (6 engines + 2 decoders rolled 3+1 at
 a time, one side slow) carry `hold=1` because without it the first old
 decoder, or three old engines, would leave rotation for nothing. Waive with
 `inv_off=C` + a line-2 `# reason:` comment.
+
+#### The transition matrix (`isvcs/gen-pairing/`)
+
+`generate_cases.py` mints one case per cell of the matrix `coverage.py`
+holds (its *Pairing transitions* table): the shape (1x1, 2x2, 6 engines + 2
+decoders, 2 engines + 6 decoders) x the strategy pair (surge+surge,
+surge+recreate, recreate+surge, recreate+recreate, in-place engine +
+surging decoder) x the slow side (none, engine, decoder, both; a slow
+side's pods start 40 s late through `runner.env TEST_STARTUP_DELAY`) x the
+maxUnavailable of the sides that surge (0 or 1; a drain-first or in-place
+side always runs under 1, a six-pod surging side moves three at a time) x
+the sequence (v1 to v2; v1 to v2 to v3 once the first v2 pod is Ready; v1
+to v2 then back to v1 once the first v2 pod is Ready; v1 to empty; empty to
+v1) x the grouping (one blueGreen group over engine and decoder, or none).
+Cells the product rejects or that have no meaning are removed with a
+written reason (an ungrouped change between two protocols, which admission
+denies; a budget of 0 with both sides drain-first; a slow in-place side; a
+slow side under a change to or from the empty protocol, which nothing
+gates), and the cells the hand-written pairing cases already drive are not
+minted again (`HAND_PINNED_PAIRING`). Every generated case carries
+`hold_max=240` and, wherever an order of steps can keep it, `inv_hard=L`;
+the one shape where no order can is a one-pod drain-first side whose peer
+keeps a floor above zero (the peer's pods cannot pair while that pod is
+away), and there the floor is reported and the reason says so. `hold=1`
+is set where a Pairing hold is certain to be seen for longer than a
+sampling tick: a surging side whose replacement is Ready while the other
+side's pods are still starting, the in-place engine's last relabel waiting
+on a surging decoder, and a two-pod drain-first side's last recreate
+waiting on a slow peer. Line 2 of each case states the expected behaviour
+in one sentence: which side moves first, what holds and why, the floor
+each side keeps, the bound on every hold and the end state. The family is
+on the eval soft list while its first main rounds classify the cells where
+today's gates keep a weaker floor than the matrix asks for (a side that
+retires its last old pod while the other side's old pods still wait for
+slow replacements leaves those pods unpairable).
 
 A `canary=auto` case with a canary group in the YAML drives the same protocol
 patch through the staged canary (steps advance on their own `pause.duration`
@@ -2838,7 +2896,8 @@ and **B endpoints-membership** (the parking paragraph above), **C pair-alive**
 cohort ratio** (the informational PD observer under *PD knobs*), and the
 four below (F, G, H, I). Two more readings, **L pairable-capacity** and
 **M traffic-backed**, plus one extra kind each inside A and I, are advisory
-for now (*Advisory readings*, after I): they print a `⚠` line and never
+for now unless a case's header turns them hard with `inv_hard=` (*Advisory
+readings*, after I): they print a `⚠` line and never
 move the verdict.
 
 **F label-truth** — every live pod runs the template its
@@ -2962,7 +3021,10 @@ the classes above. They record like the others and print `⚠ invariant …
 (advisory — reported, not failed)`, and they never move the verdict until a
 full round has shown their noise level (`INV_ADVISORY` in `run.py` is the
 switch; a reading that held is listed as `ⓘ invariant L … across N
-tick(s)`).
+tick(s)`). A case whose header names a class in `inv_hard=` (L, M or
+both) fails on that class like on any other: its violations print `✗`, a
+reading that held prints `✓ invariant L (pairable-capacity, hard)`, and
+`inv_xfail=` scopes it like the rest.
 
 **L pairable-capacity** — per Component, the Instances with a pod that is
 alive, Ready, serving, in rotation (a Ready endpoint of a routed
@@ -3118,7 +3180,12 @@ Four generators write into `isvcs/`; re-run one after editing it:
   pulled for a while on either revision; the six ledger rows no other family
   filled, each on the six shape families; from p9322 the fix pushed after a
   key or a readiness loss at idle, with no pause around it, and the pull
-  failure lifted again as the bump lands), plus
+  failure lifted again as the bump lands), and the pairing-protocol
+  transition matrix (`p13000`–`p13999`) → `isvcs/gen-pairing/` (four
+  prefill/decode shapes x five strategy pairs x the slow side x the surging
+  sides' maxUnavailable x five sequences x grouped or not, the pairable
+  floor hard on both sides and every Pairing hold bounded; see *The
+  transition matrix* under *Pairing protocol*), plus
   `isvcs/MANIFEST.md` (per-dimension counts, the
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives
@@ -3176,7 +3243,9 @@ the generation itself.
 `blocked=1` / `expect=fail` / `lift=1` contract knobs) is entirely
 hand-written; no generator mints into it and the `p600`+ id block is
 reserved for it. `isvcs/pairing/` (`p800`+ — the `mode=pairing` protocol
-cases) is likewise hand-written, with the `p800`+ block reserved.
+cases) is likewise hand-written, with the `p800`+ block reserved; the
+generated transition matrix lives in `isvcs/gen-pairing/` and skips the
+cells those hand-written cases drive.
 
 Coordination is emitted under `spec.rollout.groups[]` (OEP-0017 v2: BlueGreen ->
 one `blueGreen` group; RollingUpdate -> a `rollingUpdate` group, +`maintainRatio`
@@ -3305,7 +3374,20 @@ their issues.
 The operator stories of the marathon goal live in `STORIES` at the top of
 the script, one predicate over a parsed case per story; the report prints the
 cases and cells that prove each, and `--check` fails on a story with no
-case. `run_test.py` runs `coverage.py --check` beside the generator checks,
+case. The ledger's *Pairing transitions* section is the pairing-protocol
+transition matrix: shape x strategy pair x slow side x budget x sequence x
+grouping (the axes, the removed cells and their reasons, and the floor each
+side keeps live in `coverage.py`, and `generate_cases.py` mints the
+`gen-pairing` family from the same product). A `mode=pairing` case on
+single pods with no other knob is one cell, read off its header (`Ne`,
+`Nd`, `proto=`, `proto2=`) and body (the two strategies and budgets, a
+runner's `TEST_STARTUP_DELAY`, the starting protocol, the groups); any
+other pairing case is listed outside the matrix with the reason. The
+section prints the driven cells per shape and strategy pair for each
+sequence, per axis value, the hand-written cases inside the matrix and
+every empty cell; `--check` fails on a cell of the product with no case,
+on a removed cell with one, and on a removal rule that removes nothing.
+`run_test.py` runs `coverage.py --check` beside the generator checks,
 so a header value the ledger cannot classify (a new verb, a new fault kind)
 fails CI until it is mapped to an axis there. What no header can express is
 listed under "Not derivable from the headers" in the report (the scheduler

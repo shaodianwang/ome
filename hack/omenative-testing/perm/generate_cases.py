@@ -387,6 +387,18 @@ runners (run.py + the KIND CI lane) already implement:
                           the gate's rollback finds no Instance on the stable
                           revision and parks the ladder instead of rebuilding
                           onto it
+    gen-pairing/   p13000+ the pairing-protocol transition matrix of a
+                          prefill/decode service: four shapes (1x1, 2x2,
+                          6 engines + 2 decoders, 2 engines + 6 decoders)
+                          x five strategy pairs x the slow side x the
+                          surging sides' maxUnavailable x five sequences
+                          (v1 to v2, to v3 mid-way, back to v1 mid-way,
+                          to empty, from empty) x grouped or not; the
+                          pairable floor on both sides is hard, every
+                          Pairing hold is bounded, and the cells the
+                          hand-written pairing cases drive are not
+                          minted again (coverage.py holds the matrix
+                          and its removed cells)
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -700,6 +712,7 @@ from pathlib import Path
 
 import gen_cases as lib   # single source of truth for YAML body rendering
 import gen_runtime        # the dedicated per-case ClusterServingRuntime a runtime edit patches
+import coverage as ledger  # the pairing transition matrix: its axes, removed cells and floors
 import runtime_fixtures   # the one image no deploy step side-loads
 
 HERE = Path(__file__).parent.resolve()
@@ -753,6 +766,7 @@ GEN_BLOCKS = {
     "gen-lift": (9250, 9400),
     "gen-stale-record": (12200, 12400),
     "gen-canary-stale-record": (12400, 12450),
+    "gen-pairing": (13000, 14000),
 }
 # A folder mints from its block until the block is full, then from its
 # continuation block; a folder owns an id that lies in either.
@@ -9141,6 +9155,243 @@ def _policy_twin_body(name, case_comps, coord, runtime):
     return lib.render(name, case_comps, coord=group, runtime=runtime, docs=[policy])
 
 
+# ── gen-pairing: the pairing-protocol transition matrix ─────────────────────
+# A prefill/decode service pairs its engine and decoder pods by the pairing
+# protocol label, and a change of the protocol rolls both sides. The matrix
+# is the ledger's (coverage.py): the shape (engines x decoders), the two
+# sides' update strategies, the side whose pods start late, the
+# maxUnavailable of the sides that surge, the sequence of protocol changes
+# and whether one blueGreen group spans both Components. Every case fails on
+# a sustained dip of either side's pairable serving pods below desired minus
+# maxUnavailable (inv_hard=L, the family's point; a 1x1 drain-first side
+# whose peer keeps a positive floor is the one shape where no order can keep
+# it, so there the floor is reported), bounds every Pairing hold (hold_max=)
+# and converges on the final protocol with the label on every surface.
+PAIRING_FOLDER = "gen-pairing"
+PAIRING_ST, PAIRING_RP, PAIRING_IP = "SurgeThenDrain", "RecreatePod", "InPlaceIfPossible"
+PAIRING_PROTOCOLS = ("pair-v1", "pair-v2", "pair-v3")
+# sequence -> (the protocol the service starts on, proto=, proto2=)
+PAIRING_SEQUENCE_PATCHES = {
+    "v1 to v2": ("pair-v1", "pair-v2", None),
+    "v1 to v2 to v3": ("pair-v1", "pair-v2", "pair-v3"),
+    "v1 to v2 then back": ("pair-v1", "pair-v2", "pair-v1"),
+    "v1 to empty": ("pair-v1", "clear", None),
+    "empty to v1": ("", "pair-v1", None),
+}
+PAIRING_DELAY_S = 40        # how late a slow side's pods start (TEST_STARTUP_DELAY)
+PAIRING_HOLD_MAX_S = 240    # the longest a Pairing hold may stay: a few slow replacement cycles
+PAIRING_SURGE = {1: 1, 2: 1, 6: 3}   # maxSurge of a side that surges: a third of a six-pod side at a time
+PAIRING_GROUP_WORDS = {"one group": "group", "none": "ungrouped"}
+# Cells the hand-written pairing cases drive, by id (the ledger reads the
+# same cell off each case); the family does not mint them again.
+HAND_PINNED_PAIRING = {
+    ("1x1", PAIRING_ST, PAIRING_ST, "none", 0, "v1 to v2", "one group"): "p810",
+    ("1x1", PAIRING_ST, PAIRING_ST, "engine", 0, "v1 to v2", "one group"): "p1817",
+    ("1x1", PAIRING_ST, PAIRING_ST, "decoder", 0, "v1 to v2", "one group"): "p1818",
+    ("2x2", PAIRING_ST, PAIRING_ST, "none", 0, "v1 to v2", "one group"): "p802",
+    ("2x2", PAIRING_ST, PAIRING_ST, "none", 0, "v1 to v2 to v3", "one group"): "p824",
+    ("2x2", PAIRING_ST, PAIRING_ST, "none", 0, "empty to v1", "none"): "p800",
+    ("2x2", PAIRING_ST, PAIRING_ST, "none", 0, "v1 to empty", "none"): "p801",
+    ("2x2", PAIRING_RP, PAIRING_RP, "none", 1, "v1 to v2", "one group"): "p804",
+    ("2x2", PAIRING_IP, PAIRING_ST, "none", 0, "v1 to v2", "one group"): "p822",
+    ("6P2D", PAIRING_ST, PAIRING_ST, "engine", 0, "v1 to v2", "one group"): "p12106",
+    ("6P2D", PAIRING_ST, PAIRING_ST, "decoder", 0, "v1 to v2", "one group"): "p12107",
+}
+
+
+def _pairing_life(strat, n, budget):
+    """A side's lifecycle: a surging side under its surge and the budget
+    axis, a drain-first or in-place side one at a time."""
+    if strat == PAIRING_ST:
+        return lib.lifecycle(strat=strat, surge=PAIRING_SURGE[n], unavail=budget)
+    return lib.lifecycle(strat=strat, surge=0, unavail=ledger.PAIRING_DRAIN_FIRST_BUDGET)
+
+
+def _pairing_ceiling(strat, n):
+    return n + PAIRING_SURGE[n] if strat == PAIRING_ST else n
+
+
+def _pairing_runner(slow, component):
+    if slow in (component, "both"):
+        return {"env": [{"name": "TEST_STARTUP_DELAY", "value": str(PAIRING_DELAY_S)}]}
+    return None
+
+
+def _pairing_rollout(start, grouping):
+    """The spec.rollout block: the starting protocol when there is one and
+    the blueGreen group over both Components when the cell groups them."""
+    lines = []
+    if start or grouping == "one group":
+        lines.append("  rollout:")
+        if start:
+            lines.append(f"    pairingProtocol: {start}")
+        if grouping == "one group":
+            lines += ["    groups:", "        - components: [engine, decoder]", "          blueGreen: {}"]
+    return "\n".join(lines) or None
+
+
+def _pairing_hold_expected(cell):
+    """Whether a Pairing hold is certain to be seen for long enough to assert
+    (hold=1): a surging side whose replacement is Ready while the other
+    side's pods are still starting, the in-place engine's last relabel
+    waiting on a surging decoder, and a drain-first side's last recreate
+    waiting on a slow peer when that side has two pods. A tie of two slow
+    sides, a one-pod side at the mutual wall and the ungated sequences
+    report their holds instead."""
+    shape, e, d, slow, _budget, sequence, grouping = cell
+    if sequence not in ledger.PAIRING_GATED or grouping != "one group" or slow == "both":
+        return False
+    ne, nd = ledger.PAIRING_SHAPES[shape]
+    if (e, d) == (PAIRING_ST, PAIRING_ST):
+        return slow in ("engine", "decoder")
+    if (e, d) == (PAIRING_IP, PAIRING_ST):
+        return (slow == "decoder" and ne >= 2) or (slow == "none" and ne == 2)
+    if (e, d) == (PAIRING_ST, PAIRING_RP):
+        return slow == "engine" and nd == 2
+    if (e, d) == (PAIRING_RP, PAIRING_ST):
+        return slow == "decoder" and ne == 2
+    return (slow == "engine" and nd == 2) or (slow == "decoder" and ne == 2)
+
+
+def _pairing_floor_hard(cell):
+    """Whether the pairable floor is failed (inv_hard=L). A drain-first side
+    with one pod must pass through zero serving pods, and while it does no
+    pod of the other side can pair: when that other side keeps a floor
+    above zero no order of steps can keep it, so the floor is reported."""
+    shape, e, d, _slow, _budget, sequence, _grouping = cell
+    if sequence not in ledger.PAIRING_GATED:
+        return True
+    ne, nd = ledger.PAIRING_SHAPES[shape]
+    floors = ledger.pairing_floors(cell)
+    if e == PAIRING_RP and ne == 1 and floors["decoder"] > 0:
+        return False
+    if d == PAIRING_RP and nd == 1 and floors["engine"] > 0:
+        return False
+    return True
+
+
+def _pairing_sides(cell):
+    shape, e, d, _slow, _budget, _sequence, _grouping = cell
+    ne, nd = ledger.PAIRING_SHAPES[shape]
+    plural = lambda n, word: f"{n} {word}{'s' if n != 1 else ''}"   # noqa: E731
+    return (f"{plural(ne, 'engine')} ({ledger.PAIRING_STRATEGY_WORDS[e]}) and "
+            f"{plural(nd, 'decoder')} ({ledger.PAIRING_STRATEGY_WORDS[d]})")
+
+
+def _pairing_reason(cell):
+    """The expected behaviour in one sentence: what the operator changes, which
+    side moves first and what holds and why, the floor each side keeps, the
+    bound on every hold and the end state."""
+    shape, e, d, slow, _budget, sequence, grouping = cell
+    ne, nd = ledger.PAIRING_SHAPES[shape]
+    start, _target, _second = PAIRING_SEQUENCE_PATCHES[sequence]
+    v1, v2, v3 = PAIRING_PROTOCOLS
+    sides = _pairing_sides(cell) + (" that one blueGreen group rolls together" if grouping == "one group"
+                                    else " with no rollout group")
+    opening = {
+        "v1 to v2": f"the protocol is changed from {v1} to {v2} on {sides}",
+        "v1 to v2 to v3": (f"the protocol is changed from {v1} to {v2} on {sides}, and changed again to {v3} "
+                           f"once the first {v2} pod is Ready"),
+        "v1 to v2 then back": (f"the protocol is changed from {v1} to {v2} on {sides}, and set back to {v1} "
+                               f"once the first {v2} pod is Ready"),
+        "v1 to empty": f"the protocol {v1} is removed from {sides}",
+        "empty to v1": f"the protocol {v1} is set for the first time on {sides}",
+    }[sequence]
+    delay = {
+        "none": "",
+        "engine": f", with the engine's pods starting {PAIRING_DELAY_S} s late so the decoder's replacement is Ready first",
+        "decoder": f", with the decoder's pods starting {PAIRING_DELAY_S} s late so the engine's replacement is Ready first",
+        "both": f", with both sides' pods starting {PAIRING_DELAY_S} s late so the two replacements are Ready at about the same time",
+    }[slow]
+    new = v2
+    if sequence in ledger.PAIRING_GATED:
+        mechanism = {
+            (PAIRING_ST, PAIRING_ST): (f"each side surges a replacement and keeps its old pod serving under a Pairing hold "
+                                       f"until the other side serves {new}, so no old pod leaves while the other side's old "
+                                       f"pods still need it"),
+            (PAIRING_ST, PAIRING_RP): (f"the decoder takes one old pod down before its replacement starts and may take its "
+                                       f"last old pod down only once a {new} engine serves, while the engine surges "
+                                       f"replacements and keeps an old pod serving while that pod is the last one that pairs"),
+            (PAIRING_RP, PAIRING_ST): (f"the engine takes one old pod down before its replacement starts and may take its "
+                                       f"last old pod down only once a {new} decoder serves, while the decoder surges "
+                                       f"replacements and keeps an old pod serving while that pod is the last one that pairs"),
+            (PAIRING_RP, PAIRING_RP): (f"each side takes one old pod down at a time and may take its last old pod down only "
+                                       f"once the other side serves {new}"),
+            (PAIRING_IP, PAIRING_ST): (f"the engine relabels its pods in place one at a time while a pairable pair remains and "
+                                       f"holds the last relabel until a {new} decoder serves, while the decoder surges "
+                                       f"replacements"),
+        }[(e, d)]
+        if shape == "1x1" and PAIRING_RP in (e, d):
+            # One pod a side: a drain-first pod cannot wait for a replacement
+            # that starts only once it is gone, so nothing holds it.
+            if (e, d) == (PAIRING_RP, PAIRING_RP):
+                mechanism = ("with one pod a side both old pods go down at once (holding either would wait forever on "
+                             "the other) and the service serves no pair until both replacements are Ready, the one "
+                             "window no order of steps avoids")
+            else:
+                first, other = ("engine", "decoder") if e == PAIRING_RP else ("decoder", "engine")
+                mechanism = (f"with one pod a side the {first}'s only pod goes down at once (holding it would wait "
+                             f"forever on a replacement that starts only once it is gone) and comes back on {new} while "
+                             f"the {other} surges its replacement, so the service serves no pair while the {first}'s pod "
+                             f"is away")
+        elif shape == "1x1" and e == PAIRING_IP:
+            mechanism = (f"with one pod a side the decoder surges its replacement first and the engine relabels its "
+                         f"only pod once a {new} decoder serves, so the old pair keeps serving until the new one exists")
+        if sequence == "v1 to v2 to v3":
+            mechanism += f"; the second change rolls both sides on to {v3} the same way and no pod is left on {v2}"
+        elif sequence == "v1 to v2 then back":
+            mechanism += (f"; the pods already on {v2} are replaced by {v1} pods, the pods that never moved stay, "
+                          f"and no pod is left on {v2}")
+    else:
+        mechanism = "an empty protocol pairs with anything, so nothing is held and each side rolls under its own budget"
+    floors = ledger.pairing_floors(cell)
+    if _pairing_floor_hard(cell):
+        floor = (f"the engine keeps {floors['engine']} and the decoder keeps {floors['decoder']} pairable serving pods "
+                 f"at every tick (desired minus maxUnavailable; a sustained dip fails the case)")
+    else:
+        one, other = ("decoder", "engine") if d == PAIRING_RP else ("engine", "decoder")
+        floor = (f"while the {one}'s only pod is replaced no {other} pod can pair, so the pairable floor is reported "
+                 f"rather than failed and the case holds the pair-alive check, the hold bound and the convergence")
+    hold = f"every Pairing hold lifts within {PAIRING_HOLD_MAX_S} s"
+    if _pairing_hold_expected(cell):
+        hold = f"a Pairing hold is seen and {hold}"
+    surfaces = "the label on every pod, every live traffic target and every routing Service"
+    end = {
+        "v1 to v2": f"both sides end on {v2} with {surfaces}",
+        "v1 to v2 to v3": f"both sides end on {v3} with {surfaces}",
+        "v1 to v2 then back": f"both sides end back on {v1} with {surfaces}",
+        "v1 to empty": "both sides end with no protocol label on any pod, traffic target or Service",
+        "empty to v1": f"both sides end on {v1} with {surfaces}",
+    }[sequence]
+    return f"{opening}{delay}: {mechanism}; {floor}; {hold}; {end}"
+
+
+def emit_pairing(add):
+    for cell in ledger.pairing_product_cells():
+        if cell in HAND_PINNED_PAIRING:
+            continue
+        shape, e, d, slow, budget, sequence, grouping = cell
+        ne, nd = ledger.PAIRING_SHAPES[shape]
+        start, target, second = PAIRING_SEQUENCE_PATCHES[sequence]
+        kv = dict(mode="pairing", Ne=ne, Nd=nd, Nr=0, ceil_e=_pairing_ceiling(e, ne), ceil_d=_pairing_ceiling(d, nd),
+                  ceil_r=0, co="bluegreen" if grouping == "one group" else "none", topo="pd", proto=target)
+        if second is not None:
+            kv["proto2"] = second
+        if _pairing_hold_expected(cell):
+            kv["hold"] = 1
+        kv["hold_max"] = PAIRING_HOLD_MAX_S
+        if _pairing_floor_hard(cell):
+            kv["inv_hard"] = "L"
+        case_comps = [lib.comp("engine", ne, 0, _pairing_life(e, ne, budget), runner=_pairing_runner(slow, "engine")),
+                      lib.comp("decoder", nd, 0, _pairing_life(d, nd, budget), runner=_pairing_runner(slow, "decoder"))]
+        desc = (f"{GEN_MARK} pairing {sequence} {shape} {ledger.PAIRING_STRATEGY_WORDS[e]}+"
+                f"{ledger.PAIRING_STRATEGY_WORDS[d]} slow {slow} mu{budget} {PAIRING_GROUP_WORDS[grouping]}")
+        add(PAIRING_FOLDER, desc, kv, case_comps, _pairing_reason(cell),
+            dict(strat=e, verb=f"pairing:{sequence}", pair=f"{ledger.PAIRING_STRATEGY_WORDS[e]}+{ledger.PAIRING_STRATEGY_WORDS[d]}",
+                 slow=slow, sequence=sequence),
+            cell=("pairing",) + cell, coord=_pairing_rollout(start, grouping))
+
+
 def emit_canary_policy_twins(add, inline_rows):
     """One policy-referenced twin per selected inline row: the same header,
     fleet, reason and runtime, the group naming the RolloutPolicy the case
@@ -9286,6 +9537,7 @@ def build_outputs():
     emit_lift(add)
     emit_stale_record(add)
     emit_canary_stale_record(add)
+    emit_pairing(add)
     _emit_plain_ops(add)
     _emit_leftover_singles(add)
     _emit_tail_cells(add)
@@ -9582,6 +9834,9 @@ def manifest(rows, kept_empty=()):
                    tally(lambda kv, m: m["mig"], where=lambda kv, m: "mig" in m))
     lines += table("By controller-restart condition",
                    tally(lambda kv, m: m["cond"], where=lambda kv, m: "cond" in m))
+    lines += table_if("By pairing strategy pair, engine+decoder (gen-pairing)", "pair")
+    lines += table_if("By pairing slow side (gen-pairing)", "slow")
+    lines += table_if("By pairing sequence (gen-pairing)", "sequence")
     lines += table("By Instances per Component (size and router-gang families)",
                    tally(lambda kv, m: m["size"], where=lambda kv, m: "size" in m))
     lines += table_if("By stuck kind (ops-held)", "stuck")

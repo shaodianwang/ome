@@ -642,7 +642,7 @@ class GeneratedCorpusTest(unittest.TestCase):
         # sub-shards, so the corpus total bounds nothing physical; the ceiling
         # exists to force a conscious decision when the corpus grows past it.
         n = sum(1 for _ in (HERE / "isvcs").glob("**/*.yaml"))
-        self.assertLessEqual(n, 8000)
+        self.assertLessEqual(n, 9000)
 
     def test_parked_cell_emits_xfail_header_and_reason(self):
         """A PARKED entry must turn its cell into notimpl=1 issue=N with the
@@ -24253,3 +24253,302 @@ class IdleUnitRecordTest(unittest.TestCase):
         picked = {"components": {"engine": {"canary": done}, "router": {"canary": {"canaryRevisionHash": "r2", "currentStep": 0}}}}
         run._idle_units_track(track, picked, 8.0)
         self.assertEqual((8.0, ("r2", 0, "", False)), track["moved"]["router"])
+
+
+class HardenedInvariantTest(unittest.TestCase):
+    """inv_hard= turns an advisory invariant class hard for one case: a
+    sustained dip of the pairable floor then fails the case and the held
+    line reads hard; without the header the same dip is reported. The
+    validators accept only the advisory classes and a positive hold bound."""
+
+    REV = "a1b2c3d4"
+
+    def _pod(self, comp, index, *, ready=True, serving=True, pairing=""):
+        return {"comp": comp, "inst": str(index), "runner": "default", "ord": "0", "alive": True,
+                "ready": ready, "serving": serving, "hash": self.REV, "pairing": pairing,
+                "uid": f"uid-{comp}-{index}"}
+
+    def _dip(self, hdr):
+        inv = run._inv_new("p1", hdr, N={"engine": 2}, max_unavail={})
+        full = {"engine-0": self._pod("engine", 0), "engine-1": self._pod("engine", 1)}
+        t = observe_ticks(inv, full, 2)
+        dipped = dict(full, **{"engine-1": self._pod("engine", 1, serving=False)})
+        observe_ticks(inv, dipped, run.INV_SUSTAIN_L, start=t)
+        return inv
+
+    def test_a_hardened_pairable_floor_fails_on_a_sustained_dip(self):
+        inv = self._dip({"inv_hard": "L"})
+        key = ("L", "pairable-capacity", "engine")
+        self.assertEqual({key}, set(inv["viol"]))
+        self.assertEqual({}, inv["advisory"])
+        checks, notes = [], []
+        self.assertEqual("FAIL", run.invariant_checks(inv, "PASS", notes, checks))
+        self.assertTrue(any("✗ invariant L violated (pairable-capacity): engine has 1 Instance(s)" in c for c in checks), checks)
+        self.assertEqual(1, len(notes))
+
+    def test_without_the_header_the_same_dip_is_reported(self):
+        inv = self._dip({})
+        self.assertEqual({}, inv["viol"])
+        self.assertEqual({("L", "pairable-capacity", "engine")}, set(inv["advisory"]))
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("advisory — reported, not failed" in c for c in checks), checks)
+
+    def test_a_hardened_floor_that_held_counts_among_the_hard_invariants(self):
+        inv = run._inv_new("p1", {"inv_hard": "L"}, N={"engine": 2}, max_unavail={})
+        full = {"engine-0": self._pod("engine", 0), "engine-1": self._pod("engine", 1)}
+        observe_ticks(inv, full, 3)
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("✓ invariant L (pairable-capacity, hard): pairable capacity stayed at or above its floor across" in c
+                            for c in checks), checks)
+        held = next(c for c in checks if "continuous invariants held (" in c)
+        self.assertIn("L", held.split("(")[1].split(")")[0])
+        self.assertFalse(any("advisory" in c and "invariant L" in c for c in checks), checks)
+        # A hardened floor that was never read says so in the hard wording.
+        inv = run._inv_new("p1", {"inv_hard": "L"}, N={"engine": 2}, max_unavail={})
+        checks = []
+        run.invariant_checks(inv, "PASS", [], checks)
+        self.assertTrue(any("invariant L (pairable-capacity, hard) never saw" in c for c in checks), checks)
+
+    def test_the_parked_scope_still_applies_to_a_hardened_class(self):
+        inv = self._dip({"inv_hard": "L", "inv_xfail": "L", "issue": 4242, "notimpl": 1})
+        checks, notes = [], []
+        self.assertEqual("XFAIL (known bug: #4242)", run.invariant_checks(inv, "PASS", notes, checks))
+
+    def test_the_header_validators(self):
+        v = run.HDR_VALIDATORS
+        self.assertTrue(v["inv_hard"]("L"))
+        self.assertTrue(v["inv_hard"]("L,M"))
+        self.assertFalse(v["inv_hard"]("A"))
+        self.assertFalse(v["inv_hard"]("L,L"))
+        self.assertFalse(v["inv_hard"](""))
+        self.assertTrue(v["hold_max"](240))
+        self.assertFalse(v["hold_max"](0))
+        self.assertFalse(v["hold_max"]("240s"))
+        self.assertEqual({"L", "M"}, run.INV_HARDENABLE)
+        self.assertTrue(all((x, kind) in run.INV_ADVISORY for x, kind in (("L", "pairable-capacity"), ("M", "traffic-backed"))))
+
+    def test_hold_max_is_a_pairing_knob_of_a_driven_transition(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        body = ("apiVersion: ome.io/v1beta1\nkind: InferenceService\nmetadata: { name: p1 }\nspec:\n"
+                "  engine:\n    minReplicas: 1\n    maxReplicas: 1\n  decoder:\n    minReplicas: 1\n    maxReplicas: 1\n")
+
+        def errors(header):
+            p = Path(tmp.name) / "p1.yaml"
+            p.write_text(f"# p1: a case  {header}\n{body}")
+            return run.validate_case_file(p)
+
+        base = "Ne=1 Nd=1 Nr=0 ceil_e=2 ceil_d=2 ceil_r=0 co=bluegreen topo=pd"
+        self.assertEqual([], errors(f"mode=pairing proto=pair-v2 hold_max=240 inv_hard=L {base}"))
+        self.assertTrue(any("hold_max= is a pairing-mode knob" in e for e in errors(f"mode=rollout hold_max=240 {base}")))
+        self.assertTrue(any("no rotation-phase knobs apply" in e
+                            for e in errors(f"mode=pairing proto=pair-v2 expect=reject reason=X hold_max=240 {base}")))
+        self.assertTrue(any("malformed header value inv_hard=A" in e for e in errors(f"mode=pairing proto=pair-v2 inv_hard=A {base}")))
+
+
+class PairingHoldBoundTest(unittest.TestCase):
+    """Every Pairing hold a pairing case sees is a bounded wait: the sampler
+    keeps the span of each hold per Component, hold_max= bounds the longest
+    one, and a hold still reported after the transition converged fails."""
+
+    def test_spans_open_on_the_first_sample_and_close_on_the_first_without(self):
+        spans = {}
+        comps = ["engine", "decoder"]
+        run._note_hold_spans(spans, comps, {}, 0.0)
+        self.assertEqual({}, spans)
+        run._note_hold_spans(spans, comps, {"decoder": "Pairing"}, 5.0)
+        run._note_hold_spans(spans, comps, {"decoder": "Pairing", "engine": "Budget"}, 10.0)
+        self.assertEqual({"decoder": [[5.0, 10.0, None]]}, spans, "a Budget hold is not a Pairing span")
+        run._note_hold_spans(spans, comps, {}, 15.0)
+        self.assertEqual({"decoder": [[5.0, 10.0, 15.0]]}, spans)
+        run._note_hold_spans(spans, comps, {"decoder": "Pairing"}, 20.0)
+        self.assertEqual([[5.0, 10.0, 15.0], [20.0, 20.0, None]], spans["decoder"])
+
+    def test_the_longest_hold_is_bounded_by_hold_max(self):
+        spans = {"decoder": [[0.0, 30.0, 35.0]], "engine": [[100.0, 100.0, 105.0]]}
+        checks, notes = [], []
+        self.assertEqual("PASS", run.pairing_hold_bound_checks(spans, 240, 200.0, True, "PASS", notes, checks))
+        self.assertEqual(["  ✓ hold_max=240: the longest Pairing hold (decoder) lasted 35s and every hold lifted"], checks)
+        checks, notes = [], []
+        self.assertEqual("FAIL", run.pairing_hold_bound_checks({"decoder": [[0.0, 250.0, 260.0]]}, 240, 300.0, True,
+                                                               "PASS", notes, checks))
+        self.assertIn("✗ hold_max=240: a Pairing hold on decoder lasted 260s — the hold did not lift", checks[0])
+        self.assertEqual(["Pairing hold on decoder lasted 260s > hold_max 240s"], notes)
+
+    def test_an_open_hold_is_measured_to_now_and_fails_once_converged(self):
+        spans = {"decoder": [[0.0, 20.0, None]]}
+        checks, notes = [], []
+        self.assertEqual("FAIL", run.pairing_hold_bound_checks(spans, 240, 30.0, True, "PASS", notes, checks))
+        self.assertIn("still reported on ['decoder'] after the transition converged", checks[0])
+        # Not converged: a short open hold is inside the bound and the
+        # convergence verdict says what is wrong.
+        checks, notes = [], []
+        self.assertEqual("PASS", run.pairing_hold_bound_checks(spans, 240, 30.0, False, "PASS", notes, checks))
+        checks, notes = [], []
+        self.assertEqual("FAIL", run.pairing_hold_bound_checks(spans, 240, 300.0, False, "PASS", notes, checks))
+        self.assertIn("lasted 300s and was still reported at the end", checks[0])
+
+    def test_without_hold_max_the_longest_hold_is_reported(self):
+        checks = []
+        self.assertEqual("PASS", run.pairing_hold_bound_checks({"engine": [[0.0, 10.0, 12.0]]}, None, 50.0, True,
+                                                               "PASS", [], checks))
+        self.assertEqual(["  ⓘ longest Pairing hold observed: engine for 12s"], checks)
+        checks = []
+        self.assertEqual("PASS", run.pairing_hold_bound_checks({}, 240, 50.0, True, "PASS", [], checks))
+        self.assertEqual(["  ⓘ hold_max=240: no Pairing hold was observed, nothing to bound"], checks)
+        self.assertEqual("PASS", run.pairing_hold_bound_checks({}, None, 50.0, True, "PASS", [], []))
+
+
+class RolledBackToStartTest(unittest.TestCase):
+    """A protocol set back to its starting value mid-transition converges
+    when every pod carries the starting protocol and none runs a revision
+    of the abandoned cohort; the starting revision's hash may be reused, so
+    the label decides where the hash cannot."""
+
+    def test_the_predicate(self):
+        mid = {"m1"}
+        back = [{"hash": "a1", "pairing": "pair-v1"}, {"hash": "a9", "pairing": "pair-v1"}]
+        self.assertTrue(run._rolled_back_to_start(back, mid, "pair-v1"))
+        self.assertFalse(run._rolled_back_to_start([], mid, "pair-v1"))
+        self.assertFalse(run._rolled_back_to_start(back + [{"hash": "m1", "pairing": "pair-v1"}], mid, "pair-v1"))
+        self.assertFalse(run._rolled_back_to_start(back + [{"hash": "a2", "pairing": "pair-v2"}], mid, "pair-v1"))
+        self.assertFalse(run._rolled_back_to_start([{"hash": "a1"}], mid, "pair-v1"), "a pod with no label is not back")
+
+
+class GeneratedPairingFamilyTest(unittest.TestCase):
+    """The pairing transition matrix generate_cases.py mints into gen-pairing:
+    one case per cell of the ledger's product that no hand-written pairing
+    case drives, the pairable floor hard wherever an order of steps can keep
+    it, a Pairing hold asserted where it is certain, every hold bounded, and
+    an end state on line two."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.rows = [(n, kv, m) for f, n, kv, m in rows if f == "gen-pairing"]
+        cls.cells = {}
+        for n, _kv, _m in cls.rows:
+            text = cls.outputs[f"gen-pairing/{n}.yaml"]
+            _desc, header, problems = coverage.parse_header(text.split("\n")[0], n)
+            assert not problems, (n, problems)
+            cell, why = coverage.pairing_cell_of(header, coverage.body_facts(text))
+            assert cell is not None, (n, why)
+            cls.cells[n] = cell
+
+    def _line2(self, name):
+        return self.outputs[f"gen-pairing/{name}.yaml"].splitlines()[1]
+
+    def test_block_sits_in_its_reserved_range_and_the_count_is_the_product_minus_the_hand_cells(self):
+        lo, hi = generate_cases.GEN_BLOCKS["gen-pairing"]
+        self.assertTrue(13000 <= lo < hi <= 14000)
+        product = coverage.pairing_product_cells()
+        self.assertEqual(528, len(product))
+        pinned = set(generate_cases.HAND_PINNED_PAIRING)
+        self.assertEqual(len(product) - len(pinned), len(self.rows))
+        self.assertEqual(517, len(self.rows))
+        self.assertEqual(set(product) - pinned, set(self.cells.values()))
+        self.assertEqual(len(self.cells), len(set(self.cells.values())), "every cell once")
+
+    def test_hand_pins_name_the_cells_their_cases_drive(self):
+        hand = {c.id: c for c in coverage.load_cases(HERE / "isvcs" / "pairing")}
+        for cell, cid in generate_cases.HAND_PINNED_PAIRING.items():
+            self.assertEqual(cell, hand[cid].pairing_cell, cid)
+            self.assertEqual("", coverage.pairing_removed_reason(cell), cid)
+
+    def test_every_case_carries_the_matrix_contract(self):
+        g = generate_cases
+        for n, kv, m in self.rows:
+            shape, e, d, slow, budget, sequence, grouping = self.cells[n]
+            ne, nd = coverage.PAIRING_SHAPES[shape]
+            text = self.outputs[f"gen-pairing/{n}.yaml"]
+            self.assertEqual(("pairing", "pd", 0, 0), (kv["mode"], kv["topo"], kv["Nr"], kv["ceil_r"]), n)
+            self.assertEqual((ne, nd), (kv["Ne"], kv["Nd"]), n)
+            self.assertEqual("bluegreen" if grouping == "one group" else "none", kv["co"], n)
+            self.assertEqual(g.PAIRING_HOLD_MAX_S, kv["hold_max"], f"{n}: every hold is bounded")
+            start, target, second = g.PAIRING_SEQUENCE_PATCHES[sequence]
+            self.assertEqual(target, kv["proto"], n)
+            self.assertEqual(second, kv.get("proto2"), n)
+            self.assertEqual(bool(start), f"pairingProtocol: {start}" in text, n)
+            self.assertEqual(grouping == "one group", "- components: [engine, decoder]\n          blueGreen: {}" in text, n)
+            self.assertEqual(e, m["strat"], n)
+            self.assertEqual(f"pairing:{sequence}", m["verb"], n)
+            self.assertEqual(ne + g.PAIRING_SURGE[ne] if e == g.PAIRING_ST else ne, kv["ceil_e"], n)
+            self.assertEqual(nd + g.PAIRING_SURGE[nd] if d == g.PAIRING_ST else nd, kv["ceil_d"], n)
+            delayed = {c for c in ("engine", "decoder") if slow in (c, "both")}
+            facts = coverage.body_facts(text)
+            self.assertEqual({c: g.PAIRING_DELAY_S for c in delayed}, facts["delay"], n)
+            self.assertEqual(g._pairing_hold_expected(self.cells[n]), kv.get("hold") == 1, n)
+            self.assertEqual(g._pairing_floor_hard(self.cells[n]), kv.get("inv_hard") == "L", n)
+            self.assertNotIn("notimpl", kv, f"{n}: nothing is parked")
+            self.assertTrue(self._line2(n).startswith("# reason: "), n)
+
+    def test_the_floor_is_hard_except_where_a_one_pod_drain_first_side_empties_the_pair(self):
+        g = generate_cases
+        soft = sorted(n for n, kv, _m in self.rows if "inv_hard" not in kv)
+        self.assertEqual(24, len(soft))
+        for n in soft:
+            shape, e, d, _slow, budget, sequence, _grouping = self.cells[n]
+            self.assertEqual("1x1", shape, n)
+            self.assertIn(g.PAIRING_RP, (e, d), n)
+            self.assertIn(sequence, coverage.PAIRING_GATED, n)
+            peer = "decoder" if e == g.PAIRING_RP else "engine"
+            self.assertGreater(coverage.pairing_floors(self.cells[n])[peer], 0, n)
+            self.assertIn("the pairable floor is reported rather than failed", self._line2(n), n)
+        # One pod a side with both floors at zero keeps the hard reading, trivially.
+        both_zero = [n for n, kv, _m in self.rows
+                     if self.cells[n][0] == "1x1" and g.PAIRING_RP in self.cells[n][1:3]
+                     and coverage.pairing_floors(self.cells[n]) == {"engine": 0, "decoder": 0}]
+        self.assertTrue(both_zero)
+        self.assertTrue(all(self.rows[[r[0] for r in self.rows].index(n)][1].get("inv_hard") == "L" for n in both_zero))
+
+    def test_holds_are_asserted_where_they_are_certain(self):
+        g = generate_cases
+        held = [self.cells[n] for n, kv, _m in self.rows if kv.get("hold") == 1]
+        self.assertEqual(109, len(held))
+        for shape, e, d, slow, _budget, sequence, grouping in held:
+            self.assertIn(sequence, coverage.PAIRING_GATED)
+            self.assertEqual("one group", grouping)
+            self.assertNotEqual("both", slow)
+            ne, nd = coverage.PAIRING_SHAPES[shape]
+            if (e, d) == (g.PAIRING_ST, g.PAIRING_ST):
+                self.assertIn(slow, ("engine", "decoder"))
+            elif e == g.PAIRING_IP:
+                self.assertTrue((slow == "decoder" and ne >= 2) or (slow == "none" and ne == 2), (shape, slow))
+            elif e == g.PAIRING_RP and d == g.PAIRING_RP:
+                self.assertTrue((slow == "engine" and nd == 2) or (slow == "decoder" and ne == 2), (shape, slow))
+            elif e == g.PAIRING_ST:
+                self.assertEqual(("engine", 2), (slow, nd), shape)
+            else:
+                self.assertEqual(("decoder", 2), (slow, ne), shape)
+        # The hand-pinned slow-side cells keep their own assertions; a surge
+        # pair with one slow side is asserted on every generated shape.
+        surge_slow = [c for c in self.cells.values()
+                      if (c[1], c[2]) == (g.PAIRING_ST, g.PAIRING_ST) and c[3] in ("engine", "decoder") and c[5] in coverage.PAIRING_GATED]
+        self.assertTrue(surge_slow)
+        self.assertTrue(all(c in held for c in surge_slow))
+
+    def test_reasons_state_the_mechanism_the_floors_the_bound_and_the_end_state(self):
+        g = generate_cases
+        for n, kv, _m in self.rows:
+            shape, e, d, slow, _budget, sequence, _grouping = self.cells[n]
+            line2 = self._line2(n)
+            self.assertIn(f"every Pairing hold lifts within {g.PAIRING_HOLD_MAX_S} s", line2, n)
+            self.assertIn("both sides end", line2, n)
+            if slow != "none":
+                self.assertIn(f"{g.PAIRING_DELAY_S} s late", line2, n)
+            if kv.get("inv_hard"):
+                floors = coverage.pairing_floors(self.cells[n])
+                self.assertIn(f"the engine keeps {floors['engine']} and the decoder keeps {floors['decoder']} pairable serving pods", line2, n)
+            if sequence in coverage.PAIRING_GATED:
+                self.assertIn("pair-v2", line2, n)
+            else:
+                self.assertIn("an empty protocol pairs with anything", line2, n)
+            if sequence == "v1 to v2 then back":
+                self.assertIn("set back to pair-v1", line2, n)
+                self.assertIn("end back on pair-v1", line2, n)
+            if sequence == "v1 to v2 to v3":
+                self.assertIn("end on pair-v3", line2, n)
+            if kv.get("hold"):
+                self.assertIn("a Pairing hold is seen", line2, n)

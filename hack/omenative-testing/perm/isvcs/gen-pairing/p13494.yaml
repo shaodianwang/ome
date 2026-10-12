@@ -1,0 +1,25 @@
+# p13494: [gen] pairing v1 to v2 2P6D recreate+recreate slow both mu1 group  mode=pairing Ne=2 Nd=6 Nr=0 ceil_e=2 ceil_d=6 ceil_r=0 co=bluegreen topo=pd proto=pair-v2 hold_max=240 inv_hard=L
+# reason: the protocol is changed from pair-v1 to pair-v2 on 2 engines (recreate) and 6 decoders (recreate) that one blueGreen group rolls together, with both sides' pods starting 40 s late so the two replacements are Ready at about the same time: each side takes one old pod down at a time and may take its last old pod down only once the other side serves pair-v2; the engine keeps 1 and the decoder keeps 5 pairable serving pods at every tick (desired minus maxUnavailable; a sustained dip fails the case); every Pairing hold lifts within 240 s; both sides end on pair-v2 with the label on every pod, every live traffic target and every routing Service
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p13494 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    runner: { env: [{ name: "TEST_STARTUP_DELAY", value: "40" }] }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 6
+    maxReplicas: 6
+    annotations: { ome.io/deploymentMode: OMENative }
+    runner: { env: [{ name: "TEST_STARTUP_DELAY", value: "40" }] }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  rollout:
+    pairingProtocol: pair-v1
+    groups:
+        - components: [engine, decoder]
+          blueGreen: {}

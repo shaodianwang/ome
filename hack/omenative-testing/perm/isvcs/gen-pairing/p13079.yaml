@@ -1,0 +1,24 @@
+# p13079: [gen] pairing v1 to v2 to v3 1x1 recreate+surge slow engine mu1 group  mode=pairing Ne=1 Nd=1 Nr=0 ceil_e=1 ceil_d=2 ceil_r=0 co=bluegreen topo=pd proto=pair-v2 proto2=pair-v3 hold_max=240 inv_hard=L
+# reason: the protocol is changed from pair-v1 to pair-v2 on 1 engine (recreate) and 1 decoder (surge) that one blueGreen group rolls together, and changed again to pair-v3 once the first pair-v2 pod is Ready, with the engine's pods starting 40 s late so the decoder's replacement is Ready first: with one pod a side the engine's only pod goes down at once (holding it would wait forever on a replacement that starts only once it is gone) and comes back on pair-v2 while the decoder surges its replacement, so the service serves no pair while the engine's pod is away; the second change rolls both sides on to pair-v3 the same way and no pod is left on pair-v2; the engine keeps 0 and the decoder keeps 0 pairable serving pods at every tick (desired minus maxUnavailable; a sustained dip fails the case); every Pairing hold lifts within 240 s; both sides end on pair-v3 with the label on every pod, every live traffic target and every routing Service
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p13079 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations: { ome.io/deploymentMode: OMENative }
+    runner: { env: [{ name: "TEST_STARTUP_DELAY", value: "40" }] }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 1
+    maxReplicas: 1
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  rollout:
+    pairingProtocol: pair-v1
+    groups:
+        - components: [engine, decoder]
+          blueGreen: {}

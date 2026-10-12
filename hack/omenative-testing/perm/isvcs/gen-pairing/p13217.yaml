@@ -1,0 +1,25 @@
+# p13217: [gen] pairing v1 to v2 then back 2x2 recreate+surge slow both mu0 group  mode=pairing Ne=2 Nd=2 Nr=0 ceil_e=2 ceil_d=3 ceil_r=0 co=bluegreen topo=pd proto=pair-v2 proto2=pair-v1 hold_max=240 inv_hard=L
+# reason: the protocol is changed from pair-v1 to pair-v2 on 2 engines (recreate) and 2 decoders (surge) that one blueGreen group rolls together, and set back to pair-v1 once the first pair-v2 pod is Ready, with both sides' pods starting 40 s late so the two replacements are Ready at about the same time: the engine takes one old pod down before its replacement starts and may take its last old pod down only once a pair-v2 decoder serves, while the decoder surges replacements and keeps an old pod serving while that pod is the last one that pairs; the pods already on pair-v2 are replaced by pair-v1 pods, the pods that never moved stay, and no pod is left on pair-v2; the engine keeps 1 and the decoder keeps 2 pairable serving pods at every tick (desired minus maxUnavailable; a sustained dip fails the case); every Pairing hold lifts within 240 s; both sides end back on pair-v1 with the label on every pod, every live traffic target and every routing Service
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p13217 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    runner: { env: [{ name: "TEST_STARTUP_DELAY", value: "40" }] }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    runner: { env: [{ name: "TEST_STARTUP_DELAY", value: "40" }] }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    pairingProtocol: pair-v1
+    groups:
+        - components: [engine, decoder]
+          blueGreen: {}

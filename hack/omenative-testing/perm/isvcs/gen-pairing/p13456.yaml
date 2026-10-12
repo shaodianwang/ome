@@ -1,0 +1,23 @@
+# p13456: [gen] pairing v1 to v2 2P6D recreate+surge slow none mu1 group  mode=pairing Ne=2 Nd=6 Nr=0 ceil_e=2 ceil_d=9 ceil_r=0 co=bluegreen topo=pd proto=pair-v2 hold_max=240 inv_hard=L
+# reason: the protocol is changed from pair-v1 to pair-v2 on 2 engines (recreate) and 6 decoders (surge) that one blueGreen group rolls together: the engine takes one old pod down before its replacement starts and may take its last old pod down only once a pair-v2 decoder serves, while the decoder surges replacements and keeps an old pod serving while that pod is the last one that pairs; the engine keeps 1 and the decoder keeps 5 pairable serving pods at every tick (desired minus maxUnavailable; a sustained dip fails the case); every Pairing hold lifts within 240 s; both sides end on pair-v2 with the label on every pod, every live traffic target and every routing Service
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p13456 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 6
+    maxReplicas: 6
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 3, maxUnavailable: 1 } } }
+  rollout:
+    pairingProtocol: pair-v1
+    groups:
+        - components: [engine, decoder]
+          blueGreen: {}

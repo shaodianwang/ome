@@ -6,16 +6,20 @@ isvcs/, plus the facts a header does not carry and the body does (update
 strategy and budget, restart policy, gang width, rollout group kind, canary
 step shapes), and renders the scenario space: the axes of every case, the
 matrix with counts, the empty cells by name with the biggest holes first,
-the parked cells with their issues, and the operator stories with the cells
-that prove them.
+the parked cells with their issues, the operator stories with the cells
+that prove them, and the pairing-protocol transition matrix (shape x
+strategy pair x slow side x budget x sequence x grouping) with its removed
+and empty cells.
 
   python3 coverage.py            # the Markdown ledger on stdout
   python3 coverage.py --cases    # ... plus the per-case table
   python3 coverage.py --json     # the same facts as JSON
   python3 coverage.py --check    # nonzero when a story has no cell, a
                                  # header carries a key or value the parser
-                                 # does not know, or a cell removed with a
-                                 # reason has a case (run_test.py runs this)
+                                 # does not know, a cell removed with a
+                                 # reason has a case, or a cell of the
+                                 # pairing matrix has none (run_test.py
+                                 # runs this)
 
 The tables at the top are the editable part: STORIES maps each operator
 story to a predicate over a parsed case, and the vocabularies name every
@@ -376,6 +380,11 @@ def _opt_in_invariants(v):
     return bool(str(v)) and all(c in ("J", "K") for c in str(v).split(","))
 
 
+def _hard_invariants(v):
+    # the advisory invariants a case makes hard: L (pairable capacity), M (traffic backed by pods)
+    return bool(str(v)) and all(c in ("L", "M") for c in str(v).split(","))
+
+
 HEADER_CHECKS = {
     "Ne": _count, "Nd": _count, "Nr": _count, "ceil_e": _count, "ceil_d": _count, "ceil_r": _count,
     "to_e": _count, "to_d": _count, "to_r": _count, "partition": _count, "failurelimit": _count,
@@ -393,6 +402,9 @@ HEADER_CHECKS = {
     "preroll": _members,
     "img": _text, "rt": _text, "reason": _text, "proto": _text, "proto2": _text, "pairto": _text,
     "inv_on": _opt_in_invariants,
+    "inv_hard": _hard_invariants,
+    # hold_max=<s>: the longest a Pairing hold may stay on a Component of a protocol transition
+    "hold_max": lambda v: isinstance(v, int) and v >= 1,
 }
 HEADER_KEYS = set(HEADER_VALUES) | set(HEADER_CHECKS)
 REQUIRED_KEYS = ("Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r")
@@ -432,6 +444,8 @@ class Case:
     issue: int
     outcome: str
     invariants_off: bool
+    pairing_cell: tuple = None    # the pairing matrix cell this case drives, None outside it
+    pairing_outside: str = ""     # why a pairing case lies outside the matrix
     problems: list = field(default_factory=list)
 
     @property
@@ -507,7 +521,11 @@ FIELD = {
     "unavailable": re.compile(r"maxUnavailable:\s*\"?([0-9]+%?)"),
     "restart": re.compile(r"restartPolicy:\s*\"?([A-Za-z]+)"),
     "width": re.compile(r"worker:\s*\{\s*size:\s*([0-9]+)"),
+    # a runner that starts its pods late (the slow side of a pairing case)
+    "delay": re.compile(r"name:\s*\"?TEST_STARTUP_DELAY\"?,\s*value:\s*\"?([0-9]+)"),
 }
+GROUP_MEMBERS = re.compile(r"^\s+- components:\s*\[([^\]]*)\]")
+PAIRING_LINE = re.compile(r"^\s+pairingProtocol:\s*\"?([^\"\s]*)")
 GROUP_KIND = re.compile(r"^\s+(blueGreen|rollingUpdate|maintainRatio|canary):")
 # A group naming its canary ladder through a RolloutPolicy instead of
 # carrying it.
@@ -520,7 +538,8 @@ def body_facts(text):
     canary steps. A Component section runs from its `  <name>:` line to the
     next line indented by less than four spaces."""
     facts = {"strategy": {}, "surge": {}, "unavailable": {}, "restart": {}, "width": 0,
-             "groups": [], "steps": [], "referenced": False}
+             "groups": [], "members": [], "steps": [], "referenced": False,
+             "delay": {}, "pairing": ""}
     component = None
     for line in text.split("\n"):
         opened = COMPONENT_LINE.match(line)
@@ -533,6 +552,10 @@ def body_facts(text):
             read_component_line(facts, component, line)
         elif GROUP_LINE.match(line):
             facts["groups"].append(set())
+            listed = GROUP_MEMBERS.match(line)
+            facts["members"].append({m.strip() for m in listed.group(1).split(",") if m.strip()} if listed else set())
+        elif PAIRING_LINE.match(line) and not facts["groups"]:
+            facts["pairing"] = PAIRING_LINE.match(line).group(1)
         elif STEP_LINE.match(line):
             facts["steps"].append(line)
         elif POLICY_REF_LINE.match(line) and facts["groups"]:
@@ -552,6 +575,8 @@ def read_component_line(facts, component, line):
             continue
         if name == "width":
             facts["width"] = max(facts["width"], int(found.group(1)))
+        elif name == "delay":
+            facts["delay"][component] = int(found.group(1))
         elif name == "type":
             facts["strategy"].setdefault(component, found.group(1))
         else:
@@ -580,6 +605,7 @@ def classify(path, description, header, reason, body, problems):
     canary_steps = classify_canary_steps(header, body["steps"], verbs) if mode == "canary" or "canary" in verbs_group(body) else []
     group = classify_group(body["groups"])
     parked, issue = classify_parked(header)
+    pairing_cell, pairing_outside = pairing_cell_of(header, body) if mode == "pairing" else (None, "")
     return Case(
         id=path.stem, folder=path.parent.name, description=description, header=header, reason=reason,
         components=components, shape=shape, pods=pods, gang_width=body["width"], size=size,
@@ -599,6 +625,8 @@ def classify(path, description, header, reason, body, problems):
         parked=parked, issue=issue,
         outcome=classify_outcome(header),
         invariants_off="inv_off" in header,
+        pairing_cell=pairing_cell,
+        pairing_outside=pairing_outside,
         problems=problems,
     )
 
@@ -984,6 +1012,175 @@ def classify_outcome(h):
 
 
 # ── The corpus ──────────────────────────────────────────────────────────────
+# ── The pairing-protocol transition matrix ──────────────────────────────────
+# A prefill/decode service pairs its engine and decoder pods by the pairing
+# protocol label, and a change of the protocol rolls both sides. At every
+# moment each side must keep desired minus maxUnavailable pairable serving
+# pods: a pod is pairable when a serving pod of the other Component runs its
+# protocol, or either protocol is empty. The matrix crosses the shape
+# (engines x decoders), the two sides' update strategies, the side whose
+# pods start late, the maxUnavailable of the sides that surge (a drain-first
+# or in-place side always runs under one), the sequence of protocol changes
+# and whether one blueGreen group spans both Components. A cell is a case of
+# `mode=pairing` on single pods with no other knob; `--check` fails on a
+# cell of the product with no case and on a removed cell with one.
+PAIRING_SHAPES = {"1x1": (1, 1), "2x2": (2, 2), "6P2D": (6, 2), "2P6D": (2, 6)}
+# (engine strategy, decoder strategy); the in-place side is the engine, so
+# the shape puts it on the large side (6P2D) and on the small side (2P6D).
+PAIRING_PAIRS = [("SurgeThenDrain", "SurgeThenDrain"), ("SurgeThenDrain", "RecreatePod"),
+                 ("RecreatePod", "SurgeThenDrain"), ("RecreatePod", "RecreatePod"),
+                 ("InPlaceIfPossible", "SurgeThenDrain")]
+PAIRING_SLOW_SIDES = ["none", "engine", "decoder", "both"]
+PAIRING_BUDGETS = [0, 1]
+PAIRING_SEQUENCES = ["v1 to v2", "v1 to v2 to v3", "v1 to v2 then back", "v1 to empty", "empty to v1"]
+PAIRING_GATED = ("v1 to v2", "v1 to v2 to v3", "v1 to v2 then back")
+PAIRING_GROUPINGS = ["one group", "none"]
+PAIRING_DRAIN_FIRST_BUDGET = 1   # the one budget a drain-first or in-place side moves under
+PAIRING_STRATEGY_WORDS = {"SurgeThenDrain": "surge", "RecreatePod": "recreate", "InPlaceIfPossible": "in-place"}
+PAIRING_AXES = ("shape", "engine", "decoder", "slow side", "budget", "sequence", "grouping")
+# Cells removed from the pairing matrix, each with its reason; a cell counts
+# under the first rule that matches.
+PAIRING_REMOVED = [
+    ("a change between two protocols needs one blueGreen or canary group over engine and decoder; "
+     "without one admission rejects the patch (the rejection itself is a case of the reject row)",
+     lambda c: c[6] == "none" and c[5] in PAIRING_GATED),
+    ("with both sides drain-first the budget axis has no side to apply to: a drain-first side cannot "
+     "take a pod down under maxUnavailable 0, and admission rejects maxSurge 0 with maxUnavailable 0",
+     lambda c: (c[1], c[2]) == ("RecreatePod", "RecreatePod") and c[4] == 0),
+    ("an in-place restamp starts no pod, so a startup delay on the in-place side changes nothing",
+     lambda c: c[1] == "InPlaceIfPossible" and c[3] in ("engine", "both")),
+    ("a change to or from the empty protocol is never gated (empty pairs with anything), so a slow "
+     "side only lengthens a plain roll",
+     lambda c: c[5] not in PAIRING_GATED and c[3] != "none"),
+]
+
+
+def pairing_removed_reason(cell):
+    return next((reason for reason, predicate in PAIRING_REMOVED if predicate(cell)), "")
+
+
+def pairing_all_cells():
+    """Every cell of the raw product, in axis order."""
+    return [(shape, e, d, slow, budget, sequence, grouping)
+            for shape in PAIRING_SHAPES for e, d in PAIRING_PAIRS for slow in PAIRING_SLOW_SIDES
+            for budget in PAIRING_BUDGETS for sequence in PAIRING_SEQUENCES for grouping in PAIRING_GROUPINGS]
+
+
+def pairing_product_cells():
+    """The cells of the pairing matrix that are not removed with a reason."""
+    return [cell for cell in pairing_all_cells() if not pairing_removed_reason(cell)]
+
+
+def pairing_removed_by_reason():
+    counts = Counter()
+    for cell in pairing_all_cells():
+        reason = pairing_removed_reason(cell)
+        if reason:
+            counts[reason] += 1
+    return counts
+
+
+def pairing_floors(cell):
+    """{component: the pairable serving pods the side keeps}: desired minus
+    its maxUnavailable, which is the budget axis for a surging side and
+    PAIRING_DRAIN_FIRST_BUDGET for a drain-first or in-place side."""
+    shape, e, d, _slow, budget, _sequence, _grouping = cell
+    ne, nd = PAIRING_SHAPES[shape]
+    mu_e = budget if e == "SurgeThenDrain" else PAIRING_DRAIN_FIRST_BUDGET
+    mu_d = budget if d == "SurgeThenDrain" else PAIRING_DRAIN_FIRST_BUDGET
+    return {"engine": max(0, ne - mu_e), "decoder": max(0, nd - mu_d)}
+
+
+def pairing_cell_label(cell):
+    shape, e, d, slow, budget, sequence, grouping = cell
+    return (f"{shape} / {PAIRING_STRATEGY_WORDS[e]}+{PAIRING_STRATEGY_WORDS[d]} / slow {slow} / "
+            f"maxUnavailable {budget} / {sequence} / {grouping}")
+
+
+def _budget_value(raw):
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def pairing_cell_of(header, body):
+    """(cell, "") for a pairing case that drives one cell of the matrix, or
+    (None, why) for one outside it: a gang, another shape, strategy pair or
+    budget, a canary group, a fault, a pause, a scale, a pod kill or an
+    admission negative."""
+    if str(header.get("topo", "")) != "pd":
+        return None, "gang or engine-only shape"
+    for knob, why in (("expect", "admission negative"), ("canary", "canary group"), ("fault", "fault"),
+                      ("pause", "pause"), ("pkill", "pod kill"), ("scale_e", "scale"), ("scale_d", "scale")):
+        if knob in header:
+            return None, why
+    shape = next((name for name, counts in PAIRING_SHAPES.items()
+                  if counts == (header.get("Ne", 0), header.get("Nd", 0))), None)
+    if shape is None:
+        return None, f"shape {header.get('Ne', 0)}x{header.get('Nd', 0)}"
+    e, d = body["strategy"].get("engine", "SurgeThenDrain"), body["strategy"].get("decoder", "SurgeThenDrain")
+    if (e, d) not in PAIRING_PAIRS:
+        return None, f"strategies {e}/{d}"
+    budgets = {}
+    for component, strategy in (("engine", e), ("decoder", d)):
+        budgets[component] = _budget_value(body["unavailable"].get(component, 0))
+    surging = [c for c, s in (("engine", e), ("decoder", d)) if s == "SurgeThenDrain"]
+    drain_first = [c for c in ("engine", "decoder") if c not in surging]
+    if any(budgets[c] != PAIRING_DRAIN_FIRST_BUDGET for c in drain_first):
+        return None, "drain-first budget other than one"
+    if surging:
+        values = {budgets[c] for c in surging}
+        if len(values) != 1 or next(iter(values)) not in PAIRING_BUDGETS:
+            return None, "surge budget outside the axis"
+        budget = next(iter(values))
+    else:
+        budget = PAIRING_DRAIN_FIRST_BUDGET
+    delayed = {c for c in ("engine", "decoder") if body["delay"].get(c)}
+    slow = {frozenset(): "none", frozenset({"engine"}): "engine", frozenset({"decoder"}): "decoder",
+            frozenset({"engine", "decoder"}): "both"}[frozenset(delayed)]
+    start, target, second = body["pairing"], str(header.get("proto", "")), header.get("proto2")
+    if target == "clear":
+        if not start or second is not None:
+            return None, "clear of an empty protocol or a second change after it"
+        sequence = "v1 to empty"
+    elif not start:
+        if second is not None:
+            return None, "a second change after the adoption"
+        sequence = "empty to v1"
+    elif second is None:
+        sequence = "v1 to v2"
+    elif str(second) == "clear":
+        return None, "cleared mid-transition"
+    elif str(second) == start:
+        sequence = "v1 to v2 then back"
+    else:
+        sequence = "v1 to v2 to v3"
+    spanning = [kinds for kinds, members in zip(body["groups"], body["members"])
+                if {"engine", "decoder"} <= members]
+    if not body["groups"]:
+        grouping = "none"
+    elif len(body["groups"]) == 1 and spanning and spanning[0] == {"blueGreen"}:
+        grouping = "one group"
+    else:
+        return None, "a group other than one blueGreen group over both"
+    return (shape, e, d, slow, budget, sequence, grouping), ""
+
+
+def pairing_cells(cases):
+    """{cell: [cases]} over the pairing cases inside the matrix."""
+    cells = defaultdict(list)
+    for case in cases:
+        if case.pairing_cell is not None:
+            cells[case.pairing_cell].append(case)
+    return cells
+
+
+def pairing_empty_cells(cases):
+    cells = pairing_cells(cases)
+    return [cell for cell in pairing_product_cells() if cell not in cells]
+
+
 def load_cases(root=ISVCS):
     return [read_case(path) for path in sorted(root.glob("**/*.yaml"), key=lambda p: (p.parent.name, p.stem))]
 
@@ -1280,6 +1477,57 @@ def render_canary(cases):
     return out
 
 
+def render_pairing(cases):
+    pairing = [c for c in cases if c.mode == "pairing"]
+    inside = [c for c in pairing if c.pairing_cell is not None]
+    outside = [c for c in pairing if c.pairing_cell is None]
+    cells = pairing_cells(cases)
+    product = pairing_product_cells()
+    raw = len(pairing_all_cells())
+    driven = [cell for cell in product if cell in cells]
+    empty = pairing_empty_cells(cases)
+    out = ["## Pairing transitions", "",
+           f"{len(pairing)} cases change the pairing protocol (`mode=pairing`); {len(inside)} of them drive a cell "
+           f"of the matrix below and {len(outside)} lie outside it.", "",
+           "A pod is pairable when a serving pod of the other Component runs its protocol, or either protocol is "
+           "empty; each side keeps desired minus maxUnavailable pairable serving pods at every moment. The budget "
+           "axis is the maxUnavailable of the sides that surge; a drain-first or in-place side runs under one. "
+           "The in-place side is the engine.", "",
+           f"- product: {len(PAIRING_SHAPES)} shapes x {len(PAIRING_PAIRS)} strategy pairs x "
+           f"{len(PAIRING_SLOW_SIDES)} slow sides x {len(PAIRING_BUDGETS)} budgets x {len(PAIRING_SEQUENCES)} "
+           f"sequences x {len(PAIRING_GROUPINGS)} groupings = {raw} cells, {raw - len(product)} removed with a "
+           f"reason; {len(driven)} driven, {len(empty)} empty", ""]
+    out += ["### Removed cells", ""]
+    out += table(["reason", "cells"], [[reason, n] for reason, n in pairing_removed_by_reason().items()])
+    out += ["### Driven cells per shape and strategy pair (driven / in the product)", ""]
+    rows = []
+    for shape in PAIRING_SHAPES:
+        for e, d in PAIRING_PAIRS:
+            row = [shape, f"{PAIRING_STRATEGY_WORDS[e]} + {PAIRING_STRATEGY_WORDS[d]}"]
+            for sequence in PAIRING_SEQUENCES:
+                here = [cell for cell in product if cell[0] == shape and (cell[1], cell[2]) == (e, d) and cell[5] == sequence]
+                row.append(f"{sum(1 for cell in here if cell in cells)}/{len(here)}" if here else ".")
+            rows.append(row)
+    out += table(["shape", "engine + decoder"] + PAIRING_SEQUENCES, rows)
+    out += ["### Driven cells per axis value (driven / in the product)", ""]
+    rows = []
+    for axis, values in (("slow side", PAIRING_SLOW_SIDES), ("budget", PAIRING_BUDGETS),
+                         ("grouping", PAIRING_GROUPINGS)):
+        index = PAIRING_AXES.index(axis)
+        for value in values:
+            here = [cell for cell in product if cell[index] == value]
+            rows.append([axis, value, f"{sum(1 for cell in here if cell in cells)}/{len(here)}"])
+    out += table(["axis", "value", "driven / product"], rows)
+    out += ["### Hand-written cases in the matrix", ""]
+    hand = [c for c in inside if not c.description.startswith("[gen]")]
+    out += table(["case", "cell"], [[c.id, pairing_cell_label(c.pairing_cell)] for c in hand]) if hand else ["None.", ""]
+    out += ["### Pairing cases outside the matrix", ""]
+    out += table(["case", "why"], [[c.id, c.pairing_outside] for c in outside]) if outside else ["None.", ""]
+    out += ["### Empty cells", ""]
+    out += [f"- {pairing_cell_label(cell)}" for cell in empty] + [""] if empty else ["None.", ""]
+    return out
+
+
 def render_parked(cases, cells):
     out = ["## Parked", ""]
     parked = [c for c in cases if c.parked]
@@ -1327,6 +1575,7 @@ def render_markdown(cases, with_cases=False):
     out += render_matrix(cases, cells)
     out += render_crossings(cases)
     out += render_canary(cases)
+    out += render_pairing(cases)
     out += render_parked(cases, cells)
     out += ["## Not derivable from the headers", ""] + [f"- {line}" for line in NOT_DERIVABLE] + [""]
     if with_cases:
@@ -1348,6 +1597,9 @@ def render_json(cases):
         "parked_cells": [{"shape_family": f, "operation": o, "fault": list(r), "cases": ids, "issues": issues}
                          for (f, o, r), ids, issues, _k in parked_cells(cells)],
         "problems": [{"case": c.id, "problem": p} for c in cases for p in c.problems],
+        "pairing_cells": [{"cell": dict(zip(PAIRING_AXES, cell)), "cases": [c.id for c in members]}
+                          for cell, members in sorted(pairing_cells(cases).items())],
+        "pairing_empty_cells": [dict(zip(PAIRING_AXES, cell)) for cell in pairing_empty_cells(cases)],
         "not_derivable": NOT_DERIVABLE,
     }, indent=1, sort_keys=True)
 
@@ -1387,13 +1639,25 @@ def check(cases):
         if family in SHAPE_FAMILIES and operation in OPERATIONS and excluded(family, operation, row):
             problems.append(f"cell removed with a reason has a case: {family} / {operation} / "
                             f"{fault_row_label(row)}: {', '.join(c.id for c in members)}")
+    removed_pairing = pairing_removed_by_reason()
+    for reason, _predicate in PAIRING_REMOVED:
+        if not reason.strip():
+            problems.append("a pairing removal rule names no reason")
+        elif not removed_pairing.get(reason):
+            problems.append(f"pairing removal rule removes no cell: {reason}")
+    for cell, members in sorted(pairing_cells(cases).items()):
+        if pairing_removed_reason(cell):
+            problems.append(f"pairing cell removed with a reason has a case: {pairing_cell_label(cell)}: "
+                            f"{', '.join(c.id for c in members)}")
+    for cell in pairing_empty_cells(cases):
+        problems.append(f"pairing cell has no case: {pairing_cell_label(cell)}")
     for problem in problems:
         print(problem, file=sys.stderr)
     if problems:
         print(f"\ncoverage.py --check: FAIL — {len(problems)} problem(s)", file=sys.stderr)
         return 1
     print(f"coverage.py --check: OK — {len(cases)} cases, every header value classified, every story has a cell, "
-          f"every removed cell has a reason and no case")
+          f"every removed cell has a reason and no case, every pairing cell has a case")
     return 0
 
 

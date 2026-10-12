@@ -1,0 +1,20 @@
+# p13289: [gen] pairing v1 to empty 6P2D surge+recreate slow none mu0 ungrouped  mode=pairing Ne=6 Nd=2 Nr=0 ceil_e=9 ceil_d=2 ceil_r=0 co=none topo=pd proto=clear hold_max=240 inv_hard=L
+# reason: the protocol pair-v1 is removed from 6 engines (surge) and 2 decoders (recreate) with no rollout group: an empty protocol pairs with anything, so nothing is held and each side rolls under its own budget; the engine keeps 6 and the decoder keeps 1 pairable serving pods at every tick (desired minus maxUnavailable; a sustained dip fails the case); every Pairing hold lifts within 240 s; both sides end with no protocol label on any pod, traffic target or Service
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p13289 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 6
+    maxReplicas: 6
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 3, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  rollout:
+    pairingProtocol: pair-v1

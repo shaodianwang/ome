@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **7104**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **7621**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -55,6 +55,7 @@ Total generated cases: **7104**. The whole-corpus per-PR cap (hand + generated) 
 | gen-lift | 138 | p9250..p9387 |
 | gen-stale-record | 60 | p12200..p12259 |
 | gen-canary-stale-record | 4 | p12400..p12403 |
+| gen-pairing | 517 | p13000..p13516 |
 
 ### By topology
 
@@ -62,7 +63,7 @@ Total generated cases: **7104**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | engine | 2137 |
 | engine-mn | 1977 |
-| pd | 1626 |
+| pd | 2143 |
 | pd-mn | 1364 |
 
 ### By update strategy
@@ -70,10 +71,10 @@ Total generated cases: **7104**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (dormant: nothing rolls) | 914 |
-| InPlaceIfPossible | 602 |
+| InPlaceIfPossible | 681 |
 | InPlaceOnly | 281 |
-| RecreatePod | 1261 |
-| SurgeThenDrain | 4046 |
+| RecreatePod | 1452 |
+| SurgeThenDrain | 4293 |
 
 ### By failure verb / phase
 
@@ -386,6 +387,11 @@ Total generated cases: **7104**. The whole-corpus per-PR cap (hand + generated) 
 | packed:idle:start | 16 |
 | packed:new:load | 32 |
 | packed:new:start | 32 |
+| pairing:empty to v1 | 71 |
+| pairing:v1 to empty | 71 |
+| pairing:v1 to v2 | 120 |
+| pairing:v1 to v2 then back | 128 |
+| pairing:v1 to v2 to v3 | 127 |
 | pending:quota-kept@delete | 6 |
 | pending:quota-kept@down1 | 6 |
 | pending:quota-kept@up1 | 6 |
@@ -579,7 +585,7 @@ Total generated cases: **7104**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (unset — baseline) | 2475 |
+| (unset — baseline) | 2992 |
 | None | 2875 |
 | RecreateInstance | 1754 |
 
@@ -588,14 +594,14 @@ Total generated cases: **7104**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 6810 |
+| off | 7327 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 6924 |
+| (no pause around a repair) | 7441 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -604,7 +610,7 @@ Total generated cases: **7104**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 6924 |
+| (no pause around a repair) | 7441 |
 | fix | 90 |
 | none | 90 |
 
@@ -612,9 +618,9 @@ Total generated cases: **7104**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| bluegreen | 54 |
+| bluegreen | 501 |
 | canary | 30 |
-| none | 6078 |
+| none | 6148 |
 | ratio | 16 |
 | rolling | 892 |
 | seq | 34 |
@@ -771,7 +777,7 @@ Total generated cases: **7104**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 5172 |
+| (no break) | 5689 |
 | decoder | 166 |
 | engine | 1648 |
 | router | 118 |
@@ -792,6 +798,35 @@ Total generated cases: **7104**. The whole-corpus per-PR cap (hand + generated) 
 | migration | 12 |
 | scaledown | 12 |
 | surge | 16 |
+
+### By pairing strategy pair, engine+decoder (gen-pairing)
+
+| value | cases |
+|---|---|
+| in-place+surge | 79 |
+| recreate+recreate | 63 |
+| recreate+surge | 128 |
+| surge+recreate | 128 |
+| surge+surge | 119 |
+
+### By pairing slow side (gen-pairing)
+
+| value | cases |
+|---|---|
+| both | 84 |
+| decoder | 106 |
+| engine | 82 |
+| none | 245 |
+
+### By pairing sequence (gen-pairing)
+
+| value | cases |
+|---|---|
+| empty to v1 | 71 |
+| v1 to empty | 71 |
+| v1 to v2 | 120 |
+| v1 to v2 then back | 128 |
+| v1 to v2 to v3 | 127 |
 
 ### By Instances per Component (size and router-gang families)
 

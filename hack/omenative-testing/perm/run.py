@@ -244,6 +244,10 @@ INV_NAMES = {"A": "status-truth", "B": "endpoints-membership", "C": "pair-alive"
 # are kinds inside A and I. Removing a pair from this set turns it hard.
 INV_ADVISORY = {("L", "pairable-capacity"), ("M", "traffic-backed"),
                 ("A", "serving-count-drift"), ("I", "deadline-without-reason")}
+# The advisory classes a header turns hard for its own case (inv_hard=L,M):
+# a sustained violation then fails the case instead of being reported, for
+# a family whose point is exactly that reading.
+INV_HARDENABLE = {"L", "M"}
 # L: a dip below the pairable floor is debounced like the capacity floor —
 # consecutive ticks spanning at least FLOOR_SUSTAIN_S.
 INV_SUSTAIN_L = 1 + math.ceil(FLOOR_SUSTAIN_S / INV_TICK_S)
@@ -1262,9 +1266,12 @@ def _inv_new(case_id, hdr, N=None, max_unavail=None):
     nothing."""
     off = str(hdr.get("inv_off", "") or "")
     opted = {c for c in str(hdr.get("inv_on", "") or "").split(",") if c}
+    hard = {c for c in str(hdr.get("inv_hard", "") or "").split(",") if c}
     return {
         "case_id": case_id,
         "off": off,
+        # The advisory classes this case fails on (inv_hard=).
+        "hard": hard,
         "a_on": off not in ("A", "all"),
         "b_on": off not in ("B", "all"),
         "c_on": off not in ("C", "all"),
@@ -1375,7 +1382,7 @@ def _inv_hit(inv, hits, streak_key, viol_key, sustain, now, detail):
     inv["streaks"][streak_key] = n
     if n < sustain:
         return
-    advisory = (viol_key[0], viol_key[1]) in INV_ADVISORY
+    advisory = (viol_key[0], viol_key[1]) in INV_ADVISORY and viol_key[0] not in inv.get("hard", ())
     store = inv.setdefault("advisory", {}) if advisory else inv["viol"]
     v = store.get(viol_key)
     if v is None:
@@ -2567,17 +2574,26 @@ def invariant_checks(inv, verdict, notes, checks):
         last = time.strftime("%H:%M:%S", time.localtime(v["last"]))
         return f"[first {first}, last {last}, {v['n']} tick(s)]"
 
-    # The advisory readings (INV_ADVISORY): their lines never move the verdict.
+    # The advisory readings (INV_ADVISORY): their lines never move the verdict,
+    # except for a class the header made hard (inv_hard=), whose violations
+    # sit in viol with the rest.
     advisory = inv.get("advisory") or {}
+    hard = inv.get("hard") or set()
+    word = {x: ("hard" if x in hard else "advisory") for x in ("L", "M")}
     if inv.get("l_on") and not inv.get("l_seen"):
-        checks.append("  ⓘ invariant L (pairable-capacity, advisory) never saw a Component at or above its pairable floor — vacuous (no reading made)")
+        checks.append(f"  ⓘ invariant L (pairable-capacity, {word['L']}) never saw a Component at or above its pairable floor — vacuous (no reading made)")
     elif inv.get("l_on") and not inv.get("l_routing_seen"):
         checks.append("  ⓘ invariant L: no routed Service observed — pairable capacity counted the serving gate, not rotation membership")
     if inv.get("m_on") and not inv.get("m_seen"):
-        checks.append("  ⓘ invariant M (traffic-backed, advisory) never saw a weighted traffic target — vacuous (no reading made)")
+        checks.append(f"  ⓘ invariant M (traffic-backed, {word['M']}) never saw a weighted traffic target — vacuous (no reading made)")
     for x, seen, ticks, held in (("L", inv.get("l_seen"), inv.get("l_ticks", 0), "pairable capacity stayed at or above its floor"),
                                  ("M", inv.get("m_seen"), inv.get("m_ticks", 0), "every weighted traffic target had a serving pod on its revision")):
-        if inv.get(f"{x.lower()}_on") and seen and not any(k[0] == x for k in advisory):
+        if not (inv.get(f"{x.lower()}_on") and seen):
+            continue
+        if x in hard:
+            if not any(k[0] == x for k in inv["viol"]):
+                checks.append(f"  ✓ invariant {x} ({INV_NAMES[x]}, hard): {held} across {ticks} tick(s)")
+        elif not any(k[0] == x for k in advisory):
             checks.append(f"  ⓘ invariant {x} ({INV_NAMES[x]}, advisory): {held} across {ticks} tick(s)")
     for key, v in sorted(advisory.items()):
         checks.append(f"  ⚠ invariant {key[0]} ({key[1]}, advisory — reported, not failed): {v['detail']} {span_of(v)}")
@@ -2591,7 +2607,9 @@ def invariant_checks(inv, verdict, notes, checks):
                                   ("H", inv.get("h_on", False) and inv.get("h_seen", False)),
                                   ("I", inv.get("i_on", False) and inv.get("i_seen", False)),
                                   ("J", inv.get("j_on", False) and inv.get("j_seen", False)),
-                                  ("K", inv.get("k_on", False) and inv.get("k_seen", False))) if on]
+                                  ("K", inv.get("k_on", False) and inv.get("k_seen", False)),
+                                  ("L", "L" in hard and inv.get("l_on", False) and inv.get("l_seen", False)),
+                                  ("M", "M" in hard and inv.get("m_on", False) and inv.get("m_seen", False))) if on]
         if active:
             checks.append(f"  ✓ continuous invariants held ({'+'.join(active)}): no sustained "
                           f"{' / '.join(INV_NAMES[x] for x in active)} violation")
@@ -6355,6 +6373,13 @@ def _inv_on_ok(v):
     """inv_on= names opt-in invariant classes, comma-separated, each once."""
     parts = str(v).split(",")
     return all(part in INV_OPT_IN for part in parts) and len(set(parts)) == len(parts)
+
+
+def _inv_hard_ok(v):
+    """inv_hard= names advisory invariant classes made hard for the case,
+    comma-separated, each once."""
+    parts = str(v).split(",")
+    return all(part in INV_HARDENABLE for part in parts) and len(set(parts)) == len(parts)
 
 
 def _fault_ok(v):
@@ -17117,6 +17142,10 @@ HDR_VALIDATORS = {
     "proto": _pairing_token,
     "proto2": _pairing_token,
     "hold": lambda v: v == 1,
+    # hold_max=<s> (mode=pairing): the longest a Pairing hold may stay on a
+    # bumped Component, and no such hold may linger once the transition
+    # converged; every hold is a bounded wait.
+    "hold_max": lambda v: isinstance(v, int) and v >= 1,
     "pkill": lambda v: v == 1,
     "scale_e": lambda v: isinstance(v, int) and v >= 1,
     "scale_d": lambda v: isinstance(v, int) and v >= 1,
@@ -17227,6 +17256,10 @@ HDR_VALIDATORS = {
     # separated (J=no auto-recovery record in the audit ledger, K=no required
     # hostname NotIn term on a live pod of the service).
     "inv_on": _inv_on_ok,
+    # inv_hard=<classes>: the named advisory classes (L=pairable capacity,
+    # M=traffic backed by pods) are hard for this case: a sustained
+    # violation fails it instead of being reported.
+    "inv_hard": _inv_hard_ok,
     # pool=packed (rollout mode, with fault=crashloop:new or crashloop:idle):
     # once the service has settled, fillers take the spare CPU of every node
     # a case pod can be placed on, so the pods have exactly the room they
@@ -18379,7 +18412,7 @@ def validate_case_file(path):
         errs.append(f"{path}:1: blocked=1 requires a fault= header")
     if mode == "pairing" and "proto" not in fields:
         errs.append(f"{path}:1: mode=pairing needs proto=<token|clear> (the transition target)")
-    for k in ("hold", "pkill"):
+    for k in ("hold", "hold_max", "pkill"):
         if k in fields and mode != "pairing":
             errs.append(f"{path}:1: {k}= is a pairing-mode knob (mode=pairing)")
     for k in ("proto", "proto2", "scale_e", "scale_d"):
@@ -18392,7 +18425,7 @@ def validate_case_file(path):
             errs.append(f"{path}:1: pkill=1 kills the last old-cohort decoder — needs Nd>0")
         if str(fields.get("canary", "")).lower() == "manual":
             errs.append(f"{path}:1: mode=pairing drives canary groups auto-only (canary=manual needs the promote pump)")
-        if fields.get("expect") == "reject" and any(k in fields for k in ("proto2", "pkill", "scale_e", "scale_d", "pause", "hold")):
+        if fields.get("expect") == "reject" and any(k in fields for k in ("proto2", "pkill", "scale_e", "scale_d", "pause", "hold", "hold_max")):
             errs.append(f"{path}:1: expect=reject with mode=pairing asserts the protocol PATCH is denied — no rotation-phase knobs apply")
     if fields.get("expect") == "fail" and (mode != "migrate" or "fault" not in fields):
         errs.append(f"{path}:1: expect=fail is the migrate-mode bounded-failure contract — needs mode=migrate + fault=")
@@ -24361,15 +24394,74 @@ def _pairing_patch(case_id, target, extra=None, comps=()):
     return r.returncode == 0, msg
 
 
-def _sample_rollout_holds(case_id, bumped, holds):
+def _sample_rollout_holds(case_id, bumped, holds, spans=None, now=None):
     """One rolloutHold observation: for each bumped Component record the gate
-    (status.components.<c>.lifecycle.rolloutHold.gate) currently reported."""
+    (status.components.<c>.lifecycle.rolloutHold.gate) currently reported,
+    and with `spans` keep the Pairing hold spans (_note_hold_spans). Returns
+    {component: gate} for the Components reporting a hold."""
     st = fetch_status(case_id)
     comps = st.get("components") or {}
+    gates = {}
     for c in bumped:
         rh = ((comps.get(c) or {}).get("lifecycle") or {}).get("rolloutHold")
         if isinstance(rh, dict) and rh.get("gate"):
             holds.setdefault(c, {})[rh["gate"]] = rh.get("reason", "")[:160]
+            gates[c] = rh["gate"]
+    if spans is not None:
+        _note_hold_spans(spans, bumped, gates, time.time() if now is None else now)
+    return gates
+
+
+def _note_hold_spans(spans, comps, gates, now, gate="Pairing"):
+    """Keep `spans` ({component: [[first seen, last seen, cleared at | None], ...]})
+    current with one observation of the gates the Components report: a
+    hold of `gate` opens a span on its first sample and the span closes on
+    the first sample that reports it no longer."""
+    for c in comps:
+        open_span = next((s for s in spans.get(c, ()) if s[2] is None), None)
+        if gates.get(c) == gate:
+            if open_span is None:
+                spans.setdefault(c, []).append([now, now, None])
+            else:
+                open_span[1] = now
+        elif open_span is not None:
+            open_span[2] = now
+
+
+def pairing_hold_bound_checks(spans, hold_max, now, converged, verdict, notes, checks):
+    """The bounded-wait verdict over the Pairing holds a case observed. With
+    hold_max=<s>: the longest span (an open one measured to `now`) is at
+    most that long, and once the transition converged no hold is still
+    reported; without it the longest span is reported."""
+    longest = None   # (seconds, component, still open)
+    for c, lst in sorted(spans.items()):
+        for first, _last, cleared in lst:
+            length = (now if cleared is None else cleared) - first
+            if longest is None or length > longest[0]:
+                longest = (length, c, cleared is None)
+    if longest is None:
+        if hold_max:
+            checks.append(f"  ⓘ hold_max={hold_max}: no Pairing hold was observed, nothing to bound")
+        return verdict
+    length, c, still = longest
+    lingering = sorted(c for c, lst in spans.items() if any(s[2] is None for s in lst))
+    if not hold_max:
+        checks.append(f"  ⓘ longest Pairing hold observed: {c} for {length:.0f}s" + (" (still reported at the end)" if still else ""))
+        return verdict
+    if length > hold_max:
+        verdict = "FAIL"
+        notes.append(f"Pairing hold on {c} lasted {length:.0f}s > hold_max {hold_max}s")
+        checks.append(f"  ✗ hold_max={hold_max}: a Pairing hold on {c} lasted {length:.0f}s"
+                      + (" and was still reported at the end" if still else "")
+                      + " — the hold did not lift when its peer served")
+    elif converged and lingering:
+        verdict = "FAIL"
+        notes.append(f"Pairing hold still reported on {lingering} after convergence")
+        checks.append(f"  ✗ hold_max={hold_max}: rolloutHold gate=Pairing still reported on {lingering} after the "
+                      f"transition converged — a hold with nothing left to wait for is stale status")
+    else:
+        checks.append(f"  ✓ hold_max={hold_max}: the longest Pairing hold ({c}) lasted {length:.0f}s and every hold lifted")
+    return verdict
 
 
 def pairing_surface_checks(case_id, ctx, target, bumped, verdict, notes, checks, known_gap=()):
@@ -24481,7 +24573,11 @@ def _pairing(case_id, yaml_file, desc, hdr):
     harness, not the product, destroys the pair), scale_e=/scale_d= (re-target
     replicas mid-roll), proto2= (re-patch the protocol once >=1 new-cohort pod
     is READY — a re-target over a partially-landed intermediate; converge on
-    the FINAL cohort with no Instance stranded on the intermediate one).
+    the FINAL cohort with no Instance stranded on the intermediate one; a
+    proto2= equal to the starting protocol is a rollback mid-transition:
+    every pod ends labelled with the starting protocol and none stays on
+    the abandoned cohort). hold_max=<s> bounds every Pairing hold observed
+    and fails one still reported after convergence.
 
     expect=reject inverts the case into an update-time admission negative: the
     Phase-2 patch itself must be DENIED (reason= substring asserted), because
@@ -24555,11 +24651,18 @@ def _pairing(case_id, yaml_file, desc, hdr):
     # ctx["N"] becomes the floor basis min(start, target) once a scale fires.
     want = dict(N)
     holds = {}
+    spans = {}             # Pairing hold spans per bumped Component (_note_hold_spans)
+    hold_max = hdr.get("hold_max")
     hold_last = 0.0
     pk_fired = False
     sc_fired = False
     p2_fired = False
     pre_final = None       # hash universe before the proto2 re-patch (X-2 check)
+    # A re-target back to the starting protocol: the starting revision can
+    # be minted again under its old hash, so the hash alone cannot tell the
+    # cohorts apart; the abandoned cohort's hashes and the pods' labels do.
+    rollback = proto2 is not None and final_target == from_proto
+    mid_hashes = set()
     pause_done = pmode == ""
     verdict, notes, checks = "PASS", [], []
 
@@ -24584,8 +24687,11 @@ def _pairing(case_id, yaml_file, desc, hdr):
             a, rd, up = ctx["agg"].get(c, (0, 0, 0))
             if a != want[c] or rd != want[c]:
                 return False
-            if pre_final is not None:
-                live = [p for p in ctx["pod_state"].values() if p and p["alive"] and p["comp"] == c]
+            live = [p for p in ctx["pod_state"].values() if p and p["alive"] and p["comp"] == c]
+            if rollback and p2_fired:
+                if not _rolled_back_to_start(live, mid_hashes, final_target):
+                    return False
+            elif pre_final is not None:
                 if not live or any(not p.get("hash") or p["hash"] in pre_final for p in live):
                     return False
             elif up != want[c]:
@@ -24601,7 +24707,7 @@ def _pairing(case_id, yaml_file, desc, hdr):
         progressed = progressed or progressed_now()
         if now - hold_last >= INV_TICK_S:
             hold_last = now
-            _sample_rollout_holds(case_id, bumped, holds)
+            _sample_rollout_holds(case_id, bumped, holds, spans, now)
 
         # Mid-transition verbs, one-shot each, gated on observed progress.
         if progressed and not pause_done:
@@ -24617,7 +24723,7 @@ def _pairing(case_id, yaml_file, desc, hdr):
                 _read_one(ctx)
                 if time.time() - hold_last >= INV_TICK_S:
                     hold_last = time.time()
-                    _sample_rollout_holds(case_id, bumped, holds)
+                    _sample_rollout_holds(case_id, bumped, holds, spans, hold_last)
             new_names = {n for n, p in ctx["pod_state"].items()
                          if p and p["alive"] and p["comp"] in bumped and n not in names_at_settle}
             rd1, _ = new_pod_split()
@@ -24671,7 +24777,10 @@ def _pairing(case_id, yaml_file, desc, hdr):
         # measured in seconds.
         if proto2 is not None and not p2_fired and new_pod_split()[0] > 0:
             p2_fired = True
-            pre_final = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set()))
+            if rollback:
+                mid_hashes = set(ctx.get("seen_hashes", set())) - set(ctx["old_hashes"])
+            else:
+                pre_final = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set()))
             print(f"  Phase 3a: re-patch pairingProtocol {target!r}→{final_target!r} mid-transition")
             ok2, msg2 = _pairing_patch(case_id, final_target)
             if not ok2:
@@ -24726,6 +24835,8 @@ def _pairing(case_id, yaml_file, desc, hdr):
                       f"{final_target!r} cohort at target capacity")
         if pre_final is not None:
             checks.append("  ✓ proto2: no Instance stranded on the intermediate cohort (all pods past the pre-re-patch hash universe)")
+        elif rollback and p2_fired:
+            checks.append(f"  ✓ rollback: no Instance left on the abandoned cohort; every pod back on {final_target!r}")
     # Isolation: the router never participates in pairing — a protocol change
     # must not surge or rotate it.
     for c in sorted(controls):
@@ -24781,14 +24892,37 @@ def _pairing(case_id, yaml_file, desc, hdr):
         checks.append(f"  ⓘ rolloutHold gates observed mid-transition: {seen_gates}" +
                       (" (incl. Pairing)" if pairing_held else ""))
     if state == "CONVERGED":
-        # A Pairing hold lingering after convergence would be stale status —
-        # reported, not failed, until the clear-on-progress contract is pinned.
-        st = fetch_status(case_id)
-        lingering = [c for c in sorted(bumped)
-                     if ((((st.get("components") or {}).get(c) or {}).get("lifecycle") or {}).get("rolloutHold") or {}).get("gate") == "Pairing"]
-        if lingering:
-            checks.append(f"  ⚠ rolloutHold gate=Pairing still reported on {lingering} after convergence — stale hold (informational)")
+        if hold_max:
+            # The bounded wait for the holds to leave status: two more
+            # samples after convergence absorb the status writer's lag.
+            deadline = time.time() + 2 * INV_TICK_S
+            while True:
+                now = time.time()
+                gates = _sample_rollout_holds(case_id, bumped, holds, spans, now)
+                if "Pairing" not in gates.values() or now >= deadline:
+                    break
+                time.sleep(min(INV_TICK_S, max(0.0, deadline - now)))
+        else:
+            # A Pairing hold lingering after convergence would be stale status —
+            # reported, not failed, until the clear-on-progress contract is pinned.
+            st = fetch_status(case_id)
+            lingering = [c for c in sorted(bumped)
+                         if ((((st.get("components") or {}).get(c) or {}).get("lifecycle") or {}).get("rolloutHold") or {}).get("gate") == "Pairing"]
+            if lingering:
+                checks.append(f"  ⚠ rolloutHold gate=Pairing still reported on {lingering} after convergence — stale hold (informational)")
+    verdict = pairing_hold_bound_checks(spans, hold_max, time.time(), state == "CONVERGED", verdict, notes, checks)
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
+def _rolled_back_to_start(live, mid_hashes, start):
+    """A Component is back on its starting protocol: it has pods, none of
+    them runs a revision of the abandoned cohort (the hashes first seen
+    between the two patches) and every one carries the starting protocol
+    label (the starting revision may be minted again under its old hash,
+    so the label tells the cohorts apart where the hash cannot)."""
+    if not live:
+        return False
+    return all(p.get("hash") not in mid_hashes and p.get("pairing", "") == start for p in live)
 
 
 def _canary_group(ctx):

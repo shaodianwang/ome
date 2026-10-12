@@ -474,6 +474,18 @@ EVAL_SOFT_FEATURES: list[dict[str, str]] = [
         ),
     }
     for feature in ("gen-stale-record", "gen-canary-stale-record")
+] + [
+    {
+        "feature": "gen-pairing",
+        "owner": "slin1237",
+        "expires": "2026-11-15",
+        "reason": (
+            "pairing transition matrix: the pairable floor on both sides is "
+            "hard in this family, so its first main rounds classify the cells "
+            "where today's gates keep a weaker floor; advisory until those are "
+            "issues and fixes"
+        ),
+    },
 ]
 
 
