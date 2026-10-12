@@ -4,9 +4,6 @@
 {{- if ne $a.migration.apiVersion "v1" }}
 {{- fail "alfred.migration.apiVersion must be v1 when set" }}
 {{- end }}
-{{- if not $a.simulation.configMapName }}
-{{- fail "alfred.migration.apiVersion requires alfred.simulation.configMapName" }}
-{{- end }}
 {{- end }}
 # Alfred, the GPU cluster caretaker. Every replica runs the read-only
 # observation loop; only the leader decides and dispatches.

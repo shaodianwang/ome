@@ -997,9 +997,10 @@ alfred:
     configMapName: ""
     timeout: 10s
   # Opt-in to the OME v1 migration API. "v1" lets alfred dispatch migrations:
-  # it requires simulation.configMapName, installs the fail-closed admission
-  # guard for alfred's ServiceAccount, and pre-creates the durable dispatch
-  # journal. Empty keeps alfred recommend-only whatever config.mode says.
+  # it installs the fail-closed admission guard for alfred's ServiceAccount and
+  # pre-creates the durable dispatch journal. Without simulation.configMapName
+  # only moves onto a new TPU slice, which need no simulation, are dispatched.
+  # Empty keeps alfred recommend-only whatever config.mode says.
   migration:
     apiVersion: ""
     acknowledgementTimeout: 2m
@@ -1023,7 +1024,8 @@ alfred:
     decisionLoopInterval: 5m
     observationLoopInterval: 30s
     earlyTickOn: [NodeConditionChange, NodeMaintenanceChange]
-    # Scheduler simulation is mandatory before execution. Profiles are keyed by
+    # A move alfred places needs a scheduler simulation before execution; a move
+    # onto a new TPU slice needs none. Profiles are keyed by
     # the effective replacement Pod schedulerName. Execution also requires
     # migration.apiVersion=v1 and the verified admission guard. The shipped
     # default is intentionally empty. Copy the exact worker --print-profile

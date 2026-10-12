@@ -154,22 +154,26 @@ and carry any change into `templates/alfred/` and the `alfred` values block.
 
 Alfred is off by default. `alfred.enabled: true` installs it recommend-only:
 it publishes metrics, Events and the `alfred-recommendations` ConfigMap and
-writes nothing else. Execution needs three explicit opt-ins:
+writes nothing else. Execution needs two explicit opt-ins:
 
-1. `alfred.simulation.configMapName`: an existing ConfigMap holding
-   `workers.json` and the scheduler configuration files it references, mounted
-   at `/etc/alfred-simulation` (profile identities come from
-   `alfred-simulator --print-profile`). An identity is valid for one Alfred
-   image only: it covers the worker's Go build information, including the
-   `.alfred-oss-ref` commit, and Alfred exits at startup on a mismatch. A
-   cluster with dispatch on pins `alfred.image.tag` and changes the tag and
-   its registry together.
-2. `alfred.migration.apiVersion: v1`: installs the fail-closed
+1. `alfred.migration.apiVersion: v1`: installs the fail-closed
    ValidatingAdmissionPolicy that limits alfred's ServiceAccount to adding one
    migration-request annotation, and pre-creates the `alfred-dispatch-state`
    journal. The journal carries `helm.sh/resource-policy: keep`; never prune or
    recreate it while requests may be unresolved.
-3. `alfred.config.mode: execute`.
+2. `alfred.config.mode: execute`.
+
+A move alfred places itself (a GPU move) also needs a scheduler simulation
+worker: `alfred.simulation.configMapName` names an existing ConfigMap holding
+`workers.json` and the scheduler configuration files it references, mounted at
+`/etc/alfred-simulation` (profile identities come from
+`alfred-simulator --print-profile`). An identity is valid for one Alfred image
+only: it covers the worker's Go build information, including the
+`.alfred-oss-ref` commit, and Alfred exits at startup on a mismatch, so a
+cluster with a worker pins `alfred.image.tag` and changes the tag and its
+registry together. Without a worker, alfred dispatches only moves onto a new TPU
+slice (`tpuSliceMigrationEnabled`), which need no simulation, and withholds the
+others as `SimulationUnavailable`.
 
 `alfred.config` is rendered verbatim into the `alfred-config` ConfigMap and
 hot-reloaded. Set `policies.nodeHealth.triggerConditions` to the node
