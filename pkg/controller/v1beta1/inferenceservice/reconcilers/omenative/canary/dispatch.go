@@ -148,8 +148,9 @@ func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 		// uses CreateOrUpdate, whose Gets are cache-served and cheap, and
 		// recreates a missing Service. Gating ensure on revision-set
 		// convergence would strand the weighted-route consumer on a
-		// dead backend.
-		for hash := range perRev[comp] {
+		// dead backend. The revisions are walked in sorted order so a pass
+		// is repeatable.
+		for _, hash := range coordination.SortedRevisionHashes(perRev[comp]) {
 			if hash == "" {
 				continue
 			}
