@@ -1,0 +1,64 @@
+# An in-place patch lands and the pod never passes its probes again; at the
+# deadline the ladder counts the wave and parks the attempt with the row
+# Failed and the patched pod kept. A corrective revision then lands: it is
+# a different ladder subject than the parked attempt's target and only the
+# image changed, so a fresh in-place attempt at the corrective revision
+# replaces the parked one and patches the pod again.
+scenario: parked-down-corrective-inplace
+arrows:
+  - T-ready-inplace
+  - T-inplace-deadline
+  - T-failedparked-corrective-inplace
+cells:
+  - instance/Failed/Parked/spec.revision/boundary@T-failedparked-corrective-inplace
+  - instance/Failed/Parked/spec.revision/after@T-failedparked-corrective-inplace
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation and its gate reads False, which the pass already drove, so the drain check passes and the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.servingOff[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the image patch lands while the source is out of rotation
+  - tick: 6
+    note: the patched pod's containers drop readiness and stay down, which holds the promote
+    events:
+      - pod.containersNotReady[source]: {pod: {index: 0}}
+  - tick: 7
+    note: the operation deadline elapses on a patched pod that never came back; the ladder counts the wave and the in-place attempt is parked with the row Failed, the pod kept
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 8
+    note: a corrective revision lands; it is a different ladder subject and only the image changed, so a fresh in-place attempt at the corrective revision replaces the parked one and patches the pod
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 9
+    note: the pass issues the image patch for the corrective revision and restamps the revision label on the pod
+  - tick: 10
+    note: the patched pod comes up on the corrective image and enters rotation, so the in-place attempt completes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}

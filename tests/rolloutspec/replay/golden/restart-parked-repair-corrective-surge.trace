@@ -1,0 +1,43 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 0 below desired 1 (incarnation=2)
+tick=2 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=2 ordinal=0
+tick=2 pass result=after:5s
+tick=3 note the rebuilt pod crash-loops and is older than the grace when the wedge is read, so the row fails with its operation preserved
+tick=3 apply clock.advance by=2m0s now=t+2m0s
+tick=3 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff now=t+2m0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=3 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff
+tick=3 pass result=after:5s
+tick=4 note a corrective revision lands; the row is off the roll target, so the roll replaces the parked repair with a fresh surge attempt and creates the replacement beside the wedged pod
+tick=4 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+2m0s
+tick=4 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=4 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=4 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)
+tick=4 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=2 ordinal=1
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the replacement becomes Ready and enters rotation, so the handoff moves to the drain and deletes the wedged source, which never served
+tick=5 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+2m0s
+tick=5 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-1 now=t+2m0s
+tick=5 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c waiting=SourceUnrouted strategy=SurgeThenDrain started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=SourceUnrouted message=SourceUnrouted: source pod svc-a-engine-0-default-0 is out of the routed Service while its surge replacement is not serving yet; the surge did not take it out} precondition=ok
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
+tick=5 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-6f8b1e6c waiting=SourceUnrouted strategy=SurgeThenDrain started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=SourceUnrouted message=SourceUnrouted: source pod svc-a-engine-0-default-0 is out of the routed Service while its surge replacement is not serving yet; the surge did not take it out} precondition=ok
+tick=5 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the wedged source is gone, so the replacement is promoted and the row reads Ready on the corrective revision
+tick=6 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=6 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=SourceUnrouted message=SourceUnrouted: source pod svc-a-engine-0-default-0 is out of the routed Service while its surge replacement is not serving yet; the surge did not take it out} precondition=ok
+tick=6 row=0 write no-op precondition=no-change
+tick=6 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-6f8b1e6c activeOrdinal=1 readySince=t+2m0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=SourceUnrouted message=SourceUnrouted: source pod svc-a-engine-0-default-0 is out of the routed Service while its surge replacement is not serving yet; the surge did not take it out} precondition=ok
+tick=6 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c complete (activeOrdinal=1)
+tick=6 hold cleared
+tick=6 pass result=requeue

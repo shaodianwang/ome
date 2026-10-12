@@ -1,0 +1,57 @@
+tick=1 note the index is planned and no row exists, so the Create pass opens the attempt
+tick=1 hold cleared
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the pull wedges immediately, but the pod is younger than the grace, so the attempt keeps polling
+tick=2 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-0 reason=ImagePullBackOff now=t+0s
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the grace elapses; with no ladder configured the revision is held outright and the wedged pod is left standing
+tick=3 apply timer.stuckPodGrace to=t+5m1s now=t+5m1s
+tick=3 hold cleared
+tick=3 row=0 write no-op precondition=no-change
+tick=3 retryblock target=svc-a-engine-882059bb persist nil→{state=Held attempts=1 reason=ImagePullBackOff}
+tick=3 warn retryHeld target=svc-a-engine-882059bb attempts=1 reason=ImagePullBackOff
+tick=3 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=3 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=ImagePullBackOff: workload-caused failure; revision svc-a-engine-882059bb held for retry — fix the image/config and publish a corrected revision
+tick=3 pass result=after:5s
+tick=4 note the operator arms a retry ladder and corrects the image; the wedged pod is off the new revision, so the roll re-enters as a recreate that drains it and the held block of the first revision is removed
+tick=4 apply config.changed[updateRetry] updateRetry={maxAttempts=3 initialDelay=1h maxDelay=2h multiplier=2} now=t+5m1s
+tick=4 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+5m1s
+tick=4 row=0 write incarnation=2 phase=Updating runningRevision=nil targetRevision=svc-a-engine-6f8b1e6c readySince=nil op=op#2{type=Update step=Drain target=svc-a-engine-6f8b1e6c reason=revision  -> svc-a-engine-6f8b1e6c strategy=RecreatePod started=t+5m1s lastProgressAt=t+5m1s deadline=t+35m1s} lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=4 event Normal RecreateUpdateStarted OMENative component=engine instance=0 recreate (revision  -> svc-a-engine-6f8b1e6c, incarnation=2)
+tick=4 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the wedged pod is gone, so the rebuild lands at the corrected revision
+tick=5 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+5m1s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod create name=svc-a-engine-0-default-0 revision=6f8b1e6c incarnation=2 ordinal=0
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the deadline elapses on a rebuilt pod that never came up; the ladder counts the wave and the attempt is parked with the row Failed
+tick=6 apply timer.operationDeadline to=t+35m2s now=t+35m2s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 hold cleared
+tick=6 row=0 write no-op precondition=no-change
+tick=6 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Backoff attempts=1 nextRetryAt=t+1h35m2s reason=DeadlineExceeded}
+tick=6 row=0 write incarnation=2 phase=Failed runningRevision=nil targetRevision=svc-a-engine-6f8b1e6c readySince=nil op=op#2{type=Update step=Parked target=svc-a-engine-6f8b1e6c reason=revision  -> svc-a-engine-6f8b1e6c waiting=RetryBlock strategy=RecreatePod started=t+5m1s lastProgressAt=t+5m1s deadline=nil} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
+tick=6 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable) and counted on the revision's retry ladder
+tick=6 pass result=after:5s
+tick=7 note the parked pod is deleted outright by another hand; the row stays Failed with the attempt kept and no pod left
+tick=7 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+35m2s
+tick=7 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
+tick=7 pass result=after:1h0m0s
+tick=8 note the block comes due; the row records no running revision for the roll to move it from, so the Create pass opens a fresh Create attempt pinned to the target over the parked one and the block flips to RetryInProgress
+tick=8 apply timer.retryAt to=t+1h35m3s now=t+1h35m3s
+tick=8 hold cleared
+tick=8 row=0 write incarnation=2 phase=Creating runningRevision=nil targetRevision=svc-a-engine-6f8b1e6c readySince=nil op=op#3{type=Create step=CreatePods target=svc-a-engine-6f8b1e6c started=t+1h35m3s lastProgressAt=t+1h35m3s deadline=t+2h5m3s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
+tick=8 retryblock target=svc-a-engine-6f8b1e6c persist {state=Backoff attempts=1 nextRetryAt=t+1h35m2s reason=DeadlineExceeded}→{state=RetryInProgress attempts=1 nextRetryAt=t+1h35m2s reason=DeadlineExceeded}
+tick=8 pod create name=svc-a-engine-0-default-0 revision=6f8b1e6c incarnation=2 ordinal=0
+tick=8 pass result=after:5s
+tick=9 note the block is read as due again; it admitted exactly one attempt and the rebuilt pod is still coming up
+tick=9 apply timer.retryAt to=t+1h35m3s now=t+1h35m3s
+tick=9 hold cleared
+tick=9 pass result=after:5s

@@ -1,0 +1,60 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod template changes, so the roll drains the pod for a recreate
+tick=2 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=2 gate consult strategy=RecreatePod surge=0 unavail=0 verdict=allow
+tick=2 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Drain target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Normal RecreateUpdateStarted OMENative component=engine instance=0 recreate (revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c, incarnation=2)
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=2 hold cleared
+tick=2 pass result=after:5s
+tick=3 note the pod leaves rotation, so it is deleted
+tick=3 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the old pod is gone, so the rebuild lands at the new revision
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-0-default-0 revision=6f8b1e6c incarnation=2 ordinal=0
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the deadline elapses on a rebuilt pod that never came up; the ladder counts the wave and the attempt is parked with the row Failed
+tick=5 apply timer.operationDeadline to=t+30m1s now=t+30m1s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 hold cleared
+tick=5 row=0 write no-op precondition=no-change
+tick=5 retryblock target=svc-a-engine-6f8b1e6c persist nil→{state=Backoff attempts=1 nextRetryAt=t+1h30m1s reason=DeadlineExceeded}
+tick=5 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Parked target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c waiting=RetryBlock strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
+tick=5 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable) and counted on the revision's retry ladder
+tick=5 pass result=after:5s
+tick=6 note the pod comes up and is gated serving, so the parked set serves in full and the row reads as the roll in progress with the attempt still parked
+tick=6 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+30m1s
+tick=6 apply pod.servingOn[source] pod=svc-a-engine-0-default-0 now=t+30m1s
+tick=6 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
+tick=6 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Parked target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c waiting=RetryBlock strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
+tick=6 pass result=after:1h0m0s
+tick=7 note the serving pod is deleted outright by another hand; no live pod of the parked set is left and no repair takes the loss, so the row returns to Failed on this tick with the attempt kept
+tick=7 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+30m1s
+tick=7 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
+tick=7 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Parked target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c waiting=RetryBlock strategy=RecreatePod started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
+tick=7 pass result=after:1h0m0s
+tick=8 note a further pass finds the parked row with no pod; the fresh start that would rebuild it still waits on the target's ladder
+tick=8 hold gate=RetryBlock target=svc-a-engine-6f8b1e6c reason=update to svc-a-engine-6f8b1e6c in backoff after 1 failed attempt(s): DeadlineExceeded
+tick=8 pass result=after:1h0m0s
+tick=9 note the block comes due; the update pass runs ahead of the Create pass and re-opens the parked row as a fresh recreate at a new incarnation, which has nothing to drain and creates the pod at once, and the block flips to RetryInProgress
+tick=9 apply timer.retryAt to=t+1h30m2s now=t+1h30m2s
+tick=9 row=0 write incarnation=3 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Drain target=svc-a-engine-6f8b1e6c reason=revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c strategy=RecreatePod started=t+1h30m2s lastProgressAt=t+1h30m2s deadline=t+2h0m2s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Drain exceeded InstanceReadyTimeout} precondition=ok
+tick=9 retryblock target=svc-a-engine-6f8b1e6c persist {state=Backoff attempts=1 nextRetryAt=t+1h30m1s reason=DeadlineExceeded}→{state=RetryInProgress attempts=1 nextRetryAt=t+1h30m1s reason=DeadlineExceeded}
+tick=9 event Normal RecreateUpdateStarted OMENative component=engine instance=0 recreate (revision svc-a-engine-882059bb -> svc-a-engine-6f8b1e6c, incarnation=3)
+tick=9 pod create name=svc-a-engine-0-default-0 revision=6f8b1e6c incarnation=3 ordinal=0
+tick=9 hold cleared
+tick=9 pass result=after:5s
+tick=10 note the block is read as due again; it admitted exactly one attempt and the rebuilt pod is still coming up
+tick=10 apply timer.retryAt to=t+1h30m2s now=t+1h30m2s
+tick=10 row=0 write no-op precondition=no-change
+tick=10 hold cleared
+tick=10 pass result=after:5s

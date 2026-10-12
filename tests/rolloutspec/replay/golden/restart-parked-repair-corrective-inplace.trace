@@ -1,0 +1,40 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 hold cleared
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod is deleted out from under the Instance, so the repair opens a Restart and rebuilds it
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod count 0 below desired 1 (incarnation=2)
+tick=2 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=2 ordinal=0
+tick=2 pass result=after:5s
+tick=3 note the rebuilt pod crash-loops and is older than the grace when the wedge is read, so the row fails with its operation preserved
+tick=3 apply clock.advance by=2m0s now=t+2m0s
+tick=3 apply pod.waiting[CrashLoopBackOff] pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff now=t+2m0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=0 write incarnation=2 phase=Failed runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod count 0 below desired 1 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=3 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff
+tick=3 pass result=after:5s
+tick=4 note a corrective revision lands; the row is off the roll target and only the image changed, so the roll replaces the parked repair with a fresh in-place attempt that patches the wedged pod
+tick=4 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+2m0s
+tick=4 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=InPlace target=svc-a-engine-6f8b1e6c strategy=InPlaceIfPossible started=t+2m0s lastProgressAt=t+2m0s deadline=t+32m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=4 event Normal InPlaceUpdateStarted OMENative component=engine instance=0 in-place update to revision svc-a-engine-6f8b1e6c
+tick=4 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:nil→{"targetImages":{"main":"registry.example.com/runtime:v2"},"restartCounts":{"main":0}}]
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the pass issues the image patch for the corrective revision and restamps the revision label on the pod
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod patch name=svc-a-engine-0-default-0 images=main=registry.example.com/runtime:v1→main=registry.example.com/runtime:v2
+tick=5 pod patch name=svc-a-engine-0-default-0 labels=[ome.io/revision-hash:882059bb→6f8b1e6c]
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the patched pod comes up on the corrective image and enters rotation, so the in-place attempt completes
+tick=6 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=6 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+2m0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=6 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-6f8b1e6c readySince=t+2m0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=CrashLoopBackOff container=main message=back-off restarting failed container} precondition=ok
+tick=6 event Normal InPlaceUpdateCompleted OMENative component=engine instance=0 in-place update to revision svc-a-engine-6f8b1e6c complete
+tick=6 pod patch name=svc-a-engine-0-default-0 annotations=[internal.ome.io/in-place-image-transition:{"targetImages":{"main":"registry.example.com/runtime:v2"},"restartCounts":{"main":0}}→nil]
+tick=6 hold cleared
+tick=6 pass result=requeue

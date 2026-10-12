@@ -1,0 +1,67 @@
+# An Instance that never served: its first create wedges on the image and
+# the revision is held with no retry ladder configured; the operator arms a
+# ladder and corrects the image, and the roll re-enters as a recreate that
+# drains the wedged pod and rebuilds. That rebuilt pod never comes up, so
+# at the deadline the ladder counts the wave and parks the attempt with the
+# row Failed. The parked pod is then deleted outright. The row records no
+# running revision, so when the block comes due the roll has no revision to
+# move it from and the Create pass re-materializes the index under a fresh
+# Create attempt pinned to the target, replacing the parked one; the block
+# read as due again admits nothing more.
+scenario: parked-never-promoted-set-gone-retry-rebuilds
+arrows:
+  - T-empty-create
+  - T-create-stuckgrace
+  - T-failed-corrective-recreate
+  - T-drain-deadline
+  - T-failedparked-retry-create
+cells:
+  - instance/Failed/Parked/pod.deleted[source]/before
+  - instance/Failed/Parked/timer.retryAt/boundary@T-failedparked-retry-create
+  - instance/Failed/Parked/timer.retryAt/after@T-failedparked-retry-create
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 5m
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pull wedges immediately, but the pod is younger than the grace, so the attempt keeps polling
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+  - tick: 3
+    note: the grace elapses; with no ladder configured the revision is held outright and the wedged pod is left standing
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 4
+    note: the operator arms a retry ladder and corrects the image; the wedged pod is off the new revision, so the roll re-enters as a recreate that drains it and the held block of the first revision is removed
+    events:
+      - config.changed[updateRetry]: {config: {updateRetry: {maxAttempts: 3, initialDelay: 1h, maxDelay: 2h, multiplier: 2}}}
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 5
+    note: the wedged pod is gone, so the rebuild lands at the corrected revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the deadline elapses on a rebuilt pod that never came up; the ladder counts the wave and the attempt is parked with the row Failed
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: the parked pod is deleted outright by another hand; the row stays Failed with the attempt kept and no pod left
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 8
+    note: the block comes due; the row records no running revision for the roll to move it from, so the Create pass opens a fresh Create attempt pinned to the target over the parked one and the block flips to RetryInProgress
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 9
+    note: the block is read as due again; it admitted exactly one attempt and the rebuilt pod is still coming up
+    events:
+      - timer.retryAt: {slack: 1s}

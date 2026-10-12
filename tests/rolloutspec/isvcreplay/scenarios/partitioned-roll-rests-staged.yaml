@@ -1,0 +1,54 @@
+scenario: partitioned-roll-rests-staged
+cells:
+  - coordination/Surging/member.staged/boundary@T-surging-staged
+  - coordination/Staged/ctrl.resync/before
+  - run/Open/coord.staged/boundary@T-open-staged
+  - coordination/Staged/spec.partition[cleared]/boundary@T-staged-shifting-partition
+  - coordination/Shifting/member.converged/before
+intentional: >-
+  a Component whose roll is half done by design: two Instances under a
+  partition of one roll to a new revision, the higher Instance comes up on
+  it and the lower is held on the old one, and the replica withdraws its
+  current revision while an Instance is still off the target. The group
+  rests Staged instead of waiting or scaling down, the run closes
+  Completed on a group resting Staged, a resync keeps the group there, and
+  clearing the partition makes the held Instance a roll in flight again
+initial:
+  service:
+    components:
+      engine: {replicas: 2, image: registry.example.com/runtime:v1, partition: 1}
+    groups:
+      - components: [engine]
+        blueGreen: {}
+  config: {requeue: 10s, parkedRequeue: 1m}
+timeline:
+  - tick: 1
+    note: a settled service under a partition of one records no run and an idle group
+  - tick: 2
+    note: the template edit lands; the projection stamps the new generation after the run layer read the replica, so the open waits one pass
+    events:
+      - spec.revision[new]: {component: engine, image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the replica pair is fresh and diverged, so the run opens and the group reads Surging
+    events:
+      - ctrl.resync
+  - tick: 4
+    note: the higher Instance stands Ready on the new revision while the lower is held on the old one, and the replica withdraws its current revision; the member is at its staged shape under the partition, so the group rests Staged
+    events:
+      - ir.straggling: {component: engine, trailing: 1}
+      - replica.currentWithdrawn: {component: engine}
+  - tick: 5
+    note: a resync finds the group resting Staged, which is a run that reached its plan, so the run closes Completed and the group stays Staged
+    events:
+      - ctrl.resync
+  - tick: 6
+    note: the partition is cleared, so the held Instance is a roll in flight again and the group leaves Staged
+    events:
+      - spec.partition[cleared]: {component: engine}
+  - tick: 7
+    note: the held Instance is rebuilt on the new revision and the member promotes its current revision, so the group settles
+    events:
+      - member.surgePodCreated: {component: engine, index: 0}
+      - member.readyOnTarget: {component: engine}
+      - member.oldPodsGone: {component: engine}
+      - member.converged: {component: engine}
