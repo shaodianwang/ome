@@ -1245,8 +1245,11 @@ Then the operation, judged on what the engine promises:
   taken onto the pushed revision afterwards (the hold freezes the roll;
   under `failed` the ladder's next attempt may take one, reported `ⓘ`);
   and that the healthy survivors kept serving throughout (a floor of the
-  Ready survivors, less the unavailability budget under `failed` on a
-  drain-first strategy, debounced like the rollout floor).
+  Instances serving the running revision at the scale, read by their pods
+  and judged by the same reading — the Instances the push took are not
+  capacity, Ready between two crashes or not — less the unavailability
+  budget under `failed` on a drain-first strategy, debounced like the
+  rollout floor).
 - **a scale to one** (`to_e=1`, with `to_d=1` when the decoder is a bumped
   member) is the deepest scale the API admits: `minReplicas: 0` needs KEDA
   autoscaling and is refused otherwise, so no case asks for zero (the
@@ -1622,7 +1625,8 @@ where the push promoted it onto the revision its ladder then held, keeps
 the pod set the request found under a move rejected naming that revision
 (its row's running revision under the Held block names it; serving between
 its crashes is not judged); the
-Instances that served at the request keep serving; the Components neither
+Instances that served the running revision at the request keep serving;
+the Components neither
 pushed nor moved keep their pods; and the status keeps reporting the push
 that has not landed, the hold itself under `held`. On the single-pod
 shapes the crash after Ready (`break=crash-load`) carries the ops-held

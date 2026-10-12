@@ -7693,23 +7693,6 @@ class StuckOperationTest(unittest.TestCase):
         self.assertIn("Failed row(s) 0", run._push_unlanded({"engine": failed}, {"engine"})["engine"])
         self.assertEqual("", run._push_unlanded({}, {"engine"})["engine"])
 
-    def test_ready_indices_read_the_pods_not_the_row_phase(self):
-        """Under SurgeThenDrain the Instance whose push failed still serves
-        through its source beside the wedged replacement, so it is Ready for
-        the floor; a RecreatePod Instance drained for its attempt is not, and
-        a gang counts only with every member Ready."""
-        def pod(inst, ready, comp="engine"):
-            return {"comp": comp, "inst": inst, "alive": True, "ready": ready, "hash": "x", "uid": f"{comp}-{inst}-{ready}"}
-        single = {"pods_per_inst": {"engine": 1}, "pod_state": {
-            "e-0-0": pod("0", True), "e-0-1": pod("0", False),
-            "e-1-0": pod("1", True), "e-2-0": pod("2", False), "gone": None}}
-        self.assertEqual({"0", "1"}, run._ready_indices(single, "engine"))
-        gang = {"pods_per_inst": {"engine": 2}, "pod_state": {
-            "l0": pod("0", True), "w0": pod("0", False),
-            "l1": pod("1", True), "w1": pod("1", True)}}
-        self.assertEqual({"1"}, run._ready_indices(gang, "engine"))
-        self.assertEqual(set(), run._ready_indices(gang, "decoder"))
-
     def test_scale_victims_take_the_broken_rows_first_then_the_highest_index(self):
         rows = [("0", "Ready"), ("1", "Failed"), ("2", "Ready")]
         self.assertEqual(["1"], run._scale_victims(rows, 1))
@@ -7817,6 +7800,35 @@ class StuckOperationTest(unittest.TestCase):
         rolled = dict(gang, pod_state=dict(gang["pod_state"], l1=pod("1", True, "new"), w1=pod("1", True, "new")))
         self.assertEqual({"0"}, run._serving_indices(rolled, "engine", {"old"}), "pods on the pushed revision are not the running revision's")
         self.assertEqual(set(), run._serving_indices(gang, "decoder", {"old"}))
+
+    def test_running_ready_counts_the_survivors_not_the_pushed_pods_between_crashes(self):
+        """A stuck push onto a revision that crashes after readiness leaves
+        the Instances it took cycling Ready and not Ready on their own, so
+        the plain Ready count flaps above the survivors; the floor's reading
+        counts the Instances serving the running revision, which that
+        cycling never moves. Without a running revision nothing counts."""
+        def pod(inst, ready, h, comp="engine"):
+            return {"comp": comp, "inst": inst, "alive": True, "ready": ready, "hash": h, "uid": f"{comp}-{inst}-{h}", "runner": True}
+        # Three Instances under RecreatePod: the push took 0 and 1, which
+        # crash-loop on the pushed revision; 2 serves the running revision.
+        state = {"e0": pod("0", True, "new"), "e1": pod("1", False, "new"), "e2": pod("2", True, "old"), "gone": None}
+        ctx = {"pods_per_inst": {"engine": 1}, "pod_state": state, "old_hashes": {"old"}}
+        self.assertEqual(2, run.aggregate(state, {"old"}, {}, {"engine": 1})["engine"][1], "the plain count reads the pushed pod between crashes")
+        self.assertEqual(1, run._running_ready(ctx, "engine"))
+        both_up = dict(ctx, pod_state=dict(state, e1=pod("1", True, "new")))
+        self.assertEqual(3, run.aggregate(both_up["pod_state"], {"old"}, {}, {"engine": 1})["engine"][1])
+        self.assertEqual(1, run._running_ready(both_up, "engine"), "both pushed pods Ready at once still count for nothing")
+        both_down = dict(ctx, pod_state=dict(state, e0=pod("0", False, "new")))
+        self.assertEqual(1, run._running_ready(both_down, "engine"), "both crashed at once costs the survivors nothing")
+        self.assertEqual(0, run._running_ready(dict(ctx, pod_state=dict(state, e2=pod("2", False, "old"))), "engine"),
+                         "the survivor's own loss is the drop the floor is for")
+        gang = {"pods_per_inst": {"engine": 2}, "old_hashes": {"old"}, "pod_state": {
+            "l0": pod("0", True, "old"), "w0": pod("0", True, "old"),
+            "l1": pod("1", True, "old"), "w1": pod("1", False, "old"),
+            "l2": pod("2", True, "new"), "w2": pod("2", True, "new")}}
+        self.assertEqual(1, run._running_ready(gang, "engine"), "a gang serves with every member Ready on the running revision")
+        self.assertEqual(0, run._running_ready(gang, "decoder"))
+        self.assertEqual(0, run._running_ready(dict(ctx, old_hashes=None), "engine"), "no running revision read yet: nothing counts")
 
     def test_survivor_changes_tell_a_needless_rebuild_from_the_rolls_attempt(self):
         olds = {"old"}
@@ -23533,6 +23545,28 @@ class ScaleDownPremiseTest(unittest.TestCase):
                          "the sibling form scales a member the push left alone")
         self.assertEqual("", run._scale_premise_missed(pre, {"a1"}, {"engine"}, {"engine"}, {"engine": 3}, {"engine": 2}),
                          "a scale-up keeps nothing")
+
+    def test_the_stuck_operations_set_and_judge_the_floor_from_the_running_revision(self):
+        """The floor a scale or a move on a stuck Component must hold is the
+        count of Instances serving the running revision when the operation
+        is filed, and the watch reads the same count: the Instances the push
+        took onto a revision that crashes after readiness are Ready between
+        crashes, so a floor sampled from the plain Ready count stands one too
+        high or not by the instant of the sample, and fails a healthy fleet
+        at the next crash."""
+        sampled = 'ctx["agg"].get(c, (0, 0, 0))[1]'
+        scale = inspect.getsource(run._stuck_scale)
+        self.assertIn("pre_ready = {c: _running_ready(ctx, c) for c in configured}", scale)
+        self.assertIn('ready_at_op = {c: _serving_indices(ctx, c, ctx.get("old_hashes") or set()) for c in configured}', scale,
+                      "a victim that serves at the scale serves the running revision")
+        self.assertIn("rd = _running_ready(ctx, c)", scale, "the watch reads what the floor was set from")
+        self.assertNotIn(sampled, scale)
+        self.assertLess(scale.index("pre_ready = {c: _running_ready"), scale.index('"patch", "isvc", case_id'),
+                        "the floor is set before the scale lands")
+        move = inspect.getsource(run._stuck_move)
+        self.assertIn("pre_ready = {c: _running_ready(ctx, c) for c in configured}", move)
+        self.assertIn("_stuck_floor_allowance(N[c], pre_ready[c], _floor_slack(ctx))", move)
+        self.assertNotIn(sampled, move)
 
     def test_the_scale_runner_reports_a_missed_premise_as_apparatus(self):
         src = inspect.getsource(run._stuck_scale)

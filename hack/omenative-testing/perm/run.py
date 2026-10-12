@@ -21653,20 +21653,6 @@ def _survivor_changes(pre, now, old_hashes):
     return needless, rolled
 
 
-def _ready_indices(ctx, comp):
-    """The indices of the Component's Instances that hold a Ready pod set,
-    read the way aggregate counts a Ready Instance: a full set with every
-    pod Ready. A row's phase is not that reading: under SurgeThenDrain a
-    row that reads Failed still serves through its source."""
-    ppi = max(1, ctx["pods_per_inst"].get(comp, 1))
-    by_idx = defaultdict(list)
-    for p in ctx["pod_state"].values():
-        if p and p["alive"] and p["comp"] == comp:
-            by_idx[str(p.get("inst", "0"))].append(p)
-    return {idx for idx, pods in by_idx.items()
-            if len(pods) >= ppi and sum(1 for q in pods if q["ready"]) >= ppi}
-
-
 def _serving_indices(ctx, comp, old_hashes):
     """The indices of the Component's Instances that serve the running
     revision through their pods: a full set of Ready pods carrying one of
@@ -21679,6 +21665,17 @@ def _serving_indices(ctx, comp, old_hashes):
         if p and p["alive"] and p["comp"] == comp and p["ready"] and p.get("hash") in old_hashes:
             by_idx[str(p.get("inst", "0"))] += 1
     return {idx for idx, n in by_idx.items() if n >= ppi}
+
+
+def _running_ready(ctx, comp):
+    """How many of the Component's Instances serve the running revision
+    (_serving_indices): the reading a stuck operation's capacity floor is
+    set from and judged by. An Instance the push took is not capacity,
+    whatever its pods read at the instant: on a revision that crashes
+    after readiness it is Ready between two crashes, so the plain Ready
+    count flaps above the survivors and a floor sampled from it fails a
+    healthy fleet at the next crash."""
+    return len(_serving_indices(ctx, comp, ctx.get("old_hashes") or set()))
 
 
 def _scale_rows(ctx, comp, by_comp):
@@ -21911,13 +21908,14 @@ def _stuck_move(case_id, yaml_file, desc, hdr):
     verdict = _stuck_reached_checks(stuck, reached, time.time() - ctx["trigger_ts"], verdict, notes, checks)
     if not reached:
         return _finish(case_id, desc, hdr, ctx, "NOT_STUCK", verdict, notes, checks)
-    pre_ready = {c: ctx["agg"].get(c, (0, 0, 0))[1] for c in configured}
+    pre_ready = {c: _running_ready(ctx, c) for c in configured}
     controls = configured - bumped - {mcomp}
     control_uids = {c: {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("comp") == c and p.get("uid")}
                     for c in controls}
-    # The floor is what served when the request was filed: the stuck push
-    # already holds its Instances down, and the move surges before it drains;
-    # the Instances the header's slack names are those, counted once.
+    # The floor is what served the running revision when the request was
+    # filed: the Instances the stuck push took are not capacity, Ready
+    # between crashes or not, and the move surges before it drains; the
+    # Instances the header's slack names are those, counted once.
     ctx["floor_allowance"] = {c: _stuck_floor_allowance(N[c], pre_ready[c], _floor_slack(ctx)) for c in configured}
     ctx["track_comps"] = sorted(configured)
     mv = _window_move_request(ctx, hdr)
@@ -22084,8 +22082,8 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     by_comp = _ir_by_component(case_id)
     rows_at_op = {c: _scale_rows(ctx, c, by_comp) for c in configured}
     pre_pods = {c: _pods_by_index(ctx, c) for c in configured}
-    pre_ready = {c: ctx["agg"].get(c, (0, 0, 0))[1] for c in configured}
-    ready_at_op = {c: _ready_indices(ctx, c) for c in configured}
+    pre_ready = {c: _running_ready(ctx, c) for c in configured}
+    ready_at_op = {c: _serving_indices(ctx, c, ctx.get("old_hashes") or set()) for c in configured}
     control_uids = {c: {u for pods in pre_pods[c].values() for u, _h in pods} for c in controls}
     expected_victims = {c: _scale_victims(rows_at_op[c], len(rows_at_op[c]) - target[c]) for c in scaled if target[c] < N[c]}
     rows_after_op = {c: None for c in configured}
@@ -22118,12 +22116,14 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     print(f"  Phase 4: watching the {direction} land on the {stuck} Component (≤{budget}s)")
     min_ready = dict(pre_ready)
     floor_since, floor_sust = {}, {}
-    # The healthy survivors keep serving: under held the ladder is frozen,
-    # so their count is exact; under failed a drain-first strategy may take
-    # one more Instance into its next attempt. A victim is Ready by its
-    # pods, not its row: a SurgeThenDrain row that reads Failed still serves
-    # through its source, and removing the Instance costs that pod. The
-    # count scaled to bounds the floor: the survivors cannot hold more.
+    # The healthy survivors keep serving: the Instances that serve the
+    # running revision at the scale, read by their pods (_running_ready).
+    # The ones the push took are not capacity, Ready between crashes or
+    # not; under failed a drain-first strategy may take one more Instance
+    # into its next attempt. A victim serves by its pods, not its row: a
+    # SurgeThenDrain row that reads Failed still serves through its source,
+    # and removing the Instance costs that pod. The count scaled to bounds
+    # the floor: the survivors cannot hold more.
     floor = {}
     for c in configured:
         going_ready = sum(1 for idx in expected_victims.get(c, []) if idx in ready_at_op[c])
@@ -22140,7 +22140,7 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
         _read_one(ctx)
         now = time.time()
         for c in configured:
-            rd = ctx["agg"].get(c, (0, 0, 0))[1]
+            rd = _running_ready(ctx, c)
             min_ready[c] = min(min_ready.get(c, rd), rd)
             if rd < floor[c]:
                 floor_since.setdefault(c, now)
@@ -22299,13 +22299,15 @@ def _stuck_scale(case_id, yaml_file, desc, hdr):
     for c in sorted(configured):
         mr, sust = min_ready.get(c, 0), floor_sust.get(c, 0.0)
         if mr >= floor[c]:
-            checks.append(f"  ✓ {c} kept {mr} Instance(s) Ready throughout (floor {floor[c]})")
+            checks.append(f"  ✓ {c} kept {mr} Instance(s) serving the running revision throughout (floor {floor[c]})")
         elif sust >= FLOOR_SUSTAIN_S:
             verdict = "FAIL"
-            notes.append(f"{c} dropped to {mr} Ready (floor {floor[c]}) for {sust:.0f}s")
-            checks.append(f"  ✗ {c} dropped to {mr} Ready Instance(s) (floor {floor[c]}) for {sust:.0f}s — the operation cost healthy capacity")
+            notes.append(f"{c} dropped to {mr} serving the running revision (floor {floor[c]}) for {sust:.0f}s")
+            checks.append(f"  ✗ {c} dropped to {mr} Instance(s) serving the running revision (floor {floor[c]}) for {sust:.0f}s "
+                          f"— the operation cost healthy capacity")
         else:
-            checks.append(f"  ⚠ {c} dipped to {mr} Ready (floor {floor[c]}) for <{FLOOR_SUSTAIN_S:.0f}s — debounced as a readiness flap")
+            checks.append(f"  ⚠ {c} dipped to {mr} serving the running revision (floor {floor[c]}) for <{FLOOR_SUSTAIN_S:.0f}s "
+                          f"— debounced as a readiness flap")
     # Siblings the push never touched stay as they were.
     for c in sorted(controls):
         uids_now = {u for pods in now_pods[c].values() for u, _h in pods}
