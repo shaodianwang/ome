@@ -767,6 +767,7 @@ GEN_BLOCKS = {
     "gen-stale-record": (12200, 12400),
     "gen-canary-stale-record": (12400, 12450),
     "gen-pairing": (13000, 14000),
+    "gen-ready-window": (12500, 12700),
 }
 # A folder mints from its block until the block is full, then from its
 # continuation block; a folder owns an id that lies in either.
@@ -4533,6 +4534,201 @@ def emit_crashloop_new(add):
                     comps(topo, n, w, life, d_life=(life if is_pd(topo) else None), r_life=(life if sibling == "router" else None), nr=nr),
                     _crash_new_sibling_reason(sibling, form, lib.NR if sibling == "router" else n), meta,
                     cell=("crashloop-new", form, topo, w, n, strat, surge, unavail, rp, sibling), coord=coord)
+
+
+# ── gen-ready-window: the readiness window paces the roll ──────────────────
+# lifecycle.minReadySeconds: a new pod counts as available only once it has
+# stayed Ready for the window, and a roll promotes an Instance, so takes the
+# next one, on available pods alone. The family crosses the window with the
+# budgets that can take an Instance (a drain-first roll at one down, the
+# surge roll at zero and at one down), the three shapes, and what the pushed
+# revision does after Ready: nothing, or a crash before the window is up,
+# early or at the harness's crash window. A crash inside the window never
+# makes an Instance available, so the roll takes no further Instance and the
+# running revision keeps the strict floor; with no window the same crash
+# admits the next Instance's start, the crashloop-new family's allowance of
+# one beyond the budget, which the (1, 1) budget no other family runs and
+# this one carries as its own baseline. The in-place strategy joins with the
+# image edit alone: a restart in place is a new Ready the window counts
+# from, while the crash switch is an env diff the strategy resolves to the
+# recreate row. One canary cell reads the step's capacity gate against the
+# window, one scale-up cell reads the new row's Ready stamp against it.
+READY_WINDOW_SHAPES = [("engine", 3, 0), ("engine-mn", 3, 1), ("pd", 3, 0)]
+READY_WINDOWS_S = [30, 90]
+# (strategy, maxSurge, maxUnavailable): the budgets that can take an Instance.
+READY_WINDOW_STRATS = [("RecreatePod", 0, 1), ("SurgeThenDrain", 1, 0), ("SurgeThenDrain", 1, 1)]
+# The budget whose baseline (no window) no other family runs.
+READY_WINDOW_BASELINE_STRAT = ("SurgeThenDrain", 1, 1)
+# Seconds after the runner is up that the pushed revision exits, both inside
+# the shortest window: a crash soon after Ready and one at the crash window.
+READY_WINDOW_CRASH_EXITS = [5, CRASH_EXIT_AFTER_S]
+READY_WINDOW_INPLACE = ("InPlaceIfPossible", 0, 1)
+# The Instance ready timeout on the crash cells: the window plus a startup
+# and a margin, so the healthy fix is never failed by it, and short enough
+# that every failed attempt ends inside the hold watch.
+READY_WINDOW_TIMEOUT_SLACK_S = 90
+READY_WINDOW_CANARY_S = 30
+# A capacity step of one Instance on the fleet of three, then the cutover.
+READY_WINDOW_CANARY_LADDER = [("33%", 33), ("100%", 100)]
+READY_WINDOW_SCALE_TO = 4
+
+
+def _ready_window_desc(kind, w, exit_after, topo, wd, n, strat, surge, unavail):
+    window = f"window {w}s" if w else "window 0"
+    crash = f" crash {exit_after}s" if exit_after else ""
+    # The surge strategy runs at two unavailability budgets here, so the tag names both.
+    budget = budget_tag(strat, surge, unavail) + (f" u{unavail}" if strat == "SurgeThenDrain" else "")
+    return f"{GEN_MARK} ready {window}{crash} {kind} {shape_tag(topo, wd)} N={n} {strat} {budget}"
+
+
+def _ready_window_pace(strat, surge, unavail, w):
+    if strat == "RecreatePod":
+        return (f"under RecreatePod at maxUnavailable {unavail} one Instance is down at a time: the next one is taken "
+                f"down only once the rebuilt one has been Ready for {w}s")
+    if unavail == 0:
+        return (f"under SurgeThenDrain at maxUnavailable 0 the replacement surges beside its source, the source leaves "
+                f"rotation only once the replacement has been Ready for {w}s, and the next Instance surges only after that")
+    return (f"under SurgeThenDrain at maxSurge {surge}, maxUnavailable {unavail} two Instances may be in flight at once "
+            f"(one surged, one down); a third is taken only once one of them has been Ready for {w}s")
+
+
+def _ready_window_floor(strat, surge, unavail, n):
+    """Where the running revision stands while the crashing push is held
+    under a window: the Instances off it are the unavailability budget."""
+    if strat == "RecreatePod":
+        return (f"the first Instance taken down crash-loops on the pushed revision and the other {n - 1} keep serving "
+                f"the running revision: at most {unavail} off, the budget, where without a window the same crash would "
+                f"admit the next Instance's start and leave two off")
+    if unavail == 0:
+        return (f"the surge replacement crash-loops beside its source, which stays in rotation, so all {n} Instances "
+                f"keep serving the running revision: none off, where without a window the promoted replacement "
+                f"would retire its source and the next surge would start")
+    return (f"the roll may take one source down beside the surge; the replacement and the rebuilt set crash-loop, so "
+            f"at most {unavail} Instance is off the running revision and {n - 1} keep serving it, where without a "
+            f"window the promoted replacement would admit a third Instance's start")
+
+
+def _ready_window_reason(w, exit_after, topo, n, strat, surge, unavail):
+    shape = shape_words(topo, 1 if is_mn(topo) else 0, None)
+    if not w and exit_after:
+        # The baseline: today's roll at the (1, 1) budget, with the crash the
+        # crashloop-new family reads at every other budget.
+        out = _crash_new_reason("load", strat, "none", max(surge, unavail), n)
+    elif not w:
+        out = (f"a plain push on the {shape} at maxSurge {surge}, maxUnavailable {unavail}: two Instances may be "
+               f"in flight at once, the fleet keeps serving at N-{unavail}, and the push lands on every Instance")
+    elif exit_after:
+        out = (f"the engine is pushed onto a revision whose runner carries the fixture runtime's exit switch, so its pods "
+               f"pass readiness and exit {exit_after}s after they are up, every time the kubelet starts them, under a "
+               f"readiness window of {w}s; a pod that crashes before it has been Ready for {w}s never counts as "
+               f"available, so the roll takes no further Instance: {_ready_window_floor(strat, surge, unavail, n)}; "
+               f"status says why (a rolloutHold from the retry ladder or a Failed row, and a RetryHeld or InstanceFailed "
+               f"event), every further attempt at that revision is one the ladder announced, the push ends held once "
+               f"the retry ladder (the product's bounded retries at the same revision) is spent, and the fix push then "
+               f"lands on every Instance, paced by the same window, with nothing rebuilding the crashing revision")
+    else:
+        out = (f"the engine is pushed under a readiness window of {w}s: a new pod counts as available only once it has "
+               f"been Ready for {w}s, and the roll takes the next Instance on available pods alone; "
+               f"{_ready_window_pace(strat, surge, unavail, w)}; so the roll waits at least {w}s between one "
+               f"Instance's new pods turning Ready and the next Instance being taken, the fleet keeps serving at "
+               f"N-{unavail} throughout, and the push lands on every Instance")
+    if is_pd(topo):
+        out += "; the decoder and the router are not pushed and stay as they are"
+    if is_mn(topo):
+        out += "; each Instance is a gang of 1 leader + 1 worker, Ready as a whole and counted whole"
+    return out
+
+
+def _ready_window_inplace_reason(w, n):
+    return (f"the engine's runner image is edited under InPlaceIfPossible with a readiness window of {w}s: each pod is "
+            f"patched in place (same UID) and restarts its container, so its Ready condition turns True anew and the "
+            f"window counts from that; the next Instance is patched only once the previous pod has been Ready again for "
+            f"{w}s, at most one Instance is down at a time (maxUnavailable 1), and the edit lands on every one of the "
+            f"{n} Instances with no pod recreated")
+
+
+def _ready_window_canary_reason(w, exit_after, n):
+    if exit_after:
+        return (f"a two-step canary (one Instance, then all) on an engine of {n} under a readiness window of {w}s is "
+                f"pushed onto a revision whose runner carries the fixture runtime's exit switch, so its pod passes "
+                f"readiness and exits {exit_after}s after it is up, every time it is started; it never counts as "
+                f"available, so the first step's capacity gate never fills: no traffic names the broken revision, the "
+                f"stable side keeps every Instance serving, the ladder parks Failed at the capacity step when its "
+                f"readyTimeout of {HELD_READY_TIMEOUT} expires, and the fix push at the park lands on every Instance")
+    return (f"a two-step canary (one Instance, then all) on an engine of {n} under a readiness window of {w}s: the first "
+            f"step's capacity gate counts a canary pod only once it has been Ready for {w}s, so the step starts serving "
+            f"(traffic to the canary revision, its timed pause) no sooner than {w}s after the canary pod turned Ready; "
+            f"the ladder then walks to Stable with every Instance on the canary revision")
+
+
+def _ready_window_scale_reason(w, n, to):
+    return (f"the engine is scaled from {n} to {to} under a readiness window of {w}s: the new Instance's pod comes up "
+            f"and serves, its row reads Ready only once the pod has been Ready for {w}s, the {n} survivors keep their "
+            f"pods, and the scale completes at {to}")
+
+
+def emit_ready_window(add):
+    folder = "gen-ready-window"
+    for topo, n, wd in READY_WINDOW_SHAPES:
+        for strat, surge, unavail in READY_WINDOW_STRATS:
+            windows = ([0] if (strat, surge, unavail) == READY_WINDOW_BASELINE_STRAT else []) + READY_WINDOWS_S
+            for w in windows:
+                # The crash soon after Ready is a race at the window of 0 (the
+                # roll may or may not have promoted the pod before it died), so
+                # the baseline keeps the crash at the harness's crash window alone.
+                exits = [None] + ([CRASH_EXIT_AFTER_S] if not w else READY_WINDOW_CRASH_EXITS)
+                for exit_after in exits:
+                    kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge), co="none", topo=topo)
+                    if exit_after:
+                        kv.update(fault="crashloop:new", form="load", exitafter=exit_after)
+                    timeout = f"{w + READY_WINDOW_TIMEOUT_SLACK_S}s" if (w and exit_after) else None
+                    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, ready_timeout=timeout,
+                                         min_ready=(w or None))
+                    meta = dict(strat=strat, verb=(f"crashloop:new:load@window{w}" if exit_after else f"push@window{w}"),
+                                window=w, exitafter=exit_after or 0)
+                    add(folder, _ready_window_desc("push", w, exit_after, topo, wd, n, strat, surge, unavail), kv,
+                        comps(topo, n, wd, life), _ready_window_reason(w, exit_after, topo, n, strat, surge, unavail),
+                        meta, cell=("ready-window", "push", w, exit_after or 0, topo, wd, strat, surge, unavail))
+    # The in-place image edit: the one in-place roll whose pods turn Ready anew.
+    topo, n, wd = READY_WINDOW_SHAPES[0]
+    strat, surge, unavail = READY_WINDOW_INPLACE
+    for w in READY_WINDOWS_S:
+        kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge), edit="image", img=ALT_IMAGE, co="none", topo=topo)
+        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, min_ready=w)
+        add(folder, _ready_window_desc("image edit", w, None, topo, wd, n, strat, surge, unavail), kv,
+            comps(topo, n, wd, life), _ready_window_inplace_reason(w, n),
+            dict(strat=strat, verb=f"image@window{w}", window=w, exitafter=0),
+            cell=("ready-window", "image", w, 0, topo, wd, strat, surge, unavail))
+    # The canary's capacity gate against the window, with and without the crash.
+    strat, surge, unavail = READY_WINDOW_STRATS[1]
+    w = READY_WINDOW_CANARY_S
+    for exit_after in (None, CRASH_EXIT_AFTER_S):
+        kv = dict(mode="canary", **counts(topo, n), **ceilings(topo, n, strat, surge), canary="auto", co="none", topo=topo)
+        if exit_after:
+            kv.update(fault="crashloop:new", form="load", exitafter=exit_after, during="canary-failed", verb="rebump-fix",
+                      victimcomp="engine", terminal="Stable",
+                      cell="canary/Staging/canaryBroken[crashInWindow],canary/Failed/newTarget")
+        else:
+            kv["cell"] = "canary/Staging/readyWindow"
+        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, min_ready=w)
+        case_comps = comps(topo, n, wd, life)
+        steps = lib.canary_steps("auto", *READY_WINDOW_CANARY_LADDER)
+        add(folder, _ready_window_desc("canary", w, exit_after, topo, wd, n, strat, surge, unavail), kv, case_comps,
+            _ready_window_canary_reason(w, exit_after, n),
+            dict(strat=strat, verb=("crashloop:new:load@canary-window" if exit_after else "canary@window"), window=w,
+                 exitafter=exit_after or 0),
+            cell=("ready-window", "canary", w, exit_after or 0, topo, wd, strat, surge, unavail),
+            coord=story_group(case_comps, steps, ready_timeout=(HELD_READY_TIMEOUT if exit_after else None)))
+    # The scale-up: the new row's Ready stamp against the window.
+    strat, surge, unavail = READY_WINDOW_STRATS[0]
+    for w in READY_WINDOWS_S:
+        kv = dict(mode="scaledown", **counts(topo, n), ceil_e=READY_WINDOW_SCALE_TO, ceil_d=0, ceil_r=0,
+                  to_e=READY_WINDOW_SCALE_TO, co="none", topo=topo)
+        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, min_ready=w)
+        add(folder, _ready_window_desc("scale-up", w, None, topo, wd, n, strat, surge, unavail), kv,
+            comps(topo, n, wd, life), _ready_window_scale_reason(w, n, READY_WINDOW_SCALE_TO),
+            dict(strat=strat, verb=f"scale-up@window{w}", window=w, exitafter=0),
+            cell=("ready-window", "scale-up", w, 0, topo, wd, strat, surge, unavail))
 
 
 # ── gen-crashloop-group: a running-revision crash under the group policies ──
@@ -9538,6 +9734,7 @@ def build_outputs():
     emit_stale_record(add)
     emit_canary_stale_record(add)
     emit_pairing(add)
+    emit_ready_window(add)
     _emit_plain_ops(add)
     _emit_leftover_singles(add)
     _emit_tail_cells(add)

@@ -486,6 +486,15 @@ EVAL_SOFT_FEATURES: list[dict[str, str]] = [
             "issues and fixes"
         ),
     },
+    {
+        "feature": "gen-ready-window",
+        "owner": "slin1237",
+        "expires": "2026-11-15",
+        "reason": (
+            "new family: the readiness window paced against a crash after Ready; "
+            "its first main rounds are classified into issues and fixes, advisory until green"
+        ),
+    },
 ]
 
 

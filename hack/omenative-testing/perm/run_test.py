@@ -15216,9 +15216,9 @@ class GeneratedFaultFamiliesTest(unittest.TestCase):
                 self.assertNotIn("minReadySeconds:", self.outputs[f"gen-ops-held/{name}.yaml"], name)
                 self.assertNotIn("hold Ready for", self.outputs[f"gen-ops-held/{name}.yaml"], name)
         others = [(f, n, kv) for f, n, kv, _m in self.rows
-                  if f != "gen-ops-held" and "minReadySeconds:" in self.outputs[f"{f}/{n}.yaml"]]
+                  if f not in ("gen-ops-held", "gen-ready-window") and "minReadySeconds:" in self.outputs[f"{f}/{n}.yaml"]]
         self.assertEqual({("gen-fault-move", "held", "crash-load")}, {(f, kv.get("stuck"), kv.get("break")) for f, _n, kv in others},
-                         "beside these, only the fault-move crash-after-Ready stuck rows carry a soak")
+                         "beside these and the ready-window family, only the fault-move crash-after-Ready stuck rows carry a soak")
         self.assertEqual(3, len(others))
         self.assertEqual({"engine", "pd"}, {kv["topo"] for _f, _n, kv in others}, "the single-pod shapes alone")
 
@@ -24646,3 +24646,320 @@ class GeneratedPairingFamilyTest(unittest.TestCase):
                 self.assertIn("end on pair-v3", line2, n)
             if kv.get("hold"):
                 self.assertIn("a Pairing hold is seen", line2, n)
+
+
+class ReadinessWindowReaderTest(unittest.TestCase):
+    """The readiness window's pacing reader: when a new set was taken and when
+    it first stood Ready, read off the pod records, and the verdict over the
+    budget's slots in flight."""
+
+    def test_a_paced_roll_keeps_the_window(self):
+        sets = [("0", 0.0, 20.0), ("1", 52.0, 70.0), ("2", 101.0, 120.0)]
+        viol, shortest = run._avail_window_judge(sets, 30, 1)
+        self.assertIsNone(viol)
+        self.assertEqual(31.0, shortest)
+
+    def test_a_set_taken_inside_the_window_is_the_violation(self):
+        sets = [("0", 0.0, 20.0), ("1", 40.0, 60.0)]
+        viol, shortest = run._avail_window_judge(sets, 30, 1)
+        self.assertEqual(("1", ("0", 20.0), 1), viol)
+        self.assertEqual(20.0, shortest)
+
+    def test_a_set_taken_while_the_previous_never_stood_ready_is_the_violation(self):
+        sets = [("0", 0.0, None), ("1", 400.0, None)]
+        viol, shortest = run._avail_window_judge(sets, 30, 1)
+        self.assertEqual(("1", ("0", None), 1), viol)
+        self.assertIsNone(shortest)
+
+    def test_two_slots_admit_a_second_set_in_flight_but_not_a_third(self):
+        sets = [("0", 0.0, 20.0), ("1", 5.0, 25.0), ("2", 30.0, None)]
+        self.assertEqual(("2", ("1", 5.0), 2), run._avail_window_judge(sets, 30, 2)[0])
+        sets = [("0", 0.0, 20.0), ("1", 5.0, 25.0), ("2", 56.0, None)]
+        self.assertIsNone(run._avail_window_judge(sets, 30, 2)[0])
+
+    def test_the_tolerance_absorbs_the_two_clocks(self):
+        sets = [("0", 0.0, 20.0), ("1", 48.5, None)]   # 28.5 s of a 30 s window, inside the 2 s tolerance
+        self.assertIsNone(run._avail_window_judge(sets, 30, 1)[0])
+        sets = [("0", 0.0, 20.0), ("1", 47.5, None)]
+        self.assertIsNotNone(run._avail_window_judge(sets, 30, 1)[0])
+
+    def _info(self, strat="RecreatePod", surge=0, unavail=1, window=30):
+        return {"strat": {"engine": strat}, "max_surge": {"engine": surge}, "max_unavail": {"engine": unavail},
+                "min_ready": {"engine": window}}
+
+    def test_no_window_means_no_reader(self):
+        self.assertIsNone(run._avail_window_new(self._info(window=0), ["engine"], {"engine": 1}, {"engine": "surge"}, {"engine": 3}))
+
+    def test_a_drain_first_set_is_taken_at_the_old_pods_delete_request(self):
+        aw = run._avail_window_new(self._info(), ["engine"], {"engine": 1}, {"engine": "surge"}, {"engine": 3})
+        old = {"comp": "engine", "inst": "0", "alive": False, "ready": False, "hash": "old", "uid": "u-old",
+               "created": "2026-01-01T00:00:00Z", "ready_since": None,
+               "deleted_at": "2026-01-01T00:10:30Z", "grace": 30, "newanno": False}
+        new = {"comp": "engine", "inst": "0", "alive": True, "ready": True, "hash": "new", "uid": "u-new",
+               "created": "2026-01-01T00:10:02Z", "ready_since": run._event_epoch("2026-01-01T00:10:20Z"),
+               "deleted_at": "", "grace": 30, "newanno": False}
+        run._avail_window_track(aw, {"a": old, "b": new}, {"old"}, run._event_epoch("2026-01-01T00:10:21Z"))
+        sets = run._avail_window_sets(aw, "engine")
+        self.assertEqual([("0", run._event_epoch("2026-01-01T00:10:00Z"), run._event_epoch("2026-01-01T00:10:20Z"))], sets)
+
+    def test_a_gang_set_stands_ready_with_its_last_pod(self):
+        aw = run._avail_window_new(self._info("SurgeThenDrain", 1, 0), ["engine"], {"engine": 2}, {"engine": "surge"}, {"engine": 3})
+        leader = {"comp": "engine", "inst": "3", "alive": True, "ready": True, "hash": "new", "uid": "u-l",
+                  "created": "2026-01-01T00:00:00Z", "ready_since": 100.0, "deleted_at": "", "grace": 30, "newanno": False}
+        worker = dict(leader, uid="u-w", ready=False, ready_since=None)
+        run._avail_window_track(aw, {"l": leader, "w": worker}, {"old"}, 101.0)
+        self.assertIsNone(aw["sets"][("engine", "3")]["ready"])
+        worker = dict(worker, ready=True, ready_since=140.0)
+        run._avail_window_track(aw, {"l": leader, "w": worker}, {"old"}, 141.0)
+        self.assertEqual(140.0, aw["sets"][("engine", "3")]["ready"])
+        self.assertEqual(run._event_epoch("2026-01-01T00:00:00Z"), aw["sets"][("engine", "3")]["start"])
+
+    def test_an_in_place_set_counts_only_a_ready_after_the_patch(self):
+        aw = run._avail_window_new(self._info("InPlaceIfPossible"), ["engine"], {"engine": 1}, {"engine": "inplace"}, {"engine": 3})
+        pod = {"comp": "engine", "inst": "1", "alive": True, "ready": True, "hash": "same", "uid": "u-1",
+               "created": "2026-01-01T00:00:00Z", "ready_since": 50.0, "deleted_at": "", "grace": 30, "newanno": True}
+        run._avail_window_track(aw, {"p": pod}, {"same"}, 1000.0)
+        rec = aw["sets"][("engine", "1")]
+        self.assertEqual((1000.0, None), (rec["start"], rec["ready"]), "the old Ready predates the patch")
+        run._avail_window_track(aw, {"p": dict(pod, ready_since=1016.0)}, {"same"}, 1017.0)
+        self.assertEqual(1016.0, aw["sets"][("engine", "1")]["ready"])
+
+    def test_the_checks_name_the_component_and_cut_off_at_until(self):
+        aw = run._avail_window_new(self._info(), ["engine"], {"engine": 1}, {"engine": "surge"}, {"engine": 3})
+        aw["sets"][("engine", "0")] = {"start": 0.0, "ready": 20.0, "pods": {}}
+        aw["sets"][("engine", "1")] = {"start": 40.0, "ready": None, "pods": {}}
+        checks, notes = [], []
+        self.assertEqual("FAIL", run._avail_window_checks(aw, "PASS", notes, checks))
+        self.assertIn("Instance 1 was taken 20s after Instance 0's new pods turned Ready", checks[-1])
+        checks, notes = [], []
+        self.assertEqual("PASS", run._avail_window_checks(aw, "PASS", notes, checks, until=10.0))
+        self.assertIn("1 Instance(s) taken, no next Instance to pace", checks[-1])
+        self.assertEqual("PASS", run._avail_window_checks(None, "PASS", notes, checks))
+
+    def test_the_budget_adds_one_window_per_instance(self):
+        ctx = {"N": {"engine": 3, "decoder": 3, "router": 2}, "info": self._info(window=90)}
+        self.assertEqual(480 + 270, run._avail_window_budget(ctx, ["engine", "decoder"], 480))
+        self.assertEqual(480, run._avail_window_budget(ctx, ["decoder"], 480))
+
+
+class CrashNewAllowanceUnderWindowTest(unittest.TestCase):
+    """How many Instances a push whose revision crashes after Ready may hold
+    off the running revision, with and without a readiness window."""
+
+    def _spec(self, strat, surge, unavail, window=None):
+        life = {"updateStrategy": {"type": strat, "rollingUpdate": {"maxSurge": surge, "maxUnavailable": unavail}}}
+        if window is not None:
+            life["minReadySeconds"] = window
+        return {"engine": {"lifecycle": life}}
+
+    def test_no_window_admits_one_start_beyond_the_budget(self):
+        allowance, budget, why = run._crash_new_allowance_why(self._spec("RecreatePod", 0, 1), "engine", 3, "load")
+        self.assertEqual((2, 1), (allowance, budget))
+        self.assertIn("still looked healthy", why)
+
+    def test_a_window_past_the_crash_keeps_the_slots_in_flight(self):
+        for strat, surge, unavail, slots in (("RecreatePod", 0, 1, 1), ("SurgeThenDrain", 1, 0, 1), ("SurgeThenDrain", 1, 1, 2)):
+            allowance, budget, why = run._crash_new_allowance_why(self._spec(strat, surge, unavail, 30), "engine", 3, "load", 20)
+            self.assertEqual(slots, allowance, strat)
+            self.assertEqual(max(surge, unavail), budget, strat)
+            self.assertIn("readiness window", why, strat)
+        allowance, _b, _w = run._crash_new_allowance_why(self._spec("SurgeThenDrain", 1, 0, 90), "engine", 3, "load", 5)
+        self.assertEqual(1, allowance)
+
+    def test_a_window_inside_the_crash_is_todays_allowance(self):
+        allowance, _b, why = run._crash_new_allowance_why(self._spec("RecreatePod", 0, 1, 10), "engine", 3, "load", 20)
+        self.assertEqual(2, allowance)
+        self.assertNotIn("readiness window", why)
+
+    def test_the_exit_time_defaults_to_the_crash_window(self):
+        spec = self._spec("RecreatePod", 0, 1, run.CRASH_EXIT_AFTER_S + 10)
+        self.assertEqual(1, run._crash_new_allowance(spec, "engine", 3, "load"))
+        spec = self._spec("RecreatePod", 0, 1, run.CRASH_EXIT_AFTER_S)
+        self.assertEqual(2, run._crash_new_allowance(spec, "engine", 3, "load"), "a window the crash reaches is no window")
+
+    def test_a_crash_at_start_reads_no_window(self):
+        self.assertEqual(1, run._crash_new_allowance(self._spec("RecreatePod", 0, 1, 30), "engine", 3, "start"))
+
+
+class ReadinessWindowHeaderTest(unittest.TestCase):
+    """exitafter= rides a plain push whose revision crashes after Ready, as it
+    rides a canary's; every other mode refuses it."""
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_a_plain_push_whose_revision_crashes_after_ready_names_its_exit_time(self):
+        base = "# p999: x Ne=3 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 co=none topo=engine"
+        self.assertEqual([], self._errs(base + " fault=crashloop:new form=load exitafter=5"))
+
+    def test_exitafter_needs_the_crash_after_ready(self):
+        base = "# p999: x Ne=3 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 co=none topo=engine"
+        self.assertTrue(any("exitafter=" in e for e in self._errs(base + " exitafter=5")))
+        self.assertTrue(any("exitafter=" in e for e in self._errs(base + " fault=crashloop:new form=start exitafter=5")))
+        scale = "# p999: x mode=scaledown Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 to_e=4 co=none topo=engine"
+        self.assertTrue(any("canary-mode knob" in e for e in self._errs(scale + " exitafter=5")))
+
+
+class CanaryGateWindowTest(unittest.TestCase):
+    """A canary step's capacity gate under a readiness window: serving no
+    sooner than the window after the first canary pod set turned Ready."""
+
+    def _run(self, first_ready, first_serving):
+        checks, notes = [], []
+        verdict = run._canary_gate_window_checks(30, first_ready, first_serving, "engine", "PASS", notes, checks)
+        return verdict, checks[-1]
+
+    def test_a_gate_that_served_inside_the_window_fails(self):
+        verdict, line = self._run(100.0, 112.0)
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("started serving 12s after the canary pod set turned Ready", line)
+
+    def test_a_gate_that_waited_the_window_passes(self):
+        self.assertEqual("PASS", self._run(100.0, 131.0)[0])
+        self.assertEqual("PASS", self._run(100.0, 128.5)[0], "inside the two clocks' tolerance")
+
+    def test_a_gate_that_never_served_or_never_saw_a_ready_pod_is_reported_not_failed(self):
+        verdict, line = self._run(100.0, None)
+        self.assertEqual("PASS", verdict)
+        self.assertIn("never counted the canary pod set", line)
+        verdict, line = self._run(None, 50.0)
+        self.assertEqual("PASS", verdict)
+        self.assertIn("no full canary pod set was seen Ready", line)
+
+    def test_the_first_ready_is_the_earliest_whole_set(self):
+        ctx = {"old_hashes": {"old"}, "pods_per_inst": {"engine": 2},
+               "pod_state": {"l3": {"comp": "engine", "inst": "3", "alive": True, "ready": True, "hash": "new", "ready_since": 10.0},
+                             "w3": {"comp": "engine", "inst": "3", "alive": True, "ready": True, "hash": "new", "ready_since": 14.0},
+                             "l4": {"comp": "engine", "inst": "4", "alive": True, "ready": True, "hash": "new", "ready_since": 5.0},
+                             "w4": {"comp": "engine", "inst": "4", "alive": True, "ready": False, "hash": "new", "ready_since": None},
+                             "o0": {"comp": "engine", "inst": "0", "alive": True, "ready": True, "hash": "old", "ready_since": 1.0}}}
+        self.assertEqual(14.0, run._canary_first_ready(ctx, "engine"))
+        ctx["pod_state"]["w3"]["ready"] = False
+        self.assertIsNone(run._canary_first_ready(ctx, "engine"))
+
+
+class GeneratedReadyWindowFamilyTest(unittest.TestCase):
+    """gen-ready-window: the readiness window crossed with the budgets that can
+    take an Instance, the three shapes and the crash after Ready inside the
+    window, plus the in-place image edit, the canary gate and the scale-up."""
+
+    @classmethod
+    def setUpClass(cls):
+        outputs, rows = generate_cases.build_outputs()
+        cls.outputs = outputs
+        cls.rows = [(n, kv, m) for f, n, kv, m in rows if f == "gen-ready-window"]
+
+    def _text(self, name):
+        return self.outputs[f"gen-ready-window/{name}.yaml"]
+
+    def _engine_unavailable(self, name):
+        """The engine's maxUnavailable, read off its own lifecycle line."""
+        lines = self._text(name).splitlines()
+        start = lines.index("  engine:")
+        life = next(line for line in lines[start:] if line.startswith("    lifecycle:"))
+        return int(re.search(r"maxUnavailable: ([0-9]+)", life).group(1))
+
+    def test_family_size_cells_and_id_block(self):
+        self.assertEqual(66, len(self.rows))
+        lo, hi = generate_cases.GEN_BLOCKS["gen-ready-window"]
+        for name, _kv, _m in self.rows:
+            self.assertTrue(lo <= int(name[1:]) < hi, name)
+        self.assertIn("| gen-ready-window |", self.outputs[generate_cases.MANIFEST_REL])
+        self.assertEqual(66, len({(kv["topo"], kv.get("mode", "rollout"), kv.get("edit"), m["strat"], m["window"], m["exitafter"],
+                                   self._engine_unavailable(n)) for n, kv, m in self.rows}))
+        self.assertEqual(66, len({self._text(n).splitlines()[0].split("  ")[0] for n, _kv, _m in self.rows}),
+                         "every case has its own description")
+
+    def test_push_rows_cross_the_budgets_shapes_windows_and_crash_times(self):
+        pushes = [(n, kv, m) for n, kv, m in self.rows if kv.get("mode", "rollout") == "rollout" and "edit" not in kv]
+        self.assertEqual(60, len(pushes))
+        seen = collections.Counter()
+        for name, kv, m in pushes:
+            text = self._text(name)
+            budget = "u1" if m["strat"] == "RecreatePod" else f"s1u{self._engine_unavailable(name)}"
+            seen[(kv["topo"], budget, m["window"], m["exitafter"])] += 1
+        for topo in ("engine", "engine-mn", "pd"):
+            for budget in ("u1", "s1u0", "s1u1"):
+                for window in (30, 90):
+                    for exit_after in (0, 5, 20):
+                        self.assertEqual(1, seen[(topo, budget, window, exit_after)], (topo, budget, window, exit_after))
+            # The (1, 1) budget's baseline at no window: the plain push and the crash at the crash window.
+            self.assertEqual(1, seen[(topo, "s1u1", 0, 0)], topo)
+            self.assertEqual(1, seen[(topo, "s1u1", 0, 20)], topo)
+            self.assertEqual(0, seen[(topo, "s1u1", 0, 5)], "a crash soon after Ready races the promotion at no window")
+            self.assertEqual(0, seen[(topo, "u1", 0, 0)] + seen[(topo, "s1u0", 0, 0)], "the other baselines are other families'")
+        self.assertEqual(60, sum(seen.values()))
+
+    def test_crash_rows_carry_the_exit_switch_and_a_timeout_past_the_window(self):
+        for name, kv, m in self.rows:
+            text = self._text(name)
+            if m["exitafter"]:
+                self.assertEqual(("crashloop:new", "load", m["exitafter"]), (kv["fault"], kv["form"], kv["exitafter"]), name)
+                self.assertGreater(m["window"], m["exitafter"]) if m["window"] else None
+            else:
+                self.assertNotIn("fault", kv, name)
+                self.assertNotIn("exitafter", kv, name)
+            windowed_crash = bool(m["window"]) and bool(m["exitafter"]) and kv.get("mode", "rollout") == "rollout"
+            if windowed_crash:
+                self.assertIn(f'instanceReadyTimeout: "{m["window"] + generate_cases.READY_WINDOW_TIMEOUT_SLACK_S}s"', text, name)
+            else:
+                self.assertNotIn("instanceReadyTimeout", text, name)
+
+    def test_the_window_sits_on_the_engine_alone(self):
+        for name, kv, m in self.rows:
+            text = self._text(name)
+            self.assertEqual(1 if m["window"] else 0, text.count("minReadySeconds:"), name)
+            if m["window"]:
+                self.assertIn(f"minReadySeconds: {m['window']}", text, name)
+                self.assertIn(f"readiness window of {m['window']}s", text.splitlines()[1], name)
+            self.assertEqual("none", kv["co"], name)
+            self.assertNotIn("restart", kv, name)
+
+    def test_the_other_cells(self):
+        edits = [(n, kv, m) for n, kv, m in self.rows if kv.get("edit")]
+        self.assertEqual({(30, "image", "InPlaceIfPossible"), (90, "image", "InPlaceIfPossible")},
+                         {(m["window"], kv["edit"], m["strat"]) for _n, kv, m in edits})
+        for name, kv, _m in edits:
+            self.assertEqual(generate_cases.ALT_IMAGE, kv["img"], name)
+            self.assertIn("no pod recreated", self._text(name).splitlines()[1], name)
+        canaries = [(n, kv, m) for n, kv, m in self.rows if kv.get("mode") == "canary"]
+        self.assertEqual({(30, 0), (30, 20)}, {(m["window"], m["exitafter"]) for _n, _kv, m in canaries})
+        for name, kv, m in canaries:
+            text = self._text(name)
+            self.assertEqual("auto", kv["canary"], name)
+            self.assertIn('capacity: "33%", traffic: 33', text, name)
+            if m["exitafter"]:
+                self.assertEqual(("canary-failed", "rebump-fix", "engine", "Stable"),
+                                 (kv["during"], kv["verb"], kv["victimcomp"], kv["terminal"]), name)
+                self.assertIn(f'readyTimeout: "{generate_cases.HELD_READY_TIMEOUT}"', text, name)
+                self.assertIn("canary/Staging/canaryBroken[crashInWindow]", kv["cell"], name)
+            else:
+                self.assertNotIn("readyTimeout", text, name)
+                self.assertEqual("canary/Staging/readyWindow", kv["cell"], name)
+        scales = [(n, kv, m) for n, kv, m in self.rows if kv.get("mode") == "scaledown"]
+        self.assertEqual({30, 90}, {m["window"] for _n, _kv, m in scales})
+        for name, kv, _m in scales:
+            self.assertEqual((generate_cases.READY_WINDOW_SCALE_TO, generate_cases.READY_WINDOW_SCALE_TO), (kv["to_e"], kv["ceil_e"]), name)
+            self.assertIn("its row reads Ready only once the pod has been Ready", self._text(name).splitlines()[1], name)
+
+    def test_reasons_state_the_pacing_the_floor_and_the_end_state(self):
+        for name, kv, m in self.rows:
+            if kv.get("mode", "rollout") != "rollout" or kv.get("edit"):
+                continue
+            reason = self._text(name).splitlines()[1]
+            if not m["window"]:
+                self.assertIn("minReadySeconds is zero" if m["exitafter"] else "two Instances may be in flight", reason, name)
+            elif m["exitafter"]:
+                for words in ("never counts as available", "takes no further Instance", "ends held", "paced by the same window"):
+                    self.assertIn(words, reason, name)
+                self.assertIn("none off" if self._engine_unavailable(name) == 0 else "at most 1", reason, name)
+            else:
+                self.assertIn("waits at least", reason, name)
+                self.assertIn(f"N-{self._engine_unavailable(name)}", reason, name)
+            if kv["topo"] == "pd":
+                self.assertIn("decoder and the router are not pushed", reason, name)
+            if kv["topo"] == "engine-mn":
+                self.assertIn("gang of 1 leader + 1 worker", reason, name)

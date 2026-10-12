@@ -1380,6 +1380,87 @@ under the surge one), so the rows meet both states under both strategies
 — and the sibling form with the crash at start on the router or the
 decoder, held, under the surge strategy.
 
+### A readiness window on the roll (`lifecycle.minReadySeconds`, `gen-ready-window/`)
+
+`lifecycle.minReadySeconds` is the product's pacing knob: a new pod counts
+as available only once it has stayed Ready for the window, and a roll
+promotes an Instance, so frees the budget slot the next one needs, on
+available pods alone. Without it a pod that passes readiness and dies
+twenty seconds later is promoted the moment it is Ready, the roll takes
+the next Instance at once, and a fleet of three under `maxUnavailable: 1`
+ends with two Instances down. The generated `isvcs/gen-ready-window/`
+family crosses a window of 30 s and of 90 s with the budgets that can take
+an Instance (`RecreatePod` at one down; `SurgeThenDrain` at zero down and at
+one down), the engine single-pod, engine gang and prefill/decode shapes at
+three Instances, and what the pushed revision does after Ready: nothing, or
+a crash before the window is up (`fault=crashloop:new form=load` with
+`exitafter=5` or `exitafter=20`, the fixture runtime's exit switch set to
+that many seconds after the runner is up; a plain push accepts `exitafter=`
+the way a canary does). The surge strategy's one-down budget, which no other
+family pushes with or without that crash, runs its window-0 baseline here
+too; every other window-0 cell is the plain-push and crashloop-new
+families'. A crash soon after Ready at window 0 is left out: whether the
+roll promoted the pod before it died is a race, so the cell has no one
+expected behaviour. The in-place strategy joins with the image edit alone,
+at 30 s and 90 s: a container restarted in place turns Ready anew and the
+window counts from that, while the crash switch is an env diff the strategy
+resolves to a recreate, which is the `RecreatePod` row. `RecreatePod` and
+the in-place strategies at zero down can take no Instance and have no cell.
+
+What each cell expects. A plain push waits, between one Instance's new pods
+turning Ready and the next Instance being taken, at least the window (two
+Instances may be in flight at once under the surge strategy's one-down
+budget, a third waits), keeps the fleet at `N - maxUnavailable` throughout,
+and lands on every Instance. The retry ladder below is the product's
+bounded set of retries at the same revision; once it is spent the push is
+held until a new revision or a release lifts it. A push whose pods crash inside the window never
+has an available Instance, so the roll takes no further one: under
+`RecreatePod` the first Instance taken crash-loops and the other two keep
+serving the running revision; under the surge strategy at zero down the
+replacement crash-loops beside its source, which stays in rotation, so all
+three keep serving; at one down at most one Instance is off. Status says why
+(the retry ladder's hold or a Failed row, and a `RetryHeld` or
+`InstanceFailed` event), every further attempt is one the ladder announced,
+the push ends held once the ladder is spent, and the fix push lands on every
+Instance, paced by the same window. The crash cells set
+`instanceReadyTimeout` to the window plus `READY_WINDOW_TIMEOUT_SLACK_S`:
+past the window, so the healthy fix is never failed by it, and short enough
+that every failed attempt ends inside the hold watch, which under a window
+gets the stuck push's wait (`STUCK_HELD_WAIT_S`) plus one window per
+Instance. Two more cells read the window outside a roll: a two-step canary
+(one Instance, then all) at 30 s, whose first step's capacity gate must not
+start serving before the canary pod has been Ready for the window (with the
+crash, the pod never counts, the gate never fills and the ladder parks at
+the capacity step when its `readyTimeout` expires; the fix lands at the
+park), and a scale from three to four at 30 s and at 90 s, whose new
+Instance's row reads Ready only once its pod has been Ready for the window.
+
+How the readers judge it. The pacing reader (`_avail_window_track`, Check
+10b in a plain roll, the same check beside the crashloop-new verdict) keeps,
+per Instance the roll touches, when its new pod set was taken (its first new
+pod's creation; under a drain-first roll the earlier of that and the old
+set's delete request, the deletion stamp less the grace it includes; under
+an in-place roll the first sample that saw the pod patched) and when the set
+first stood fully Ready (the latest PodReady transition of its pods), and
+fails the case when an Instance was taken while the budget's worth of
+earlier sets (`maxSurge + maxUnavailable` slots) were still unproven: Ready
+for less than the window, or never Ready. The stamps come from two clocks at
+one-second resolution (the kubelet's PodReady transition, the apiserver's
+creation or deletion), so the comparison carries `AVAIL_WINDOW_TOL_S` (2 s)
+of slack; under a crash the reader stops at the moment status said why, and
+the ladder's rebuilds after it are judged as attempts, as in every
+crashloop-new case. The floor is the crashloop-new reader's: Instances
+serving the running revision, read by their pods, never fewer than
+`N - allowance`, where the allowance under a window longer than the crash is
+the surge and unavailability budgets together (no crashing Instance is ever
+promoted, so nothing admits a further start) instead of the budget plus the
+one start a promoted crash admits (`_crash_new_allowance_why`). The canary
+gate is read against the first poll that saw step 0 serving, at most a poll
+late, so a gap short of the window is a gate that counted an unproven pod;
+the scale-up reads the new row's `readySince` stamp off the
+InferenceReplica, polled past the scale's own convergence, against the
+pod's PodReady transition.
+
 ### A runtime edit and a repair overlapping (`mode=runtimerev` with a break)
 
 A break (`fault=crashloop:old form=start|load`, or `fault=imagepull:old`)
@@ -3185,12 +3266,16 @@ Four generators write into `isvcs/`; re-run one after editing it:
   pulled for a while on either revision; the six ledger rows no other family
   filled, each on the six shape families; from p9322 the fix pushed after a
   key or a readiness loss at idle, with no pause around it, and the pull
-  failure lifted again as the bump lands), and the pairing-protocol
+  failure lifted again as the bump lands), the pairing-protocol
   transition matrix (`p13000`–`p13999`) → `isvcs/gen-pairing/` (four
   prefill/decode shapes x five strategy pairs x the slow side x the surging
   sides' maxUnavailable x five sequences x grouped or not, the pairable
   floor hard on both sides and every Pairing hold bounded; see *The
-  transition matrix* under *Pairing protocol*), plus
+  transition matrix* under *Pairing protocol*), and the readiness window
+  (`p12500`–`p12699`) → `isvcs/gen-ready-window/` (a window of 30 s and of
+  90 s on a push under the budgets that can take an Instance, with the
+  pushed revision healthy or crashing inside the window, the in-place image
+  edit, a canary's capacity gate and a scale-up under the window), plus
   `isvcs/MANIFEST.md` (per-dimension counts, the
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives
@@ -3376,6 +3461,14 @@ canary group carries its ladder in (inline, or named through a
 one form alone reads as empty in the other, and lists the parked cases with
 their issues.
 
+The readiness window is an axis of its own: the engine's
+`lifecycle.minReadySeconds`, read from the case body (`0` when the lifecycle
+sets none; the values the corpus carries are the vocabulary, so a new one is
+added to `READY_WINDOWS` before it is classified). The ledger crosses it
+with the update strategies ("Ready window x update strategy"), the
+operations and the fault rows, so a crash after Ready under a window reads
+apart from the same crash with none.
+
 The operator stories of the marathon goal live in `STORIES` at the top of
 the script, one predicate over a parsed case per story; the report prints the
 cases and cells that prove each, and `--check` fails on a story with no
@@ -3404,13 +3497,14 @@ auto versus manual migration).
 Dimensions the generators do not permute yet. Each is a candidate axis
 once its KIND spec settles; until then it stays hand-tested.
 
-- `lifecycle.minReadySeconds` — the Ready-age window a rollout waits
-  before draining or promoting past a new pod. The KIND gate covers the
-  single-pod SurgeThenDrain shape (`minreadyseconds_kind_test.go`);
-  gang surge, RecreatePod, and in-place under a window, and the
-  cluster-wide `deploy.minReadySeconds` default, are not yet in the
-  matrix. The ops-held crash-after-Ready gang rows and the fault-move
-  crash-after-Ready single-pod stuck rows carry a fixed window as pacing
-  (`OPS_HELD_CRASH_LOAD_SOAK_S`, `MOVE_STUCK_CRASH_LOAD_SOAK_S`), not as a
-  permuted axis; the fault-move crash-after-Ready gang stuck rows carry no
-  window and state the floor one Instance below N (`floor_slack=1`).
+- `lifecycle.minReadySeconds` under the rest of the matrix. The window is
+  an axis of `gen-ready-window/` (*A readiness window on the roll*) and of
+  the coverage ledger, and the KIND gate covers the single-pod
+  SurgeThenDrain shape (`minreadyseconds_kind_test.go`); the window under a
+  rollout group policy, under `InPlaceOnly`, on a canary's secondary
+  members, and the cluster-wide default from the controller configuration
+  are not yet permuted. The ops-held crash-after-Ready gang rows and the
+  fault-move crash-after-Ready single-pod stuck rows carry a fixed window as
+  pacing (`OPS_HELD_CRASH_LOAD_SOAK_S`, `MOVE_STUCK_CRASH_LOAD_SOAK_S`); the
+  fault-move crash-after-Ready gang stuck rows carry no window and state the
+  floor one Instance below N (`floor_slack=1`).

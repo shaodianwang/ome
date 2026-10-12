@@ -1,0 +1,15 @@
+# p12534: [gen] ready window 30s push engine-mn W1 N=3 SurgeThenDrain s1 u1  Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine-mn
+# reason: the engine is pushed under a readiness window of 30s: a new pod counts as available only once it has been Ready for 30s, and the roll takes the next Instance on available pods alone; under SurgeThenDrain at maxSurge 1, maxUnavailable 1 two Instances may be in flight at once (one surged, one down); a third is taken only once one of them has been Ready for 30s; so the roll waits at least 30s between one Instance's new pods turning Ready and the next Instance being taken, the fleet keeps serving at N-1 throughout, and the push lands on every Instance; each Instance is a gang of 1 leader + 1 worker, Ready as a whole and counted whole
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p12534 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { minReadySeconds: 30, updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }

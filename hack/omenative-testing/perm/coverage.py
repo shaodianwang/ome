@@ -3,8 +3,8 @@
 
 Reads line 1 (the header) and line 2 (the reason) of every case under
 isvcs/, plus the facts a header does not carry and the body does (update
-strategy and budget, restart policy, gang width, rollout group kind, canary
-step shapes), and renders the scenario space: the axes of every case, the
+strategy and budget, restart policy, readiness window, gang width, rollout
+group kind, canary step shapes), and renders the scenario space: the axes of every case, the
 matrix with counts, the empty cells by name with the biggest holes first,
 the parked cells with their issues, the operator stories with the cells
 that prove them, and the pairing-protocol transition matrix (shape x
@@ -123,6 +123,10 @@ NO_FAULT = ("none", "-", "-")
 
 GROUPS = ["none", "blueGreen", "rollingUpdate", "rollingUpdate+maintainRatio", "Sequential", "canary"]
 STRATEGIES = ["SurgeThenDrain", "RecreatePod", "InPlaceIfPossible", "InPlaceOnly", "unset"]
+# The readiness window (the engine's lifecycle.minReadySeconds): how long a
+# new pod must stay Ready before a roll counts it as available. The values
+# the corpus carries; a new one is added here before it is classified.
+READY_WINDOWS = ["0", "30s", "40s", "90s"]
 BUDGETS = ["0", "1", "2+", "percent", "unset"]
 RESTART_POLICIES = ["None", "RecreateInstanceOnPodRestart", "unset"]
 TIMINGS = [
@@ -435,6 +439,7 @@ class Case:
     strategy: str
     budget: str
     restart_policy: str
+    ready_window: str
     timing: str
     overlap: list
     canary_steps: list
@@ -520,6 +525,7 @@ FIELD = {
     "surge": re.compile(r"maxSurge:\s*\"?([0-9]+%?)"),
     "unavailable": re.compile(r"maxUnavailable:\s*\"?([0-9]+%?)"),
     "restart": re.compile(r"restartPolicy:\s*\"?([A-Za-z]+)"),
+    "min_ready": re.compile(r"minReadySeconds:\s*([0-9]+)"),
     "width": re.compile(r"worker:\s*\{\s*size:\s*([0-9]+)"),
     # a runner that starts its pods late (the slow side of a pairing case)
     "delay": re.compile(r"name:\s*\"?TEST_STARTUP_DELAY\"?,\s*value:\s*\"?([0-9]+)"),
@@ -537,7 +543,7 @@ def body_facts(text):
     and restart policy, the widest gang, the rollout groups' kinds and the
     canary steps. A Component section runs from its `  <name>:` line to the
     next line indented by less than four spaces."""
-    facts = {"strategy": {}, "surge": {}, "unavailable": {}, "restart": {}, "width": 0,
+    facts = {"strategy": {}, "surge": {}, "unavailable": {}, "restart": {}, "min_ready": {}, "width": 0,
              "groups": [], "members": [], "steps": [], "referenced": False,
              "delay": {}, "pairing": ""}
     component = None
@@ -617,6 +623,7 @@ def classify(path, description, header, reason, body, problems):
         strategy=strategy,
         budget=classify_budget(strategy, body["surge"].get("engine"), body["unavailable"].get("engine")),
         restart_policy=body["restart"].get("engine", "unset"),
+        ready_window=classify_ready_window(body["min_ready"].get("engine")),
         timing=classify_timing(header, mode, operation, verbs, canary_steps),
         overlap=classify_overlap(header, mode, operation, second, faults, verbs),
         canary_steps=canary_steps,
@@ -871,6 +878,16 @@ def fault_lifted(h, verbs):
     return (h.get("lift") not in (None, "never") or "quotalift" in verbs
             or (h.get("health") == "breach" and h.get("analysis") == "pass")
             or (str(h.get("fault", "")).startswith("metric:") and h.get("form") == "recover"))
+
+
+def classify_ready_window(raw):
+    """The engine's readiness window as the axis names it: `0` when the
+    lifecycle sets none (a Ready pod is available at once), else the seconds."""
+    try:
+        seconds = int(raw or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    return "0" if seconds <= 0 else f"{seconds}s"
 
 
 def classify_group(groups):
@@ -1438,6 +1455,19 @@ def render_crossings(cases):
     return out
 
 
+def render_window(cases):
+    """The readiness window against the strategies, the operations and the
+    fault rows: where a roll is paced by a window, and what it meets there."""
+    out = ["## Ready window", "",
+           "The engine's `lifecycle.minReadySeconds`: a new pod counts as available only once it has been Ready "
+           "for the window, and a roll takes the next Instance on available pods alone. `0` is a lifecycle "
+           "that sets none.", ""]
+    out += ["### Ready window x update strategy", ""] + crossing(cases, "ready_window", READY_WINDOWS, "strategy", STRATEGIES, "window")
+    out += ["### Ready window x operation", ""] + crossing(cases, "ready_window", READY_WINDOWS, "operation", OPERATIONS + OTHER_OPERATIONS, "window")
+    out += ["### Fault x Ready window", ""] + fault_crossing(cases, "ready_window", READY_WINDOWS, "fault")
+    return out
+
+
 def render_canary(cases):
     canaries = [c for c in cases if c.canary_steps]
     out = ["## Canary ladders", "", f"{len(canaries)} cases drive a canary ladder.", ""]
@@ -1574,6 +1604,7 @@ def render_markdown(cases, with_cases=False):
     out += render_holes(cells)
     out += render_matrix(cases, cells)
     out += render_crossings(cases)
+    out += render_window(cases)
     out += render_canary(cases)
     out += render_pairing(cases)
     out += render_parked(cases, cells)
@@ -1667,6 +1698,7 @@ def unknown_axes(case):
     checks = [("operation", case.operation, OPERATIONS + OTHER_OPERATIONS),
               ("group", case.group, GROUPS), ("strategy", case.strategy, STRATEGIES),
               ("budget", case.budget, BUDGETS), ("restart_policy", case.restart_policy, RESTART_POLICIES),
+              ("ready_window", case.ready_window, READY_WINDOWS),
               ("timing", case.timing, TIMINGS), ("canary_form", case.canary_form, CANARY_FORMS + ["-"])]
     checks += [("fault", kind, REVISION_BOUND_FAULTS + UNBOUND_FAULTS) for kind, _f, _s, _c in case.faults]
     return [(axis, value) for axis, value, known in checks if value not in known]

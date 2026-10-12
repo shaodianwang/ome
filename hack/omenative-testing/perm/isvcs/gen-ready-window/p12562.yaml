@@ -1,0 +1,20 @@
+# p12562: [gen] ready window 30s canary engine N=3 SurgeThenDrain s1 u0  mode=canary Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine canary=auto cell=canary/Staging/readyWindow
+# reason: a two-step canary (one Instance, then all) on an engine of 3 under a readiness window of 30s: the first step's capacity gate counts a canary pod only once it has been Ready for 30s, so the step starts serving (traffic to the canary revision, its timed pause) no sooner than 30s after the canary pod turned Ready; the ladder then walks to Stable with every Instance on the canary revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p12562 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { minReadySeconds: 30, updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "33%", traffic: 33, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

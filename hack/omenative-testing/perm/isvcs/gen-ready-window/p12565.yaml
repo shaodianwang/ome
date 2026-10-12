@@ -1,0 +1,13 @@
+# p12565: [gen] ready window 90s scale-up engine N=3 RecreatePod u1  mode=scaledown Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine to_e=4
+# reason: the engine is scaled from 3 to 4 under a readiness window of 90s: the new Instance's pod comes up and serves, its row reads Ready only once the pod has been Ready for 90s, the 3 survivors keep their pods, and the scale completes at 4
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p12565 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { minReadySeconds: 90, updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

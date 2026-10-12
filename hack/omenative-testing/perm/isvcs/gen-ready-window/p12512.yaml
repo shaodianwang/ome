@@ -1,0 +1,13 @@
+# p12512: [gen] ready window 0 push engine N=3 SurgeThenDrain s1 u1  Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 co=none topo=engine
+# reason: a plain push on the engine alone, single-pod at maxSurge 1, maxUnavailable 1: two Instances may be in flight at once, the fleet keeps serving at N-1, and the push lands on every Instance
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p12512 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }

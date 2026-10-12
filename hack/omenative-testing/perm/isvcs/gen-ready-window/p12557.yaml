@@ -1,0 +1,23 @@
+# p12557: [gen] ready window 90s push pd N=3 SurgeThenDrain s1 u1  Ne=3 Nd=3 Nr=2 ceil_e=4 ceil_d=3 ceil_r=2 co=none topo=pd
+# reason: the engine is pushed under a readiness window of 90s: a new pod counts as available only once it has been Ready for 90s, and the roll takes the next Instance on available pods alone; under SurgeThenDrain at maxSurge 1, maxUnavailable 1 two Instances may be in flight at once (one surged, one down); a third is taken only once one of them has been Ready for 90s; so the roll waits at least 90s between one Instance's new pods turning Ready and the next Instance being taken, the fleet keeps serving at N-1 throughout, and the push lands on every Instance; the decoder and the router are not pushed and stay as they are
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p12557 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { minReadySeconds: 90, updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

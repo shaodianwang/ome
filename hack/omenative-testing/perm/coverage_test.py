@@ -802,7 +802,7 @@ class LedgerTest(unittest.TestCase):
         cases = self.corpus.cases()
         text = coverage.render_markdown(cases, with_cases=True)
         for heading in ("## Summary", "## Operator stories", "## Empty cells, biggest holes first",
-                        "## The matrix", "## Policy crossings", "## Canary ladders", "## Parked",
+                        "## The matrix", "## Policy crossings", "## Ready window", "## Canary ladders", "## Parked",
                         "## Not derivable from the headers", "## Cases"):
             self.assertIn(heading, text)
         data = json.loads(coverage.render_json(cases))
@@ -895,6 +895,34 @@ class CommittedCorpusTest(unittest.TestCase):
         for case in packed:
             self.assertEqual("", case.parked, f"{case.id}: nothing is parked")
             self.assertIn("packed pool", case.operation_detail, case.id)
+
+    def test_the_ready_window_family_classifies_as_its_generator_describes(self):
+        family = self.by_folder["gen-ready-window"]
+        self.assertEqual(66, len(family))
+        self.assertEqual({"0", "30s", "90s"}, {c.ready_window for c in family})
+        self.assertEqual({"push", "canary", "scale up"}, {c.operation for c in family})
+        self.assertEqual({"engine single", "engine gang", "engine+decoder+router single"}, {c.shape_family for c in family})
+        self.assertEqual({"SurgeThenDrain", "RecreatePod", "InPlaceIfPossible"}, {c.strategy for c in family})
+        self.assertEqual({"1"}, {c.budget for c in family})
+        self.assertEqual({(), (("crash after Ready", "persistent", "new", "engine"),)},
+                         {tuple(c.faults) for c in family})
+        for case in family:
+            self.assertEqual("", case.parked, f"{case.id}: nothing is parked")
+            self.assertEqual("new" if case.faults else "-", case.fault_side, case.id)
+            if case.operation == "scale up":
+                self.assertNotEqual("0", case.ready_window, case.id)
+        windows = Counter((c.ready_window, c.strategy) for c in family if c.operation == "push" and not c.faults)
+        # Per window: the surge strategy at two budgets on three shapes, the
+        # drain-first one on three, the in-place image edit on the engine; at
+        # no window the (1, 1) baseline on the three shapes.
+        self.assertEqual({("0", "SurgeThenDrain"): 3,
+                          ("30s", "SurgeThenDrain"): 6, ("30s", "RecreatePod"): 3, ("30s", "InPlaceIfPossible"): 1,
+                          ("90s", "SurgeThenDrain"): 6, ("90s", "RecreatePod"): 3, ("90s", "InPlaceIfPossible"): 1},
+                         dict(windows))
+        # Every other window the corpus carries is a soak on a parked push, not a pushed roll.
+        others = [c for c in self.cases if c.folder != "gen-ready-window" and c.ready_window != "0"]
+        self.assertEqual({"40s"}, {c.ready_window for c in others})
+        self.assertEqual({"gen-ops-held", "gen-fault-move"}, {c.folder for c in others})
 
     def test_every_canary_family_runs_cells_in_both_forms(self):
         for folder in ("canary", "gen-canary-crash", "gen-canary-second-rev", "gen-canary-podkill",
@@ -1024,6 +1052,53 @@ class StuckBreakCellsTest(unittest.TestCase):
         self.assertEqual([("crash after Ready", "persistent", "new", "engine")], move.faults)
         self.assertEqual("held floor", move.timing)
         self.assertEqual(("SurgeThenDrain", "1"), (move.strategy, move.budget))
+
+
+class ReadyWindowAxisTest(unittest.TestCase):
+    """The readiness window is read off the engine's lifecycle and placed on
+    its own axis; a value the vocabulary lacks fails the check."""
+
+    def setUp(self):
+        self.corpus = Corpus()
+        self.addCleanup(self.corpus.close)
+
+    def test_the_window_is_the_engines_minreadyseconds(self):
+        paced = self.corpus.write(topo="engine", comps=engine(3, life=gen_cases.lifecycle(strat="RecreatePod", surge=0, unavail=1, min_ready=30)),
+                                  **counts(3, ceil_e=3))
+        self.assertEqual(("push", "30s", "RecreatePod", "1"), (paced.operation, paced.ready_window, paced.strategy, paced.budget))
+        plain = self.corpus.write(topo="engine", **counts(3))
+        self.assertEqual("0", plain.ready_window)
+        decoder_only = self.corpus.write(topo="pd", comps=[gen_cases.comp("engine", 2, 0, gen_cases.lifecycle()),
+                                                            gen_cases.comp("decoder", 2, 0, gen_cases.lifecycle(min_ready=30)),
+                                                            gen_cases.comp("router", 2, 0, gen_cases.lifecycle())],
+                                         **counts(2, 2, 2))
+        self.assertEqual("0", decoder_only.ready_window, "the axis is the engine's window")
+
+    def test_a_crash_inside_the_window_keeps_its_row(self):
+        crash = self.corpus.write(fault="crashloop:new", form="load", exitafter=5, topo="engine",
+                                  comps=engine(3, life=gen_cases.lifecycle(min_ready=90)), **counts(3, ceil_e=4))
+        self.assertEqual([("crash after Ready", "persistent", "new", "engine")], crash.faults)
+        self.assertEqual(("push", "90s"), (crash.operation, crash.ready_window))
+        self.assertEqual([], crash.problems)
+
+    def test_a_window_the_vocabulary_lacks_fails_the_check(self):
+        odd = self.corpus.write(topo="engine", comps=engine(3, life=gen_cases.lifecycle(min_ready=17)), **counts(3))
+        self.assertEqual([("ready_window", "17s")], coverage.unknown_axes(odd))
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            self.assertEqual(1, coverage.check([odd]))
+        self.assertIn("unknown axis value ready_window=17s", err.getvalue())
+
+    def test_the_ledger_crosses_the_window_with_the_strategies_operations_and_faults(self):
+        self.corpus.write(topo="engine", comps=engine(3, life=gen_cases.lifecycle(min_ready=30)), **counts(3))
+        text = coverage.render_markdown(self.corpus.cases())
+        for heading in ("## Ready window", "### Ready window x update strategy", "### Ready window x operation",
+                        "### Fault x Ready window"):
+            self.assertIn(heading, text)
+        table = text.split("### Ready window x update strategy")[1].split("###")[0]
+        self.assertIn("| 30s | 1 | . | . | . | . |", table)
+        data = json.loads(coverage.render_json(self.corpus.cases()))
+        self.assertEqual("30s", data["cases"][0]["ready_window"])
 
 
 class NodeHookCellsTest(unittest.TestCase):

@@ -549,7 +549,8 @@ def get_spec_info(case_id):
     """
     info = {"policy": None, "members": [], "order": [], "soak": 0, "strat": {},
             "pacing": None, "ratio_tol": None, "workers": {}, "max_unavail": {}, "partition": {},
-            "canary": None, "canary_groups": [], "pairing": "", "restart": {}}
+            "canary": None, "canary_groups": [], "pairing": "", "restart": {},
+            "max_surge": {}, "min_ready": {}}
     r = kubectl("-n", NS, "get", "isvc", case_id, "-o", "json")
     if r.returncode != 0:
         return info
@@ -577,6 +578,13 @@ def get_spec_info(case_id):
             # their real floor instead of silently reading as 0.
             ru = cs.get("lifecycle", {}).get("updateStrategy", {}).get("rollingUpdate", {})
             info["max_unavail"][c] = ru.get("maxUnavailable", 0)
+            info["max_surge"][c] = ru.get("maxSurge", 0)
+            # The readiness window (lifecycle.minReadySeconds): how long a new
+            # pod must stay Ready before the roll counts it as available.
+            try:
+                info["min_ready"][c] = int(cs.get("lifecycle", {}).get("minReadySeconds") or 0)
+            except (TypeError, ValueError):
+                info["min_ready"][c] = 0
             pt = ru.get("partition", 0)
             info["partition"][c] = pt if isinstance(pt, int) else 0
     # OEP-0017 (v2): coordination + canary unified under spec.rollout.groups[].
@@ -10935,17 +10943,19 @@ def _fault_finalize(f, verdict, notes, checks):
 CRASH_NEW_POLL_S = 2.0
 
 
-def _crash_new_arm(ctx, bumped, victim, form):
+def _crash_new_arm(ctx, bumped, victim, form, exit_after=None):
     """The push that carries the crash: the bump on every bumped member, with
     the victim member's runner armed before it lands — the fixture's
     shell-less image for form=start, the fixture runtime's exit switch for
-    form=load. Returns (ok, what was armed)."""
+    form=load, set to exit_after seconds (the harness's crash window when
+    the case names none). Returns (ok, what was armed)."""
     if form == "start":
         image = _crashloop_image()
         return _bump_rev(ctx, bumped, image=image, image_comps={victim}), f"image {image}"
     anns = {TRIGGER_ANNO: TRIGGER_VAL, "ome.io/deploymentMode": "OMENative"}
     patch = {"spec": {c: {"annotations": dict(anns)} for c in sorted(bumped)}}
-    env = [{"name": CRASH_EXIT_ENV, "value": str(CRASH_EXIT_AFTER_S)}]
+    after = int(exit_after or 0) or CRASH_EXIT_AFTER_S
+    env = [{"name": CRASH_EXIT_ENV, "value": str(after)}]
     # A multi-node Component renders its leader's runner, and a leader runner
     # must name the container it overrides.
     if ctx["pods_per_inst"].get(victim, 1) > 1:
@@ -10956,7 +10966,7 @@ def _crash_new_arm(ctx, bumped, victim, form):
     ctx["trigger_ts"] = time.time()
     if rr.returncode != 0:
         ctx["trigger_error"] = (rr.stderr.strip().splitlines() or ["patch failed"])[-1][:200]
-    return rr.returncode == 0, f"{CRASH_EXIT_ENV}={CRASH_EXIT_AFTER_S}"
+    return rr.returncode == 0, f"{CRASH_EXIT_ENV}={after}"
 
 
 def _surge_count(n, surge):
@@ -10986,17 +10996,19 @@ def _surge_count(n, surge):
 SURGE_STRATEGY = "SurgeThenDrain"
 
 
-def _surge_roll_fits_crash_window(n, min_ready=0):
+def _surge_roll_fits_crash_window(n, min_ready=0, exit_after=None):
     """True when a surge roll replaces the whole fleet of n inside the first
     promoted Instance's crash window: each of the n-1 Instances after it
     takes one startup to come up plus the minReadySeconds its promotion
-    waits, and the first crash shows CRASH_EXIT_AFTER_S after the first
-    promotion, so no restart is visible before the last drain and the
-    product has nothing to withhold it on."""
-    return n > 1 and (n - 1) * (RUNNER_STARTUP_S + max(0, min_ready)) < CRASH_EXIT_AFTER_S
+    waits, and the first crash shows exit_after seconds (the harness's
+    crash window when the case names none) after the first promotion, so
+    no restart is visible before the last drain and the product has
+    nothing to withhold it on."""
+    after = int(exit_after or 0) or CRASH_EXIT_AFTER_S
+    return n > 1 and (n - 1) * (RUNNER_STARTUP_S + max(0, min_ready)) < after
 
 
-def _crash_new_allowance_why(spec, comp, n, form=None):
+def _crash_new_allowance_why(spec, comp, n, form=None, exit_after=None):
     """(allowance, budget, why): how many Instances of a Component may be
     off the running revision at once while a push whose revision crashes
     rolls. The budget is the larger of its surge and unavailability
@@ -11005,7 +11017,12 @@ def _crash_new_allowance_why(spec, comp, n, form=None):
     budget come from: the start admitted while the first promoted crashing
     Instance still looked healthy (a drain under a drain-first strategy, a
     surge under the surge one), or the whole fleet a surge roll replaces
-    inside the crash window (_surge_roll_fits_crash_window)."""
+    inside the crash window (_surge_roll_fits_crash_window). Under a
+    readiness window longer than the time the pods live after they are
+    up (exit_after, the harness's crash window when the case names none)
+    no crashing Instance is ever promoted, so nothing admits a further
+    start: the allowance is the surge and unavailability budgets together,
+    the Instances the roll may have in flight at once."""
     lifecycle = (((spec or {}).get(comp) or {}).get("lifecycle") or {})
     strategy = lifecycle.get("updateStrategy") or {}
     ru = strategy.get("rollingUpdate") or {}
@@ -11015,7 +11032,13 @@ def _crash_new_allowance_why(spec, comp, n, form=None):
         min_ready = int(lifecycle.get("minReadySeconds") or 0)
     except (TypeError, ValueError):
         min_ready = 0
-    if form == "load" and kind == SURGE_STRATEGY and n > budget + 1 and _surge_roll_fits_crash_window(n, min_ready):
+    after = int(exit_after or 0) or CRASH_EXIT_AFTER_S
+    if form == "load" and min_ready > after:
+        slots = _surge_count(n, ru.get("maxSurge", 0)) + resolve_max_unavailable(ru.get("maxUnavailable", 0), n)
+        return slots, budget, (f"the surge and unavailability budgets together ({slots}): a pod that exits {after}s "
+                               f"after it is up never holds Ready for the {min_ready}s readiness window, so no "
+                               f"crashing Instance is promoted and no further Instance is taken")
+    if form == "load" and kind == SURGE_STRATEGY and n > budget + 1 and _surge_roll_fits_crash_window(n, min_ready, after):
         return n, budget, (f"the whole fleet of {n}: under {SURGE_STRATEGY} at minReadySeconds {min_ready} the roll "
                            f"of the {n - 1} Instance(s) after the first promoted one, about {RUNNER_STARTUP_S}s each, "
                            f"completes inside its {CRASH_EXIT_AFTER_S}s crash window (form={form}), before its first "
@@ -11027,9 +11050,9 @@ def _crash_new_allowance_why(spec, comp, n, form=None):
     return budget, budget, ""
 
 
-def _crash_new_allowance(spec, comp, n, form=None):
+def _crash_new_allowance(spec, comp, n, form=None, exit_after=None):
     """The allowance alone (_crash_new_allowance_why)."""
-    return _crash_new_allowance_why(spec, comp, n, form)[0]
+    return _crash_new_allowance_why(spec, comp, n, form, exit_after)[0]
 
 
 def _crash_new_case_allowance(ctx, f, victim):
@@ -11037,10 +11060,263 @@ def _crash_new_case_allowance(ctx, f, victim):
     against the live spec), noted on the fault when it exceeds the budget
     so the verdict says where the Instances beyond the budget come from."""
     spec, n = _isvc_spec(ctx["case_id"]), ctx["N"][victim]
-    allowance, budget, why = _crash_new_allowance_why(spec, victim, n, f["form"])
+    allowance, budget, why = _crash_new_allowance_why(spec, victim, n, f["form"], f.get("exitafter"))
     if allowance > budget:
         f["notes"].append(f"allowance {allowance} = {why}")
     return allowance
+
+
+# ── The readiness window (lifecycle.minReadySeconds) pacing a roll ─────────
+# A new pod counts as available only once it has stayed Ready for the
+# window, and a roll promotes an Instance, so frees the budget slot the
+# next one needs, on available pods alone. The reader keeps, per Instance
+# the roll touches, when its new pod set was taken (its first new pod's
+# creation, the old set's delete request where that came first, or under
+# an in-place roll the first sample that saw the pod patched) and when the
+# set first stood fully Ready (the latest PodReady transition of its pods),
+# and judges that no Instance was taken while as many earlier sets as the
+# budget allows were still unproven: Ready for less than the window, or
+# never Ready at all.
+AVAIL_WINDOW_TOL_S = 2.0   # the stamps compared come from two clocks (the kubelet's PodReady
+                           # transition, the apiserver's creation or deletion) at one-second resolution
+# How long past the window the scale reader waits for a new Instance's row
+# to read Ready before it gives up on the stamp.
+AVAIL_WINDOW_ROW_WAIT_S = int(60 * TIMEOUT_MULT)
+
+
+def _avail_window_new(info, comps, pods_per_inst, modes, N):
+    """The pacing reader's state for the Components of `comps` that carry a
+    readiness window; None when none does."""
+    windows = {c: int((info.get("min_ready") or {}).get(c) or 0) for c in comps}
+    if not any(windows.values()):
+        return None
+    return {"windows": {c: w for c, w in windows.items() if w}, "sets": {}, "old_gone": {},
+            "ppi": dict(pods_per_inst), "modes": dict(modes), "N": dict(N),
+            "max_surge": dict(info.get("max_surge") or {}), "max_unavail": dict(info.get("max_unavail") or {})}
+
+
+def _avail_window_budget(ctx, comps, base):
+    """base plus one window per Instance of the Components of `comps` that
+    carry one: a roll under a readiness window may hold every Instance for
+    the window once more."""
+    extra = sum(ctx["N"].get(c, 0) * int((ctx["info"].get("min_ready") or {}).get(c) or 0) for c in comps)
+    return min(MAX_BUDGET_S, base + extra)
+
+
+def _avail_window_track(aw, pod_state, old_hashes, now):
+    """One sample of the pod records into the pacing reader's state."""
+    if not aw or old_hashes is None:
+        return
+    by_set = defaultdict(list)
+    for name, p in pod_state.items():
+        if not p or p.get("comp") not in aw["windows"]:
+            continue
+        comp, key = p["comp"], (p["comp"], str(p.get("inst", "0")))
+        inplace = aw["modes"].get(comp) == "inplace"
+        is_new = bool(p.get("newanno")) if inplace else bool(p.get("hash") and p["hash"] not in old_hashes)
+        if not is_new:
+            if p.get("deleted_at"):
+                gone = _event_epoch(p["deleted_at"])
+                if gone is not None:
+                    gone -= float(p.get("grace") or 0)
+                    if key not in aw["old_gone"] or gone < aw["old_gone"][key]:
+                        aw["old_gone"][key] = gone
+            continue
+        rec = aw["sets"].setdefault(key, {"start": None, "ready": None, "pods": {}})
+        uid = p.get("uid") or name
+        pod = rec["pods"].setdefault(uid, {"created": (now if inplace else (_event_epoch(p.get("created")) or now)),
+                                           "ready_since": None})
+        since = p.get("ready_since")
+        # An in-place roll keeps the pod: only a Ready transition after the
+        # patch is the new set's.
+        if p.get("ready") and since is not None and pod["ready_since"] is None \
+                and (not inplace or since >= pod["created"] - AVAIL_WINDOW_TOL_S):
+            pod["ready_since"] = since
+        if rec["start"] is None or pod["created"] < rec["start"]:
+            rec["start"] = pod["created"]
+        if p["alive"]:
+            by_set[key].append((uid, p))
+    for key, pods in by_set.items():
+        rec = aw["sets"][key]
+        if rec["ready"] is not None:
+            continue
+        stamps = [rec["pods"][uid]["ready_since"] for uid, p in pods if p.get("ready")]
+        if len(stamps) >= max(1, aw["ppi"].get(key[0], 1)) and all(s is not None for s in stamps):
+            rec["ready"] = max(stamps)
+
+
+def _avail_window_track_ctx(ctx):
+    """_avail_window_track over a handler context that carries the reader."""
+    if ctx.get("aw"):
+        _avail_window_track(ctx["aw"], ctx["pod_state"], ctx.get("old_hashes"), time.time())
+
+
+def _avail_window_sets(aw, comp, until=None):
+    """The sets of comp the roll took, oldest first: (index, taken at, Ready
+    at or None). A set taken after `until` is not the roll's own pacing (the
+    retry ladder's rebuilds once status said why) and is left out."""
+    out = []
+    for (c, idx), rec in aw["sets"].items():
+        if c != comp or rec["start"] is None:
+            continue
+        start = rec["start"]
+        gone = aw["old_gone"].get((c, idx))
+        if gone is not None and gone < start:
+            start = gone
+        if until is None or start <= until:
+            out.append((idx, start, rec["ready"]))
+    return sorted(out, key=lambda t: t[1])
+
+
+def _avail_window_judge(sets, window, slots):
+    """(violation, shortest wait) over the sets of one Component, oldest
+    first: the first set taken while `slots` earlier sets were still
+    unproven — Ready for less than the window, or never Ready — as (its
+    index, the index and wait of the newest unproven set, how many were
+    unproven), and the shortest wait from a proven set's Ready to the next
+    set taken, None when no set followed a Ready one."""
+    shortest = None
+    for i, (idx, start, _ready) in enumerate(sets):
+        unproven = []
+        for jdx, _jstart, jready in sets[:i]:
+            wait = None if jready is None else start - jready
+            if wait is not None and (shortest is None or wait < shortest):
+                shortest = wait
+            if jready is None or wait < window - AVAIL_WINDOW_TOL_S:
+                unproven.append((jdx, wait))
+        if len(unproven) >= max(1, slots):
+            return (idx, unproven[-1], len(unproven)), shortest
+    return None, shortest
+
+
+def _avail_window_checks(aw, verdict, notes, checks, until=None):
+    """The pacing verdict: for every Component with a window, no Instance
+    was taken while the budget's worth of earlier sets was still unproven."""
+    if not aw:
+        return verdict
+    for comp in sorted(aw["windows"]):
+        window, n = aw["windows"][comp], aw["N"].get(comp, 0)
+        slots = resolve_budget(aw["max_surge"].get(comp, 0), n) + resolve_max_unavailable(aw["max_unavail"].get(comp, 0), n)
+        sets = _avail_window_sets(aw, comp, until)
+        viol, shortest = _avail_window_judge(sets, window, slots)
+        if viol:
+            idx, (jdx, wait), count = viol
+            verdict = "FAIL"
+            how = (f"{wait:.0f}s after Instance {jdx}'s new pods turned Ready" if wait is not None
+                   else f"while Instance {jdx}'s new pods had never been Ready")
+            notes.append(f"{comp} readiness window not kept: Instance {idx} taken {how} (window {window}s)")
+            checks.append(f"  ✗ {comp} readiness window not kept: Instance {idx} was taken {how} (window {window}s, "
+                          f"tolerance {AVAIL_WINDOW_TOL_S:.0f}s) with {count} set(s) still unproven against a budget of "
+                          f"{slots} in flight — the roll counted a pod available before it had held Ready for the window")
+        elif len(sets) <= 1:
+            checks.append(f"  ✓ {comp} readiness window: {len(sets)} Instance(s) taken, no next Instance to pace (window {window}s)")
+        elif shortest is None:
+            checks.append(f"  ✓ {comp} readiness window kept: {len(sets)} Instances taken, none after a set had turned "
+                          f"Ready (window {window}s, {slots} in flight allowed)")
+        else:
+            checks.append(f"  ✓ {comp} readiness window kept: {len(sets)} Instances taken, the shortest wait from a set "
+                          f"turning Ready to the next Instance taken was {shortest:.0f}s (window {window}s, {slots} in "
+                          f"flight allowed)")
+    return verdict
+
+
+def _canary_first_ready(ctx, comp):
+    """The earliest moment a full new-revision pod set of comp stood Ready:
+    per Instance index the latest PodReady transition of its pods once the
+    set is whole and Ready, the earliest of those; None until one is."""
+    old, ppi = ctx.get("old_hashes") or set(), max(1, ctx["pods_per_inst"].get(comp, 1))
+    by = defaultdict(list)
+    for p in ctx["pod_state"].values():
+        if p and p["alive"] and p.get("comp") == comp and p.get("hash") and p["hash"] not in old:
+            by[str(p.get("inst", "0"))].append(p)
+    stamps = []
+    for pods in by.values():
+        ready = [p["ready_since"] for p in pods if p.get("ready") and p.get("ready_since") is not None]
+        if len(ready) >= ppi:
+            stamps.append(max(ready))
+    return min(stamps) if stamps else None
+
+
+def _canary_gate_window_checks(window, first_ready, first_serving_ts, comp, verdict, notes, checks):
+    """A canary step's capacity gate under a readiness window: the step
+    starts serving (traffic to the canary revision, its pause) no sooner
+    than the window after the first canary pod set turned Ready. The
+    serving moment is a status poll, at most a poll late, so a gap read
+    short of the window is a gate that counted an unproven pod."""
+    if first_ready is None:
+        checks.append(f"  ⓘ {comp} readiness window: no full canary pod set was seen Ready, so the capacity gate "
+                      f"had nothing to count (window {window}s)")
+        return verdict
+    if first_serving_ts is None:
+        checks.append(f"  ✓ {comp} readiness window kept: the capacity step never counted the canary pod set as "
+                      f"available (it never served; window {window}s)")
+        return verdict
+    gap = first_serving_ts - first_ready
+    if gap < window - AVAIL_WINDOW_TOL_S:
+        verdict = "FAIL"
+        notes.append(f"{comp} canary step served {gap:.0f}s after its pod turned Ready, window {window}s")
+        checks.append(f"  ✗ {comp} readiness window not kept: the capacity step started serving {gap:.0f}s after the "
+                      f"canary pod set turned Ready (window {window}s, tolerance {AVAIL_WINDOW_TOL_S:.0f}s) — the gate "
+                      f"counted a pod available before it had held Ready for the window")
+    else:
+        checks.append(f"  ✓ {comp} readiness window kept: the capacity step started serving {gap:.0f}s after the "
+                      f"canary pod set turned Ready (window {window}s)")
+    return verdict
+
+
+def _avail_window_scale_checks(case_id, pod_state, pods_per_inst, info, N, target, configured, verdict, notes, checks):
+    """A scale-up under a readiness window: each new Instance's row reads
+    Ready only once its pods have been Ready for the window. The pods' Ready
+    is their PodReady transition; the row's is its readySince stamp, read
+    from the InferenceReplica once the row is Ready (polled past the scale's
+    own convergence, which the pods alone decide)."""
+    for comp in sorted(configured):
+        window = int((info.get("min_ready") or {}).get(comp) or 0)
+        if not window or target.get(comp, 0) <= N.get(comp, 0):
+            continue
+        new_idx = {str(i) for i in range(N[comp], target[comp])}
+        ppi = max(1, pods_per_inst.get(comp, 1))
+        pod_ready = {}
+        for idx in new_idx:
+            stamps = [p["ready_since"] for p in pod_state.values()
+                      if p and p["alive"] and p.get("comp") == comp and str(p.get("inst", "0")) == idx
+                      and p.get("ready") and p.get("ready_since") is not None]
+            if len(stamps) >= ppi:
+                pod_ready[idx] = max(stamps)
+        if len(pod_ready) < len(new_idx):
+            verdict = "FAIL"
+            notes.append(f"{comp} readiness window: new Instance(s) never fully Ready")
+            checks.append(f"  ✗ {comp} readiness window: {len(new_idx) - len(pod_ready)} new Instance(s) never had a full "
+                          f"Ready pod set, so the window has nothing to pace")
+            continue
+        deadline = max(pod_ready.values()) + window + AVAIL_WINDOW_ROW_WAIT_S
+        row_ready = {}
+        while len(row_ready) < len(new_idx) and time.time() < deadline:
+            rows = (_ir_snapshot(case_id).get(comp) or {}).get("rows") or []
+            seen = time.time()
+            for row in rows:
+                idx = str(row.get("index"))
+                if idx in new_idx and idx not in row_ready and str(row.get("phase")) == "Ready":
+                    row_ready[idx] = _event_epoch(row.get("readySince")) or seen
+            if len(row_ready) < len(new_idx):
+                time.sleep(CRASH_NEW_POLL_S)
+        for idx in sorted(new_idx, key=int):
+            if idx not in row_ready:
+                verdict = "FAIL"
+                notes.append(f"{comp} Instance {idx} row never Ready after the window")
+                checks.append(f"  ✗ {comp} readiness window: Instance {idx}'s row never read Ready within "
+                              f"{window + AVAIL_WINDOW_ROW_WAIT_S}s of its pods turning Ready")
+                continue
+            gap = row_ready[idx] - pod_ready[idx]
+            if gap < window - AVAIL_WINDOW_TOL_S:
+                verdict = "FAIL"
+                notes.append(f"{comp} Instance {idx} row Ready {gap:.0f}s after its pods, window {window}s")
+                checks.append(f"  ✗ {comp} readiness window not kept: Instance {idx}'s row read Ready {gap:.0f}s after "
+                              f"its pods turned Ready (window {window}s, tolerance {AVAIL_WINDOW_TOL_S:.0f}s)")
+            else:
+                checks.append(f"  ✓ {comp} readiness window kept: Instance {idx}'s row read Ready {gap:.0f}s after its "
+                              f"pods turned Ready (window {window}s)")
+    return verdict
 
 
 def _crash_new_tally(pod_state, pods_per_inst, comp, old_hashes, crash_hashes):
@@ -11239,9 +11515,14 @@ def _crash_new_watch_hold(ctx, victim, bumped, allowance, crash_hashes, uid_seen
     N, ppi, old = ctx["N"], ctx["pods_per_inst"], set(ctx["old_hashes"])
     form, case_id, push_ts = ctx["fault"]["form"], ctx["case_id"], ctx["trigger_ts"]
     budget = _idle_budget(ctx)
+    if ctx.get("aw"):
+        # Under a readiness window every attempt of the ladder waits out the
+        # Instance ready timeout the case sets past the window, so the watch
+        # gets the stuck push's wait plus one window per Instance.
+        budget = _avail_window_budget(ctx, bumped, max(budget, STUCK_HELD_WAIT_S))
     peers = sorted(bumped - {victim})
-    hold = {"budget": budget, "bitten_at": None, "status_at": None, "status": "", "event_at": None, "event": "",
-            "peak_off": 0, "off_span": 0.0, "min_running": N[victim], "peak_crash": 0,
+    hold = {"budget": budget, "push_ts": push_ts, "bitten_at": None, "status_at": None, "status": "", "event_at": None,
+            "event": "", "peak_off": 0, "off_span": 0.0, "min_running": N[victim], "peak_crash": 0,
             "attempts_at_status": None, "peer": {c: "rolling" for c in peers}, "believed": False,
             "windows": [], "rebuilds": {}, "held_at": None}
     print(f"  Phase 3: watching the roll toward the crashing revision (budget {allowance} Instance(s) off "
@@ -11250,6 +11531,7 @@ def _crash_new_watch_hold(ctx, victim, bumped, allowance, crash_hashes, uid_seen
     ready_seen, off_since, last_poll, created, moves = set(), None, 0.0, {}, []
     while time.time() - push_ts < budget and not ctx["closed"]:
         _read_one(ctx)
+        _avail_window_track_ctx(ctx)
         now = time.time()
         pod_state = ctx["pod_state"]
         for name, p in pod_state.items():
@@ -11327,7 +11609,7 @@ def _crash_new_watch_fix(ctx, bumped, crash_hashes, uid_seen, pre_fix_uids):
     bumped member's pods on the fixed revision and serving, sustained; and
     whether any crash-revision pod was created after the fix landed."""
     N, configured, old = ctx["N"], ctx["configured"], set(ctx["old_hashes"])
-    fix_ts, budget = ctx["trigger_ts"], _idle_budget(ctx)
+    fix_ts, budget = ctx["trigger_ts"], _avail_window_budget(ctx, bumped, _idle_budget(ctx))
     print(f"  Phase 5: watching the fix land on every Instance (≤{budget}s)")
     rebuilt = []
 
@@ -11537,9 +11819,12 @@ def _crashloop_new(case_id, yaml_file, desc, hdr):
                            f"victimcomp={victim} is not a member the push bumps ({sorted(bumped)})")
     allowance = _crash_new_case_allowance(ctx, f, victim)
     ctx["track_comps"] = sorted(bumped)
+    # The readiness window's pacing reader, over the roll's own takes: the
+    # ladder's rebuilds once status said why are judged as attempts above.
+    ctx["aw"] = _avail_window_new(ctx["info"], sorted(bumped), ctx["pods_per_inst"], ctx["modes"], ctx["N"])
     crash_hashes, uid_seen = set(), {}
     print(f"  Phase 2: push a revision whose {victim} pods crash ({f['form']}) on {sorted(bumped)}")
-    ok, armed = _crash_new_arm(ctx, bumped, victim, f["form"])
+    ok, armed = _crash_new_arm(ctx, bumped, victim, f["form"], f.get("exitafter"))
     f["fired"] = True
     if not ok:
         _stop_watcher(ctx)
@@ -11553,9 +11838,13 @@ def _crashloop_new(case_id, yaml_file, desc, hdr):
         _stop_watcher(ctx)
         delete_case(yaml_file)
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", f"fix push failed: {ctx.get('trigger_error')}")
+    aw, ctx["aw"] = ctx.get("aw"), None   # the fix roll's pods reuse the indices; the hold alone is paced
     out["fix"] = _crash_new_watch_fix(ctx, bumped, crash_hashes, uid_seen, pre_fix_uids)
     verdict, notes, checks = "PASS", [], []
     verdict = _crash_new_checks(ctx, f, out, victim, bumped, allowance, verdict, notes, checks)
+    status_at = out["hold"].get("status_at")
+    verdict = _avail_window_checks(aw, verdict, notes, checks,
+                                   until=None if status_at is None else out["hold"]["push_ts"] + status_at)
     verdict = _crash_new_fleet_checks(ctx, hdr, bumped, verdict, notes, checks)
     return _finish(case_id, desc, hdr, ctx, out["fix"]["state"], verdict, notes, checks)
 
@@ -17731,7 +18020,7 @@ def validate_case_file(path):
                         f"(an index below {count_key}={fields.get(count_key, 0)})")
     for k in ("verb", "verbhold", "terminal", "prearm", "skipsoak", "cell", "nophase", "verb2", "during2", "timeout",
               "imgcomp", "ratio_tol", "xcheck", "release", "releaseafter", "pairto", "minfails", "exitafter"):
-        if k in fields and mode != "canary":
+        if k in fields and mode != "canary" and not (k == "exitafter" and mode == "rollout"):
             errs.append(f"{path}:1: {k}= is a canary-mode knob (mode=canary)")
     if "bump" in fields:
         if mode not in ("rollout", "canary") and not (mode in STUCK_MODES and "stuck" in fields):
@@ -26240,6 +26529,7 @@ def _canary(case_id, yaml_file, desc, hdr):
     # too (18-26 pods), and the router's own readiness-gated SurgeThenDrain back to
     # stable runs ~100-300s — sizing on the primary alone starves the drain window.
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ctx["pods_per_inst"][c] for c in group) + 120)
+    budget = _avail_window_budget(ctx, group, budget)   # one window more per Instance under a readiness window
     budget = min(MAX_BUDGET_S, budget + ROTATE_PER_POD_S * sum(
         max(0, t - N[c]) * ctx["pods_per_inst"].get(c, 1) for c, t in scale_to.items()))
     if analysis_mode:
@@ -26289,6 +26579,10 @@ def _canary(case_id, yaml_file, desc, hdr):
     capacity_landed, quota_need = False, 0
     last_hook = last_step = None
     state, stable, last_poll = "ROLLING", None, 0.0
+    # The primary's readiness window and the first canary pod set's Ready: the
+    # capacity step may not start serving before the window has passed.
+    gate_window = int((ctx["info"].get("min_ready") or {}).get(primary) or 0)
+    gate_ready_since = None
 
     def canary_ready_pods():
         return sum(1 for p in ctx["pod_state"].values()
@@ -26302,6 +26596,8 @@ def _canary(case_id, yaml_file, desc, hdr):
 
     while ctx["trigger_ts"] and time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
         _read_one(ctx)                                   # fold pod events → peaks / per-revision split
+        if gate_window and gate_ready_since is None:
+            gate_ready_since = _canary_first_ready(ctx, primary)
         if fault and fault.get("skip"):
             # The hook fired a fault this cluster cannot host (no pod of the
             # case sits on a node the harness may stop): the case is skipped
@@ -26663,6 +26959,8 @@ def _canary(case_id, yaml_file, desc, hdr):
              f"second verb {verb2} never fired: the canary never reached {during2} after {verb} (phases={sorted(phases)})")
     if new_break:
         verdict = _new_break_checks(ctx, ctx["fault"], newbreak, phases, verdict, notes, checks)
+    if gate_window:
+        verdict = _canary_gate_window_checks(gate_window, gate_ready_since, first_serving_ts, primary, verdict, notes, checks)
     if kept_key:
         verdict = _canary_kept_key_checks(ctx, ctx["fault"], newbreak, phases, verdict, notes, checks)
     if oneshot_new:
@@ -27528,6 +27826,11 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         if not _fault_repeats(fault):
             verdict = _podkill_truth_checks(fault.get("truth"), verdict, notes, checks)
         verdict = _gang_member_checks(fault, pod_state, trigger_ts, hdr, verdict, notes, checks, info=info)
+    # Check E'': a scale-up under a readiness window — each new Instance's row
+    # reads Ready only once its pods have been Ready for the window.
+    if state == "CONVERGED" and not blocked:
+        verdict = _avail_window_scale_checks(case_id, pod_state, pods_per_inst, info, N, target, configured,
+                                             verdict, notes, checks)
     verdict = soften_expected_fail(hdr, verdict, checks)
     # Check F: continuous invariants + fault apparatus — AFTER the softening
     # (same rationale as teardown_check): a status lie or a broken apparatus is
@@ -27738,6 +28041,8 @@ def run_case(case_id):
     if int(hdr.get("repeat") or 0) >= REPEAT_MIN:
         # Each repetition takes again what came back; the roll waits that much longer.
         rotate_budget = min(MAX_BUDGET_S, rotate_budget + REPEAT_CYCLE_S * int(hdr["repeat"]))
+    # A roll under a readiness window may hold every bumped Instance for the window once more.
+    rotate_budget = min(MAX_BUDGET_S, rotate_budget + sum(N[c] * int((info.get("min_ready") or {}).get(c) or 0) for c in bumped))
 
     # Start watcher subprocess.
     print(f"  starting watcher (init≤{init_budget}s, rotate≤{rotate_budget}s)")
@@ -27779,6 +28084,7 @@ def run_case(case_id):
     ready_seen = set()               # (name, uid) seen Ready since the trigger, the state at the trigger included
     new_ready = defaultdict(set)     # comp → set(new-rev pod names) observed Ready
     order_viol = {}                  # comp → worst (drained - ready - maxUnavail) surge-before-drain breach
+    aw = _avail_window_new(info, sorted(bumped), pods_per_inst, modes, N)   # readiness-window pacing; None without a window
     deadline_init = init_started + init_budget
     deadline_rotate = None
     print(f"\n  Phase 1: waiting for initial settlement (need engine={Ne}, decoder={Nd}, router={Nr})")
@@ -28083,6 +28389,9 @@ def run_case(case_id):
                                 floor_sust[c] = span
                         else:
                             floor_since.pop(c, None)
+                # The readiness window's pacing (Check 10b): when each new set was
+                # taken and when it first stood Ready.
+                _avail_window_track(aw, pod_state, old_hashes, now)
                 # Distinct-alive-index (fleet-wipe guard): track the WORST shortfall
                 # of distinct alive indices vs alive Instances, and the worst gang
                 # share shortfall, over the whole roll — the collapse is transient
@@ -28444,6 +28753,11 @@ def run_case(case_id):
                 checks.append(f"  ✗ {c} capacity dipped to {mr} ready Instance(s) mid-roll (< {flabel}={floor}{held}) — did NOT preserve capacity (no surge / dropped the gang)")
             else:
                 checks.append(f"  ⚠ {c} capacity dipped to {mr} ready Instance(s) (< {flabel}={floor}) for <{FLOOR_SUSTAIN_S:.0f}s — debounced as a readiness flap (not failed)")
+
+    # Check 10b: the readiness window paced the roll — no Instance taken while
+    # the budget's worth of earlier sets had been Ready for less than the window.
+    if aw:
+        verdict = _avail_window_checks(aw, verdict, notes, checks)
 
     # Informational: post-convergence traffic + per-revision Services (BlueGreen
     # contract is currently status-only — reported, not asserted).

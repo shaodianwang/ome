@@ -1,0 +1,15 @@
+# p12527: [gen] ready window 30s crash 5s push engine-mn W1 N=3 SurgeThenDrain s1 u0  Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=crashloop:new co=none topo=engine-mn form=load exitafter=5
+# reason: the engine is pushed onto a revision whose runner carries the fixture runtime's exit switch, so its pods pass readiness and exit 5s after they are up, every time the kubelet starts them, under a readiness window of 30s; a pod that crashes before it has been Ready for 30s never counts as available, so the roll takes no further Instance: the surge replacement crash-loops beside its source, which stays in rotation, so all 3 Instances keep serving the running revision: none off, where without a window the promoted replacement would retire its source and the next surge would start; status says why (a rolloutHold from the retry ladder or a Failed row, and a RetryHeld or InstanceFailed event), every further attempt at that revision is one the ladder announced, the push ends held once the retry ladder (the product's bounded retries at the same revision) is spent, and the fix push then lands on every Instance, paced by the same window, with nothing rebuilding the crashing revision; each Instance is a gang of 1 leader + 1 worker, Ready as a whole and counted whole
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p12527 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { instanceReadyTimeout: "120s", minReadySeconds: 30, updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
