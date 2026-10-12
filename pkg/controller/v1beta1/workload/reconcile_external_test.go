@@ -658,19 +658,31 @@ func enginePod(isvc, ns string, idx int32) *corev1.Pod {
 	}
 }
 
-// listCountingReader wraps a client.Reader and counts PodList List calls.
-// Used to prove the dispatcher's restart pass lists pods ONCE per
-// reconcile (via the live APIReader) instead of once per Instance.
+// listCountingReader wraps a client.Reader and records Pod List cost.
 type listCountingReader struct {
 	client.Reader
-	podListCalls int
+	podListCalls     int
+	podListItems     int
+	podListSelectors []string
+	onPodList        func(call int, pods *corev1.PodList)
 }
 
 func (r *listCountingReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-	if _, ok := list.(*corev1.PodList); ok {
+	err := r.Reader.List(ctx, list, opts...)
+	if pods, ok := list.(*corev1.PodList); ok {
 		r.podListCalls++
+		r.podListItems += len(pods.Items)
+		listOptions := (&client.ListOptions{}).ApplyOptions(opts)
+		if listOptions.LabelSelector != nil {
+			r.podListSelectors = append(r.podListSelectors, listOptions.LabelSelector.String())
+		} else {
+			r.podListSelectors = append(r.podListSelectors, "")
+		}
+		if r.onPodList != nil {
+			r.onPodList(r.podListCalls, pods)
+		}
 	}
-	return r.Reader.List(ctx, list, opts...)
+	return err
 }
 
 // failedEnginePod is enginePod with Phase=Failed — a restart trigger.
@@ -4485,6 +4497,9 @@ func (h *admissionHarness) kubelet() {
 			continue
 		}
 		if pod.Status.Phase == "" {
+			if pod.UID == "" {
+				pod.UID = uuid.NewUUID()
+			}
 			pod.CreationTimestamp = metav1.NewTime(h.clk.Now())
 			if err := h.c.Update(h.ctx, pod); err != nil {
 				h.t.Fatalf("kubelet stamp creation %s: %v", pod.Name, err)
@@ -5151,6 +5166,7 @@ func TestExecuteErroredOpPassStillEscalatesExpiredDeadline(t *testing.T) {
 		return nil
 	}
 	plan := threeInstancePlan()
+	plan.RestartPolicy = workloadtypes.RestartPolicyRecreateInstance
 	c := fake.NewClientBuilder().WithScheme(makeScheme(t)).Build()
 	deps := workloadtypes.Deps{Client: c, APIReader: c, Expectations: workloadtypes.NewExpectations()}
 	snapshot := workload.SnapshotWithPodsForTest(in, nil)
@@ -5321,6 +5337,7 @@ func TestExecuteErroredSiblingKeepsRelocationFirstTry(t *testing.T) {
 	}
 	plan := minimalPlan()
 	plan.MigrationMode = workloadtypes.MigrationModeAuto
+	plan.RestartPolicy = workloadtypes.RestartPolicyRecreateInstance
 	plan.Instances = append(plan.Instances, workloadtypes.InstancePlan{
 		Index: 1, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
 	})

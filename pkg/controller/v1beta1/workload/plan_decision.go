@@ -586,20 +586,21 @@ func restartContinuations(input types.ReconcileInput, restarts []RestartSelectio
 // a paused Component keeps every repair, because the roll it would yield
 // to is the very thing the pause withholds.
 //
-// The live read is unconditional only under the policy whose triggers
-// fire on ordinary pod churn. The two policy-independent triggers are
-// rare, so for every other policy the cached view screens for a
-// candidate first and the live read confirms it; a healthy Component
-// therefore costs no extra live List per reconcile.
+// The cached view only screens for a candidate; the live view confirms
+// every selection. Informer lag may cause an extra live read or defer a
+// newly observed loss until its watch event arrives, but it cannot make a
+// destructive selection: execution revalidates the selected Instance live
+// again immediately before admitting or advancing it. A healthy Component
+// therefore costs no extra live List per reconcile under any policy. Under
+// RecreateInstance, a failed cache read falls back to the live view because
+// that policy can select entirely from the authoritative observation.
 func planRestartSelections(ctx context.Context, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot) ([]RestartSelection, error) {
-	if plan.RestartPolicy != types.RestartPolicyRecreateInstance {
-		cachedByInstance, err := snapshot.CachedPods(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("workload.Reconcile: list pods to screen the restart pass (component=%s): %w", plan.Component, err)
-		}
-		if !anyRestartTrigger(input, plan, target, cachedByInstance) {
-			return nil, nil
-		}
+	cachedByInstance, err := snapshot.CachedPods(ctx)
+	if err != nil && plan.RestartPolicy != types.RestartPolicyRecreateInstance {
+		return nil, fmt.Errorf("workload.Reconcile: list pods to screen the restart pass (component=%s): %w", plan.Component, err)
+	}
+	if err == nil && !anyRestartTrigger(input, plan, target, cachedByInstance) {
+		return nil, nil
 	}
 	liveByInstance, err := snapshot.LivePods(ctx)
 	if err != nil {

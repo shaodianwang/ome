@@ -12,6 +12,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -46,7 +47,20 @@ func executeRestartPass(ctx context.Context, deps types.Deps, input types.Reconc
 	// Revisions whose retry ladder admitted a rebuild this pass: the
 	// ladder authorizes one attempt at a revision at a time.
 	ladderOpened := map[string]struct{}{}
+	restartBatch := workloadops.NewRestartBatch(deps, input)
 	for _, selection := range restarts {
+		pods, readErr := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, selection.Instance.Index)
+		if readErr != nil {
+			restartErrs = append(restartErrs, fmt.Errorf("workload.Reconcile: revalidate restart instance %d: %w", selection.Instance.Index, readErr))
+			continue
+		}
+		refreshed, selected := revalidateRestartSelection(input, plan, target, selection.Instance, pods)
+		if !selected {
+			logf.FromContext(ctx).V(1).Info("restart selection changed before execution; leaving it for the next plan",
+				"component", plan.Component, "instance", selection.Instance.Index)
+			continue
+		}
+		selection = refreshed
 		if selection.OpensRepair && input.RepairBatchSize != nil && opened >= *input.RepairBatchSize {
 			logf.FromContext(ctx).V(1).Info("crash-loop repair waits for the next pass: repair batch full",
 				"component", plan.Component, "instance", selection.Instance.Index, "repairBatchSize", *input.RepairBatchSize)
@@ -74,7 +88,7 @@ func executeRestartPass(ctx context.Context, deps types.Deps, input types.Reconc
 		if selection.OpensRepair {
 			opened++
 		}
-		done, restartErr := workloadops.Restart(ctx, deps, input, plan, selection.Instance, target, selection.Reason)
+		done, restartErr := restartBatch.Advance(ctx, deps, input, plan, selection.Instance, target, selection.Reason, pods)
 		if restartErr != nil {
 			logf.FromContext(ctx).Error(restartErr, "restart pass: instance failed",
 				"component", plan.Component, "instance", selection.Instance.Index)
@@ -121,6 +135,24 @@ func executeRestartPass(ctx context.Context, deps types.Deps, input types.Reconc
 		return ctrl.Result{}, false, errors.Join(restartErrs...)
 	}
 	return ctrl.Result{}, false, nil
+}
+
+// revalidateRestartSelection rebuilds a planned selection from the latest
+// authoritative Pod observation. Admission reads these refreshed flags, so a
+// stale plan cannot consume repair budget or mutate an Instance whose trigger
+// has disappeared.
+func revalidateRestartSelection(input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, inst types.InstancePlan, pods []*corev1.Pod) (RestartSelection, bool) {
+	needs, reason := restartTrigger(input, plan, inst, target, pods)
+	if !needs {
+		return RestartSelection{}, false
+	}
+	return RestartSelection{
+		Instance:            inst,
+		Reason:              reason,
+		OpensRepair:         workloadops.RestartOpensRepair(input, plan, inst, pods),
+		OpensUnavailability: workloadops.RestartOpensUnavailability(input, plan, inst, pods),
+		LadderRevision:      workloadops.RestartOpensLadderAttempt(input, plan, inst, pods),
+	}, true
 }
 
 // planExcludingRestartSelections is the plan with the restarting

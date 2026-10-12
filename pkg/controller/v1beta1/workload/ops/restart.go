@@ -2,6 +2,7 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -10,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
@@ -284,6 +286,30 @@ func restartDrainKey(idx int32, incarnation int64) string {
 	return strconv.Itoa(int(idx)) + "-" + strconv.FormatInt(incarnation, 10)
 }
 
+// RestartBatch owns the read observations shared by every Restart advanced in
+// one reconcile pass. EndpointSlices are listed once per routed Service, and a
+// stored revision template is loaded once even when many Instances rebuild it.
+// Not safe for concurrent use.
+type RestartBatch struct {
+	drainer   *drain.Batcher
+	templates map[string]restartTemplateObservation
+}
+
+type restartTemplateObservation struct {
+	template podTemplate
+	found    bool
+	err      error
+}
+
+// NewRestartBatch returns the pass-scoped Restart executor. Callers should
+// reuse one batch for every selected Instance in the pass.
+func NewRestartBatch(deps workload.Deps, input workload.ReconcileInput) *RestartBatch {
+	return &RestartBatch{
+		drainer:   drain.NewBatcher(deps.Reader(), input.Key.Namespace),
+		templates: map[string]restartTemplateObservation{},
+	}
+}
+
 // Restart drives one Instance through Restart-on-pod-loss. Multi-pass,
 // idempotent. Three phases:
 //
@@ -311,9 +337,23 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return false, fmt.Errorf("Restart: nil client")
 	}
 
-	pods, err := query.LiveListPodsForInstance(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component, inst.Index)
+	pods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, inst.Index)
 	if err != nil {
 		return false, fmt.Errorf("Restart: list pods (instance=%d): %w", inst.Index, err)
+	}
+	return NewRestartBatch(deps, input).Advance(ctx, deps, input, plan, inst, target, reason, pods)
+}
+
+// Advance drives Restart from an authoritative, Instance-scoped Pod
+// observation supplied by the caller. The dispatcher uses this entry point so
+// the same narrow read both revalidates selection and drives every phase; the
+// compatibility Restart entry point above performs that read itself.
+func (b *RestartBatch) Advance(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, reason string, pods []*corev1.Pod) (bool, error) {
+	if deps.Client == nil {
+		return false, fmt.Errorf("Restart: nil client")
+	}
+	if b == nil || b.drainer == nil {
+		return false, fmt.Errorf("Restart: nil restart batch")
 	}
 
 	// Use the post-patch Incarnation, not inst.Incarnation — BuildPlan
@@ -329,7 +369,10 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return true, nil
 	}
 	wasNotRestarting := observed == nil || observed.Phase != workload.InstancePhaseRestarting
-	var newInc int64
+	var (
+		newInc int64
+		err    error
+	)
 	switch {
 	case spentRepairPodSetGone(observed, pods):
 		// Nothing is left to resume or rebuild under the spent operation:
@@ -427,6 +470,9 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 				continue
 			}
 			if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterRestartDrain, restartDrainKey(inst.Index, newInc)); err != nil {
+				if apierrors.IsNotFound(err) || errors.Is(err, podreadiness.ErrPodIdentityChanged) {
+					return false, nil
+				}
 				return false, fmt.Errorf("mark not serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
 		}
@@ -438,16 +484,15 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// so peer-discovery DNS resolves during gang init — using it
 		// here would make IsPodDrained wait forever.
 		//
-		// Batcher lists each per-revision Service's EndpointSlices once
-		// and reuses them across the gang, avoiding the N+1 per-pod LIST.
-		drainer := drain.NewBatcher(deps.Reader(), input.Key.Namespace)
+		// The pass-scoped Batcher lists each per-revision Service's
+		// EndpointSlices once and reuses them across every selected Instance.
 		for _, pod := range oldPods {
 			hash := pod.Labels[query.LabelRevisionHash]
 			if hash == "" {
 				continue
 			}
 			serviceName := query.PerRevisionServiceName(input.Key.OwnerName, plan.Component, hash)
-			drained, err := drainer.IsPodDrained(ctx, serviceName, pod)
+			drained, err := b.drainer.IsPodDrained(ctx, serviceName, pod)
 			if err != nil {
 				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}
@@ -465,11 +510,15 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			if pod.DeletionTimestamp != nil {
 				continue
 			}
+			if pod.UID == "" {
+				return false, fmt.Errorf("delete pod %s/%s without an observed UID", pod.Namespace, pod.Name)
+			}
+			uid := pod.UID
 			deps.ExpectationsCache().ExpectDeletes(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index, 1)
-			if err := deps.Client.Delete(ctx, pod); err != nil {
+			if err := deps.Client.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil {
 				deps.ExpectationsCache().ObservedDelete(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index)
-				if apierrors.IsNotFound(err) {
-					continue
+				if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+					return false, nil
 				}
 				return false, fmt.Errorf("delete pod %s/%s: %w", pod.Namespace, pod.Name, err)
 			}
@@ -477,18 +526,10 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return false, nil
 	}
 
-	// Phase B: recreate at the bumped Incarnation.
-	// Live-read the OLD pod set first — a stable-name Create with the
-	// cache stale would AlreadyExists against the still-terminating
-	// previous incarnation. Matches K8s foreground-deletion propagation.
-	clear, err := query.LiveOldPodsClearedForRecreate(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, inst.Index, newInc)
-	if err != nil {
-		return false, fmt.Errorf("Restart: live-check Phase A done (instance=%d): %w", inst.Index, err)
-	}
-	if !clear {
-		return false, nil
-	}
-
+	// Phase B: recreate at the bumped Incarnation. The pods supplied to this
+	// call are the live revalidation for the Instance, and oldPods was empty.
+	// A same-name occupant appearing after that observation makes Create return
+	// AlreadyExists, which createMissingPods treats as benign convergence.
 	// Override Incarnation on the ad-hoc plan so Render stamps the new label.
 	newInst := inst
 	newInst.Incarnation = newInc
@@ -545,7 +586,7 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			}
 			tmpl = desiredTemplate(input, plan, query.RevisionOf(target))
 		} else {
-			tmpl, found, err = rebuildTemplate(ctx, deps, input, plan, target, inst.Index)
+			tmpl, found, err = b.rebuildTemplate(ctx, deps, input, plan, target, inst.Index)
 			if err != nil {
 				return false, fmt.Errorf("Restart: resolve rebuild template (instance=%d): %w", inst.Index, err)
 			}
@@ -575,6 +616,9 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// Lifecycle key on fresh pods; the Restart-drain key only lived
 		// on the now-deleted OLD pods.
 		if err := podreadiness.MarkPodServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
+			if apierrors.IsNotFound(err) || errors.Is(err, podreadiness.ErrPodIdentityChanged) {
+				return false, nil
+			}
 			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
 	}
@@ -626,12 +670,17 @@ func firstFailedPodTermination(pods []*corev1.Pod, now metav1.Time) *workload.In
 // template is composed against. found is false when that revision's
 // ControllerRevision is gone. A row that records no revision is rebuilt
 // from the current template with no revision label, as it was created.
-func rebuildTemplate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision, idx int32) (podTemplate, bool, error) {
+func (b *RestartBatch) rebuildTemplate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision, idx int32) (podTemplate, bool, error) {
 	rev := rebuildRevision(input.ObservedState.Instance(idx))
 	if rev == "" {
 		return desiredTemplate(input, plan, query.RevisionID{}), true, nil
 	}
-	return storedTemplate(ctx, deps.Reader(), input, target, rev)
+	if observation, ok := b.templates[rev]; ok {
+		return observation.template, observation.found, observation.err
+	}
+	tmpl, found, err := storedTemplate(ctx, deps.Reader(), input, target, rev)
+	b.templates[rev] = restartTemplateObservation{template: tmpl, found: found, err: err}
+	return tmpl, found, err
 }
 
 // rebuildRevision names the revision a repair of this row would rebuild

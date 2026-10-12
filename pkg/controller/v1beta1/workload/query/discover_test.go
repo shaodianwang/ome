@@ -11,20 +11,43 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+type listSelectorReader struct {
+	client.Reader
+	selectors []string
+}
+
+func (r *listSelectorReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	listOptions := (&client.ListOptions{}).ApplyOptions(opts)
+	if listOptions.LabelSelector != nil {
+		r.selectors = append(r.selectors, listOptions.LabelSelector.String())
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
 
 func TestLiveListPodsForInstance_FiltersByIndex(t *testing.T) {
 	pod0 := newDiscoverPod("p-0", 0, 1, false)
 	pod1 := newDiscoverPod("p-1", 1, 1, false)
-	c := newDiscoverTestClient(t, pod0, pod1)
+	reader := &listSelectorReader{Reader: newDiscoverTestClient(t, pod0, pod1)}
 
-	got, err := LiveListPodsForInstance(context.Background(), c, "ns", "isvc", workload.ComponentEngine, 0)
+	got, err := LiveListPodsForInstance(context.Background(), reader, "ns", "isvc", workload.ComponentEngine, 0)
 	if err != nil {
 		t.Fatalf("LiveListPodsForInstance: %v", err)
 	}
 	if len(got) != 1 || got[0].Name != "p-0" {
 		t.Errorf("expected only p-0; got %v", podNames(got))
+	}
+	wantSelector := labels.SelectorFromSet(labels.Set{
+		constants.InferenceServicePodLabelKey: "isvc",
+		constants.OMEComponentLabel:           string(workload.ComponentEngine),
+		LabelManagedBy:                        ManagedByOMENative,
+		LabelInstanceIdx:                      "0",
+	}).String()
+	if len(reader.selectors) != 1 || reader.selectors[0] != wantSelector {
+		t.Errorf("List selectors = %v, want [%s]", reader.selectors, wantSelector)
 	}
 }
 

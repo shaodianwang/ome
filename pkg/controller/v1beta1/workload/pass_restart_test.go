@@ -34,14 +34,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// TestReconcile_RestartPass_OneLiveListForManyInstances pins the restart
-// pass's read cost: it does a SINGLE live pod List for the
-// whole Component and buckets by Instance index, not one live List per
-// Instance. With three healthy Ready instances under the gang-default
-// RecreateInstance policy, the live APIReader must see exactly one
-// PodList call from the restart pass (the update / create passes read
-// the cached Client, not the live reader).
-func TestReconcile_RestartPass_OneLiveListForManyInstances(t *testing.T) {
+// TestReconcile_RestartPass_HealthyRecreatePolicyNeedsNoLiveList pins the
+// healthy-path read cost. The cached observation proves there is no candidate,
+// so even RecreateInstance policy does not consult the live APIReader.
+func TestReconcile_RestartPass_HealthyRecreatePolicyNeedsNoLiveList(t *testing.T) {
 	scheme := makeScheme(t)
 	isvc := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod", UID: "uid-1"},
@@ -52,12 +48,6 @@ func TestReconcile_RestartPass_OneLiveListForManyInstances(t *testing.T) {
 		enginePod(isvc.Name, isvc.Namespace, 1),
 		enginePod(isvc.Name, isvc.Namespace, 2),
 	}
-	// The restart pass reads the LIVE reader (APIReader), which has no Pod
-	// field index — liveBucketPods calls ListOMENativePodsByName with
-	// useIndex=false, so it goes straight to the label selector (ONE List).
-	// No index registration here: the live path never probes MatchingFields,
-	// so the assertion measures the per-Component-vs-per-Instance list count
-	// without any index-fallback noise.
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
 		WithObjects(pods...).Build()
@@ -84,11 +74,8 @@ func TestReconcile_RestartPass_OneLiveListForManyInstances(t *testing.T) {
 	if _, err := workload.Reconcile(context.Background(), deps, in, plan, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	// The live reader is used ONLY by the restart pass here (no restart
-	// fires, so no destructive live ops run). It must list once, not once
-	// per Instance.
-	if counter.podListCalls != 1 {
-		t.Errorf("restart pass must issue exactly 1 live pod List for 3 instances, got %d", counter.podListCalls)
+	if counter.podListCalls != 0 {
+		t.Errorf("healthy restart screen issued %d live pod Lists, want 0", counter.podListCalls)
 	}
 }
 
@@ -111,7 +98,8 @@ func TestReconcile_RestartPass_PerInstanceSemanticsPreserved(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
 		WithObjects(objs...).Build()
-	deps := workloadtypes.Deps{Client: c, APIReader: c}
+	counter := &listCountingReader{Reader: c}
+	deps := workloadtypes.Deps{Client: c, APIReader: counter}
 
 	in := minimalInput(t)
 	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
@@ -138,6 +126,15 @@ func TestReconcile_RestartPass_PerInstanceSemanticsPreserved(t *testing.T) {
 	if result.RequeueAfter == 0 {
 		t.Errorf("a restart in flight must requeue; got %+v", result)
 	}
+	if counter.podListCalls != 2 {
+		t.Errorf("restart must use one Component planning List and one narrow execution List; got %d", counter.podListCalls)
+	}
+	if counter.podListItems != 4 {
+		t.Errorf("live Pod Lists returned %d objects, want 3 Component pods + 1 selected Instance pod", counter.podListItems)
+	}
+	if got := counter.podListSelectors[len(counter.podListSelectors)-1]; !strings.Contains(got, query.LabelInstanceIdx+"=1") {
+		t.Errorf("execution List selector = %q, want the selected Instance index", got)
+	}
 
 	fresh := &v1beta1.InferenceService{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
@@ -155,6 +152,105 @@ func TestReconcile_RestartPass_PerInstanceSemanticsPreserved(t *testing.T) {
 		if s != nil && s.Phase == v1beta1.OMENativeInstanceRestarting {
 			t.Errorf("healthy index %d must NOT be restarting; got %+v", idx, s)
 		}
+	}
+}
+
+// Execution read volume is linear in selected Pod sets, not the product of
+// Component size and selected Instances: one full planning observation, then
+// one index-scoped observation per selected Instance.
+func TestReconcile_RestartPass_ReadVolumeIsNotComponentSquared(t *testing.T) {
+	const replicas int32 = 3
+	scheme := makeScheme(t)
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod", UID: "uid-1"},
+	}
+	objects := []client.Object{isvc}
+	in := minimalInput(t)
+	plan := workloadtypes.ComponentPlan{
+		Component:     workloadtypes.ComponentEngine,
+		Replicas:      replicas,
+		RestartPolicy: workloadtypes.RestartPolicyRecreateInstance,
+	}
+	for idx := int32(0); idx < replicas; idx++ {
+		objects = append(objects, failedEnginePod(isvc.Name, isvc.Namespace, idx))
+		in.ObservedState.InstanceStatuses = append(in.ObservedState.InstanceStatuses, workloadtypes.InstanceStatus{
+			Index: idx, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady,
+		})
+		plan.Instances = append(plan.Instances, workloadtypes.InstancePlan{
+			Index: idx, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
+		})
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+		WithObjects(objects...).Build()
+	counter := &listCountingReader{Reader: c}
+	in.MutateInstance = roundTripMutateInstance(c, isvc, workloadtypes.ComponentEngine)
+
+	if _, err := workload.Reconcile(context.Background(), workloadtypes.Deps{
+		Client: c, APIReader: counter, Expectations: workloadtypes.NewExpectations(),
+	}, in, plan, nil); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if want := int(replicas + 1); counter.podListCalls != want {
+		t.Errorf("Pod List calls = %d, want 1 planning + %d selected Instances", counter.podListCalls, replicas)
+	}
+	if want := int(2 * replicas); counter.podListItems != want {
+		t.Errorf("Pod List objects = %d, want %d planning + %d execution objects", counter.podListItems, replicas, replicas)
+	}
+}
+
+// A candidate can disappear between the Component-wide planning observation
+// and execution. The narrow execution read is authoritative: it cancels the
+// stale selection before status, admission, readiness, or delete effects.
+func TestReconcile_RestartPass_RevalidatesBeforeEffects(t *testing.T) {
+	scheme := makeScheme(t)
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod", UID: "uid-1"},
+	}
+	pod := failedEnginePod(isvc.Name, isvc.Namespace, 0)
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(isvc, pod).Build()
+	counter := &listCountingReader{Reader: c}
+	counter.onPodList = func(call int, pods *corev1.PodList) {
+		if call != 2 {
+			return
+		}
+		for i := range pods.Items {
+			pods.Items[i].Status.Phase = corev1.PodRunning
+		}
+	}
+
+	in := minimalInput(t)
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{{
+		Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady,
+	}}
+	mutations := 0
+	in.MutateInstance = func(context.Context, int32, func(*workloadtypes.InstanceStatus) bool) error {
+		mutations++
+		return nil
+	}
+	plan := workloadtypes.ComponentPlan{
+		Component:     workloadtypes.ComponentEngine,
+		Replicas:      1,
+		RestartPolicy: workloadtypes.RestartPolicyRecreateInstance,
+		Instances: []workloadtypes.InstancePlan{{
+			Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
+		}},
+	}
+
+	if _, err := workload.Reconcile(context.Background(), workloadtypes.Deps{Client: c, APIReader: counter}, in, plan, nil); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if mutations != 0 {
+		t.Errorf("stale restart selection performed %d status mutations, want 0", mutations)
+	}
+	if counter.podListCalls != 2 {
+		t.Errorf("Pod List calls = %d, want planning + execution revalidation", counter.podListCalls)
+	}
+	fresh := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), fresh); err != nil {
+		t.Fatalf("stale selection deleted its Pod: %v", err)
 	}
 }
 
