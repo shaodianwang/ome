@@ -19,6 +19,82 @@ import (
 // surface (pods + per-revision routing Services), the routing contract
 // (ComponentTrafficTarget.PairingProtocol), the pair-floor gate during a
 // protocol transition, and the admission rule denying uncoordinated changes.
+// pairableTrafficPairExists is the consumer-view invariant: whenever both
+// pairing Components publish live traffic targets, some engine target and
+// some decoder target must be pairable — equal protocols, or either empty
+// (empty pairs with anything). An empty Traffic list is a status-lag /
+// availability question, not a pairing statement, and does not fail it.
+func pairableTrafficPairExists(c *v1beta1.InferenceService) bool {
+	eng := c.Status.Components[v1beta1.EngineComponent].Traffic
+	dec := c.Status.Components[v1beta1.DecoderComponent].Traffic
+	if len(eng) == 0 || len(dec) == 0 {
+		return true
+	}
+	for _, e := range eng {
+		if e.Percent <= 0 {
+			continue
+		}
+		for _, d := range dec {
+			if d.Percent <= 0 {
+				continue
+			}
+			if e.PairingProtocol == "" || d.PairingProtocol == "" || e.PairingProtocol == d.PairingProtocol {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// assertPairingSurface checks all three protocol surfaces converged on
+// `protocol`: every engine/decoder pod label, every live traffic target,
+// and every routing Service named by a live target.
+func assertPairingSurface(g Gomega, namespace, isvcName, protocol string) {
+	for _, pod := range listOMENativePods(g, namespace, isvcName) {
+		comp := pod.Labels[constants.OMEComponentLabel]
+		if comp != string(v1beta1.EngineComponent) && comp != string(v1beta1.DecoderComponent) {
+			continue
+		}
+		g.Expect(pod.Labels[query.LabelPairingProtocol]).To(Equal(protocol),
+			"pod %s must carry its revision's pairing protocol", pod.Name)
+	}
+	c := freshISVC(g, namespace, isvcName)
+	for _, comp := range []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent} {
+		targets := c.Status.Components[comp].Traffic
+		g.Expect(targets).NotTo(BeEmpty(), "%s must publish traffic targets", comp)
+		for _, tgt := range targets {
+			if tgt.Percent <= 0 {
+				continue
+			}
+			g.Expect(tgt.PairingProtocol).To(Equal(protocol),
+				"%s target %s protocol", comp, tgt.RevisionName)
+			svc := &corev1.Service{}
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: namespace, Name: tgt.RevisionName}, svc)).
+				To(Succeed(), "routing Service %s", tgt.RevisionName)
+			g.Expect(svc.Labels[query.LabelPairingProtocol]).To(Equal(protocol),
+				"routing Service %s pairing label", tgt.RevisionName)
+			g.Expect(svc.Spec.Selector).NotTo(HaveKey(query.LabelPairingProtocol),
+				"pairing protocol must never enter a Service selector")
+		}
+	}
+}
+
+// servingPodsOfCohort counts the Ready, non-terminating pods of one
+// Component that carry protocol.
+func servingPodsOfCohort(g Gomega, namespace, isvcName string, comp v1beta1.ComponentType, protocol string) int {
+	n := 0
+	for _, pod := range listOMENativePods(g, namespace, isvcName) {
+		if pod.Labels[constants.OMEComponentLabel] != string(comp) ||
+			pod.Labels[query.LabelPairingProtocol] != protocol || pod.DeletionTimestamp != nil {
+			continue
+		}
+		if podIsReady(&pod) {
+			n++
+		}
+	}
+	return n
+}
+
 var _ = ginkgo.Describe("behavior — pairing protocol", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -29,66 +105,6 @@ var _ = ginkgo.Describe("behavior — pairing protocol", ginkgo.Ordered, func() 
 	ginkgo.AfterEach(func() {
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
-
-	// pairableTrafficPairExists is the consumer-view invariant: whenever both
-	// pairing Components publish live traffic targets, some engine target and
-	// some decoder target must be pairable — equal protocols, or either empty
-	// (empty pairs with anything). An empty Traffic list is a status-lag /
-	// availability question, not a pairing statement, and does not fail it.
-	pairableTrafficPairExists := func(c *v1beta1.InferenceService) bool {
-		eng := c.Status.Components[v1beta1.EngineComponent].Traffic
-		dec := c.Status.Components[v1beta1.DecoderComponent].Traffic
-		if len(eng) == 0 || len(dec) == 0 {
-			return true
-		}
-		for _, e := range eng {
-			if e.Percent <= 0 {
-				continue
-			}
-			for _, d := range dec {
-				if d.Percent <= 0 {
-					continue
-				}
-				if e.PairingProtocol == "" || d.PairingProtocol == "" || e.PairingProtocol == d.PairingProtocol {
-					return true
-				}
-			}
-		}
-		return false
-	}
-
-	// assertPairingSurface checks all three protocol surfaces converged on
-	// `protocol`: every engine/decoder pod label, every live traffic target,
-	// and every routing Service named by a live target.
-	assertPairingSurface := func(g Gomega, namespace, isvcName, protocol string) {
-		for _, pod := range listOMENativePods(g, namespace, isvcName) {
-			comp := pod.Labels[constants.OMEComponentLabel]
-			if comp != string(v1beta1.EngineComponent) && comp != string(v1beta1.DecoderComponent) {
-				continue
-			}
-			g.Expect(pod.Labels[query.LabelPairingProtocol]).To(Equal(protocol),
-				"pod %s must carry its revision's pairing protocol", pod.Name)
-		}
-		c := freshISVC(g, namespace, isvcName)
-		for _, comp := range []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent} {
-			targets := c.Status.Components[comp].Traffic
-			g.Expect(targets).NotTo(BeEmpty(), "%s must publish traffic targets", comp)
-			for _, tgt := range targets {
-				if tgt.Percent <= 0 {
-					continue
-				}
-				g.Expect(tgt.PairingProtocol).To(Equal(protocol),
-					"%s target %s protocol", comp, tgt.RevisionName)
-				svc := &corev1.Service{}
-				g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: namespace, Name: tgt.RevisionName}, svc)).
-					To(Succeed(), "routing Service %s", tgt.RevisionName)
-				g.Expect(svc.Labels[query.LabelPairingProtocol]).To(Equal(protocol),
-					"routing Service %s pairing label", tgt.RevisionName)
-				g.Expect(svc.Spec.Selector).NotTo(HaveKey(query.LabelPairingProtocol),
-					"pairing protocol must never enter a Service selector")
-			}
-		}
-	}
 
 	ginkgo.It("protocol rides pods, Services, and traffic targets; a protocol bump converges pair-alive", func() {
 		// Config: 2 engine + 2 decoder in one blueGreen group, protocol v1.

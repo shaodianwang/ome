@@ -254,7 +254,7 @@ KIND_SPEC_GROUPS = (
     ("status-events-services", "Status, events, and services", (
         "events", "status", "status_surface", "status_encoding",
         "producer_services", "producer_traffic", "peer_discovery",
-        "multipod_rank0_service", "concurrent_isvcs",
+        "multipod_rank0_service", "concurrent_isvcs", "instance_phase_follows_serving",
     )),
     ("runtime-retry-recovery", "Runtime, retry, and recovery", (
         "bad_image", "crashloop_dark_rolls_first", "crashloop_new_revision_bound",
@@ -265,7 +265,8 @@ KIND_SPEC_GROUPS = (
     )),
     ("pd-topology-isolation", "PD topology and isolation", (
         "pd", "pd_isolation", "pd_three_way", "pd_concurrent", "independent",
-        "pairing_protocol", "pd_peer_revision", "rollback_last_instance_rolling_pd",
+        "pairing_protocol", "pairing_rebump_stranded_cohort", "pd_peer_revision",
+        "rollback_last_instance_rolling_pd",
     )),
     ("bluegreen-core", "BlueGreen rollouts", (
         "bluegreen", "bluegreen_n3", "bluegreen_inplaceonly_happy",
@@ -306,6 +307,7 @@ KIND_SPEC_GROUPS = (
     ("update-core", "Core update strategies", (
         "update", "inplace", "inplace_retag", "recreate_pod", "mixed_strategy",
         "percomponent_surge", "minreadyseconds", "strategy_switch_midsurge", "placement_surge", "placement_floors",
+        "placement_mark_without_policy",
     )),
     ("percomponent-maxsurge", "Multi-instance maxSurge", (
         "percomponent_maxsurge_multiinstance",
@@ -317,7 +319,7 @@ KIND_SPEC_GROUPS = (
     ("gang-recovery", "Gang recovery and wedge", (
         "gang_corrective_rollout", "gang_wedge_nonready", "crashloop_gang_coordination_gate",
         "gang_unpullable_push", "gang_unpullable_scale_down",
-        "packed_pool_gang_vacated_room",
+        "packed_pool_gang_vacated_room", "gang_member_rebuilt_once",
     )),
     ("gang-surge-multipod", "Gang surge and multi-pod", (
         "concurrent_gang_surge", "gang_surge_floor", "multipod_inplace",

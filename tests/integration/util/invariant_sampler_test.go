@@ -210,6 +210,14 @@ func TestInvariantBudgetPlusOne(t *testing.T) {
 			wantDetail:  "2 pairable serving pods, floor 3",
 		},
 		{
+			name:        "a pod created after Ready is a new pod, not a restart",
+			e0:          createdAfterReady(invPod("e0", engine, 0, "h2", "", false), readyAt.Add(time.Minute)),
+			others:      serving("e1", "e2"),
+			row:         promoted(0),
+			wantSubject: "engine",
+			wantDetail:  "2 pairable serving pods, floor 3",
+		},
+		{
 			name:        "two short is the plain finding even with an unproven set",
 			e0:          withLastTermination(invPod("e0", engine, 0, "h2", "", false), readyAt.Add(10*time.Second)),
 			others:      serving("e1"),
@@ -304,6 +312,18 @@ func withRestarts(pod *corev1.Pod, restarts int32) *corev1.Pod {
 
 // withLastTermination records that the pod's main container last exited at
 // finishedAt, the trace a restart leaves on the pod.
+// createdAfterReady is a pod created at createdAt whose runner has run once
+// since, the shape of a pod rebuilt after the set it replaced was lost while
+// the row still carries the ReadySince of that set.
+func createdAfterReady(pod *corev1.Pod, createdAt time.Time) *corev1.Pod {
+	pod.CreationTimestamp = metav1.NewTime(createdAt)
+	pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+		Name:  constants.MainContainerName,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(createdAt.Add(5 * time.Second))}},
+	})
+	return pod
+}
+
 func withLastTermination(pod *corev1.Pod, finishedAt time.Time) *corev1.Pod {
 	pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
 		Name:                 constants.MainContainerName,

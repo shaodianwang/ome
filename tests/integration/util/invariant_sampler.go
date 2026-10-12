@@ -528,9 +528,12 @@ func remembersCrash(row v1beta1.OMENativeInstanceStatus) bool {
 }
 
 // restartedSince reports a pod whose main container ran again after since:
-// its last run ended after that time, or its current run began after it.
+// its last run ended after that time, or its current run began after it. A
+// pod created after since is a new pod, not one of the pods that were Ready
+// then: the first run of its container began after since by construction and
+// is no restart.
 func restartedSince(pod *corev1.Pod, since time.Time) bool {
-	if pod.DeletionTimestamp != nil {
+	if pod.DeletionTimestamp != nil || (!pod.CreationTimestamp.IsZero() && pod.CreationTimestamp.After(since)) {
 		return false
 	}
 	for _, cs := range pod.Status.ContainerStatuses {

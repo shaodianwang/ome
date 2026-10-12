@@ -125,6 +125,9 @@ type fixtureOptions struct {
 	decoderRawMode        bool
 	decoderWorkerSize     int
 	decoderUpdateStrategy v1beta1.UpdateStrategyType
+	// decoderStartupDelaySec delays only the decoder's containers, the
+	// mirror of engineStartupDelaySec.
+	decoderStartupDelaySec int
 
 	// Router knobs.
 	withRouter           bool
@@ -183,6 +186,14 @@ func WithStartupDelay(n int) FixtureOption {
 // get a readiness probe, which is what turns the delay into a NotReady window.
 func WithEngineStartupDelay(n int) FixtureOption {
 	return func(o *fixtureOptions) { o.engineStartupDelaySec = n }
+}
+
+// WithDecoderStartupDelay is WithStartupDelay for the decoder alone: the
+// engine binds at once, so the decoder's replacement is reliably the last
+// one Ready in a pairing transition. The decoder's containers also get a
+// readiness probe, which is what turns the delay into a NotReady window.
+func WithDecoderStartupDelay(n int) FixtureOption {
+	return func(o *fixtureOptions) { o.decoderStartupDelaySec = n }
 }
 
 // WithEngineReplicas sets engine.MinReplicas. Defaults to 1.
@@ -588,6 +599,9 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 	if o.engineStartupDelaySec > 0 {
 		applyEngineStartupDelay(isvc, o.engineStartupDelaySec)
 	}
+	if o.decoderStartupDelaySec > 0 {
+		applyDecoderStartupDelay(isvc, o.decoderStartupDelaySec)
+	}
 	if len(o.coordGroups) > 0 {
 		// Translate the operator-facing v1 coordination groups the specs
 		// author into v2 spec.rollout.groups[]. Independent groups
@@ -679,6 +693,33 @@ func applyEngineStartupDelay(isvc *v1beta1.InferenceService, sec int) {
 	}
 	if e.Worker != nil {
 		stamp(&e.Worker.PodSpec)
+	}
+}
+
+// applyDecoderStartupDelay stamps STARTUP_DELAY_SEC and a readiness probe on
+// the decoder's containers only (single-pod, leader and worker shapes alike).
+func applyDecoderStartupDelay(isvc *v1beta1.InferenceService, sec int) {
+	d := isvc.Spec.Decoder
+	if d == nil {
+		return
+	}
+	val := strconv.Itoa(sec)
+	stamp := func(ps *v1beta1.PodSpec) {
+		if ps == nil {
+			return
+		}
+		for i := range ps.Containers {
+			ps.Containers[i].Env = append(ps.Containers[i].Env,
+				corev1.EnvVar{Name: "STARTUP_DELAY_SEC", Value: val})
+			ps.Containers[i].ReadinessProbe = fakeServingReadinessProbe()
+		}
+	}
+	stamp(&d.PodSpec)
+	if d.Leader != nil {
+		stamp(&d.Leader.PodSpec)
+	}
+	if d.Worker != nil {
+		stamp(&d.Worker.PodSpec)
 	}
 }
 
