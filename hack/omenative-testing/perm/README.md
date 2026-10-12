@@ -125,7 +125,8 @@ perm/
 │   ├── gen-repeat/            — generated: faults that keep repeating until they are lifted (`repeat=<n>`)
 │   ├── gen-webhook/ gen-conflict/  — generated window faults: the admission webhook unreachable, a competing writer
 │   ├── gen-crash-once/  — generated: a crash that happens exactly once (once=1), at start or after Ready, on either revision, the engine's or a sibling's
-│   └── gen-lift/        — generated: a cause kept to the end of the case or taken away after a while (the config key, readiness and image pull, on either revision)
+│   ├── gen-lift/        — generated: a cause kept to the end of the case or taken away after a while (the config key, readiness and image pull, on either revision)
+│   └── gen-stale-record/ gen-canary-stale-record/  — generated: a stale revision record (the engine's rolled-out record written back to the revision before the one it runs) on the settled service and under every operation, and under a canary's gate on the shapes the hand-written cases leave
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -626,7 +627,9 @@ such as the recovery half of a podkill, carries both ids.
   gate's rollback parked the unit on the empty stable revision
   (`StableRevisionMissing`, with a `CanaryStableRevisionEmpty` event naming
   the member) and that no pod of the member was rebuilt onto the aged
-  revision.
+  revision. Beyond a canary the same fault lands on the settled service and
+  under every other operation (see *A stale revision record under every
+  operation* in the fault cases).
 - **`terminal=Stable|RolledBack|Failed`** — the expected terminal phase when the
   derivation from `analysis=`/`rollback=` does not apply; `Failed` asserts the
   park (no canary traffic, not fully rolled, nothing rolled back).
@@ -2157,6 +2160,44 @@ cell on the six shape families (the surge strategy, the env edit):
   (from p4698) runs it on the six shape families, and `repeat=<n>` is the
   same loop applied again each time the manager is Ready.
 
+- **`fault=agerecord:<hook>` beyond a canary: a stale revision record under
+  every operation.** The rolled-out record
+  (`status.components.<c>.latestRolledoutRevision`) names the revision that
+  owns a Component's traffic; a canary rollback reads it as the revision to
+  return to. It goes stale when a status write is lost or overwritten (a
+  conflict with another writer, a manager restarted between the pods'
+  switch and the write, a status put back from a backup, a hand patch), and
+  only the controller's own writers put it right, on a pass that sees the
+  Component's pods on one revision. The fault writes the victim's record
+  (`victimcomp=`, default engine) back to the revision it ran before the
+  one it runs, which needs history: `preroll=` must name the victim, and
+  the runner rolls it once before the story (every Instance on the new
+  revision and serving, the rows settled, the record naming it with the old
+  revision as its previous one), then starts the watch over from that
+  fleet. The record stays wrong until the controller rewrites it, so the
+  fault has one form, the persistent one. Where it lands:
+  `agerecord:idle during=idle` on the settled service with nothing to
+  follow (`mode=rollout`; a status write wakes no controller, so the runner
+  waits `RECORD_OWN_PASS_S` for a pass of the controller's own, then sets an
+  inert annotation on the ISVC, `perm.test/record-nudge`, so it looks once,
+  and allows `RECORD_LEVEL_S` more) or ahead of a scale or a delete
+  (`mode=scaledown|recreate`); `agerecord:settling|rotating|draining` under
+  a push or a runtime edit (a hook of the roll) and `agerecord:settling` as
+  a rollback or a mid-roll edit lands once it has fired at its own
+  `during=` hook; `agerecord:migrating at=<moment>` at a moment of a move.
+  The verdict: the operation completes within its budget with the usual
+  floor, order, gang and index checks (a rollback ends on the starting
+  revision, an edit on the live spec, a move's row Completed, a delete
+  followed by the same-name recreate), no pod of the victim is ever seen on
+  the aged revision, and the record names a revision the victim's pods run
+  again (`RECORD_LEVEL_S` allowed after the operation for the write that
+  levels it; after a delete the re-created service's record names the
+  revision it runs). `lift=`, `once=`, `repeat=` and the break knobs do not
+  combine with it. `isvcs/gen-stale-record/` runs one case per ledger cell
+  on the six shape families; `isvcs/gen-canary-stale-record/` runs the
+  canary form (the gate's rollback parks on the empty stable revision) on
+  the four shapes the hand-written cases leave.
+
 - **`fault=readiness:old` with `form=persist|recover`** (rollout mode,
   `during=idle` only) makes one serving pod of the running revision — the
   break victim, `victimcomp=` as above — stop passing its readiness probe
@@ -3244,7 +3285,10 @@ operation meets is a plain roll, the operation+operation overlap); a
 repeating node loss during a delete has no state left to lose after the
 first loss (a pod deleted by hand, a lost gang member, an eviction or a
 preemption repeats only once what it took has come back, and a delete
-brings nothing back), so only the one-shot loss stays under a delete. The
+brings nothing back), so only the one-shot loss stays under a delete; a
+stale revision record has no one-shot form (it is one wrong status entry
+that stays until the controller rewrites it, not a cause that can be taken
+away again), so only its persistent row stays. The
 ledger prints the cells each reason removes; `--check` fails on a removed
 cell that has a case and on a rule that removes nothing. The
 report lists the empty cells biggest holes first (the fault rows,

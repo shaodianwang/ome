@@ -2848,6 +2848,33 @@ RECORD_FAULT = "agerecord"
 # records, naming the member and the revision.
 STABLE_UNAVAILABLE_REASON = "StableRevisionMissing"
 STABLE_EMPTY_EVENT = "CanaryStableRevisionEmpty"
+# The record fault beyond a canary. The rolled-out record is the status
+# entry naming the revision that owns a Component's traffic
+# (status.components.<c>.latestRolledoutRevision); a canary rollback reads
+# it as the revision to return to. It goes stale when a status write is lost
+# or overwritten (a conflict with another writer, a manager restarted between
+# the pods' switch and the write, a status put back from a backup, a hand
+# patch), and only the controller's own writers put it right, on a pass that
+# sees the Component's pods on one revision. The fault lands on the settled
+# service (agerecord:idle with during=idle: nothing follows, or a scale or a
+# delete lands on the aged record), as a push lands or at a hook of its roll
+# (agerecord:settling|rotating|draining), as a rollback or a mid-roll edit
+# lands once it has fired at its own hook (agerecord:settling), at a hook of
+# the roll a runtime edit starts, or at a moment of a move
+# (agerecord:migrating at=<moment>). Every form is the persistent one: the
+# record stays wrong until the controller rewrites it. A status write wakes
+# no controller, so the steady-state form waits RECORD_OWN_PASS_S for the
+# controller's own pass, then touches an inert annotation on the ISVC so it
+# looks once, and allows RECORD_LEVEL_S more; an operation's own passes meet
+# the record, and its verdict allows RECORD_LEVEL_S after the operation has
+# converged for the write that levels it.
+RECORD_OP_MODES = {"rollout", "scaledown", "runtimerev", "migrate", "recreate"}
+RECORD_IDLE_MODES = {"rollout", "scaledown", "recreate"}
+RECORD_ROLL_HOOKS = {"settling", "rotating", "draining"}
+RECORD_OWN_PASS_S = int(60 * TIMEOUT_MULT)
+RECORD_LEVEL_S = int(60 * TIMEOUT_MULT)
+RECORD_POLL_S = 5.0
+RECORD_NUDGE_ANNO = "perm.test/record-nudge"
 # The revision value a preroll bumps the named members to; the case's own
 # bump uses TRIGGER_VAL, a re-bump its own value, so the three stay distinct.
 PREROLL_VAL = "pre"
@@ -6372,9 +6399,10 @@ def _fault_ok(v):
     if kind == SOURCE_FAULT:
         return param == IDLE_FAULT_PHASE or _canary_hook_ok(param)
     if kind == RECORD_FAULT:
-        # The stable identity aged on the idle service before the push, or
-        # at a canary grid state under the pinned run.
-        return param == IDLE_FAULT_PHASE or _canary_hook_ok(param)
+        # The record aged on the settled service, as an operation lands or
+        # at a hook of its roll, at a moment of a move, or at a canary grid
+        # state under the pinned run.
+        return param == IDLE_FAULT_PHASE or param in FAULT_PHASES or _canary_hook_ok(param)
     if kind == "configkey":
         # The running revision's key removed (missing; under a canary before
         # the push, idle, or at a grid state) or a pushed revision reading a
@@ -6627,6 +6655,203 @@ def _agerecord_checks(f, st, events, verdict, notes, checks):
     rebuilt = sorted(f.get("rebuilt_onto_aged") or ())
     ok(not rebuilt, f"no {comp} pod was rebuilt onto the aged revision {f.get('aged_hash')}",
        f"{len(rebuilt)} {comp} pod(s) rebuilt onto the aged revision {f.get('aged_hash')}: {', '.join(rebuilt)}")
+    return verdict
+
+
+def _record_names(status, comp):
+    """(latest, previous) rolled-out revision names on comp's record."""
+    cs = (status.get("components") or {}).get(comp) or {}
+    return str(cs.get("latestRolledoutRevision") or ""), str(cs.get("previousRolledoutRevision") or "")
+
+
+def _record_stands(pod_state, comp):
+    """The revision hashes comp's alive pods run."""
+    return {p["hash"] for p in pod_state.values() if p and p["alive"] and p.get("comp") == comp and p.get("hash")}
+
+
+def _preroll_recorded(ctx, st, members):
+    """Whether each prerolled member's record names a revision its pods run,
+    with the revision it left as its previous one: the history the record
+    fault ages. (True, "") or (False, why)."""
+    for c in sorted(members):
+        latest, previous = _record_names(st, c)
+        if _revision_name_hash(latest) not in _record_stands(ctx["pod_state"], c):
+            return False, f"{c}: the rolled-out record names {latest or 'nothing'}, not the revision its pods run"
+        if not previous or previous == latest:
+            return False, f"{c}: no previous rolled-out revision on record yet"
+    return True, ""
+
+
+def _preroll_history(ctx, members):
+    """preroll=<members> outside a canary: roll the named members once
+    before the case's own story, so the service has history: every Instance
+    on a new revision and serving, the rows settled, and each member's
+    record naming the revision it now runs with the one it left as its
+    previous revision. The watcher is then re-baselined so the story is
+    judged on its own. Returns (ok, message)."""
+    cid = ctx["case_id"]
+    if not _bump_rev(ctx, members, val=PREROLL_VAL):
+        return False, "preroll bump patch failed: " + str(ctx.get("trigger_error") or "")
+    ctx["trigger_ts"] = None   # history, not the story: no hook fires on it
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(
+        ctx["N"][c] * ctx["pods_per_inst"].get(c, 1) for c in members) + 120)
+    print(f"  Phase 1b: preroll {sorted(members)} to a new revision (≤{budget}s)")
+    t0, last_poll, settled_since, why = time.time(), 0.0, None, ""
+    while time.time() - t0 < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        if now - last_poll < 2.0:
+            continue
+        last_poll = now
+        ok, why = _preroll_pods_settled(ctx, members)
+        if ok:
+            ok, why = _rolled_ir_settled(_fetch_initial_ir_items(cid) or [], ctx["N"], set(members))
+        if ok:
+            ok, why = _preroll_recorded(ctx, fetch_status(cid), members)
+        if not ok:
+            settled_since = None
+            continue
+        settled_since = settled_since or now
+        if now - settled_since >= STABILITY_S:
+            break
+    else:
+        return False, f"preroll: {sorted(members)} did not settle on the new revision within {budget}s ({why})"
+    _rebaseline(ctx)
+    note = f"preroll: {sorted(members)} rolled to a new revision in {time.time() - t0:.0f}s; the story starts from there"
+    if ctx.get("fault"):
+        ctx["fault"]["notes"].append(note)
+    print(f"    {note}")
+    return True, ""
+
+
+def _record_tick(f, st, pod_state, now):
+    """Fold one sample into the record fault beyond a canary: the victim's
+    pods seen on the aged revision (the rebuild a rollback onto it would
+    be), and the first sample that reads the record level again, naming a
+    revision the victim's pods run that is not the aged one. st is None
+    when only the pods were read."""
+    if not f or f.get("kind") != RECORD_FAULT or not f.get("fired") or f.get("infra_fail"):
+        return
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    for name, p in pod_state.items():
+        if p and p["alive"] and p.get("comp") == comp and p.get("hash") == f.get("aged_hash"):
+            f.setdefault("rebuilt_onto_aged", set()).add(name)
+    if st is None:
+        return
+    latest, _previous = _record_names(st, comp)
+    f["record_last"] = latest
+    if f.get("leveled_at") is None and latest:
+        on = _revision_name_hash(latest)
+        if on and on != f.get("aged_hash") and on in _record_stands(pod_state, comp):
+            f["leveled_at"] = now
+
+
+def _record_track(ctx, f):
+    """Per read under the record fault: the pods on every read, the status
+    every RECORD_POLL_S."""
+    if not f.get("fired") or f.get("infra_fail"):
+        return
+    now = time.time()
+    st = None
+    if now - f.get("record_polled", 0.0) >= RECORD_POLL_S:
+        f["record_polled"] = now
+        st = fetch_status(ctx["case_id"])
+    _record_tick(f, st, ctx["pod_state"], now)
+
+
+def _watch_record_level(ctx, f, budget):
+    """Read the fleet until the record reads level again or the budget is
+    spent; True when it did."""
+    t0 = time.time()
+    while time.time() - t0 < budget and not ctx["closed"]:
+        _read_one(ctx)
+        if f.get("leveled_at") is not None:
+            return True
+    return f.get("leveled_at") is not None
+
+
+def _record_nudge(f, case_id):
+    """Make the controller look at the service once: an inert annotation on
+    the ISVC, a metadata change it reconciles on and nothing reads."""
+    rr = kubectl("-n", NS, "annotate", "isvc", case_id, f"{RECORD_NUDGE_ANNO}={int(time.time())}", "--overwrite")
+    f["nudged_at"] = time.time()
+    f["notes"].append(f"the controller was asked to look at the service ({RECORD_NUDGE_ANNO} set)"
+                      + ("" if rr.returncode == 0 else f"; the annotate failed: {rr.stderr.strip()[:100]}"))
+    print(f"    ⚡ {f['notes'][-1]}")
+    return rr.returncode == 0
+
+
+def _record_fired_checks(f, verdict, notes, checks):
+    """The record fault beyond a canary fired, and no pod of the victim was
+    ever rebuilt onto the aged revision."""
+    if not f or f.get("infra_fail"):
+        return verdict
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    if not f.get("fired"):
+        verdict = "FAIL"
+        notes.append(f"{RECORD_FAULT}:{f.get('param')} never fired")
+        checks.append(f"  ✗ {RECORD_FAULT}:{f.get('param')} never fired: {comp}'s record was never aged")
+        return verdict
+    checks.append(f"  ✓ {comp}'s rolled-out record was aged from {f.get('aged_from')} back to {f.get('aged_to')}")
+    rebuilt = sorted(f.get("rebuilt_onto_aged") or ())
+    if rebuilt:
+        verdict = "FAIL"
+        notes.append(f"{len(rebuilt)} {comp} pod(s) rebuilt onto the aged revision")
+        checks.append(f"  ✗ {len(rebuilt)} {comp} pod(s) rebuilt onto the aged revision {f.get('aged_hash')}: {', '.join(rebuilt[:4])}")
+    else:
+        checks.append(f"  ✓ no {comp} pod was rebuilt onto the aged revision {f.get('aged_hash')}")
+    return verdict
+
+
+def _record_level_checks(f, ctx, what, verdict, notes, checks):
+    """The record fault's verdict under an operation: it fired, nothing was
+    rebuilt onto the aged revision, and the record names a revision the
+    victim's pods run again by the end, with RECORD_LEVEL_S allowed after
+    `what` for the write that levels it."""
+    verdict = _record_fired_checks(f, verdict, notes, checks)
+    if not f or f.get("infra_fail") or not f.get("fired"):
+        return verdict
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    if f.get("leveled_at") is None:
+        _watch_record_level(ctx, f, RECORD_LEVEL_S)
+    latest = f.get("record_last") or ""
+    if f.get("leveled_at") is not None:
+        checks.append(f"  ✓ {comp}'s record names the revision it stands on again ({_revision_name_hash(latest) or latest}), "
+                      f"{f['leveled_at'] - f['fired_ts']:.0f}s after it was aged")
+    else:
+        stands = ", ".join(sorted(_record_stands(ctx["pod_state"], comp))) or "nothing"
+        verdict = "FAIL"
+        notes.append(f"{comp}'s record still names {latest or 'nothing'} (aged to {f.get('aged_to')})")
+        checks.append(f"  ✗ {comp}'s record still names {latest or 'nothing'} (aged to {f.get('aged_to')}) while its pods run "
+                      f"{stands}, {RECORD_LEVEL_S}s after {what}")
+    return verdict
+
+
+def _record_recreate_checks(ctx2, verdict, notes, checks):
+    """After a delete under a stale record: the service re-created under the
+    same name carries a record naming the revision it runs (the aged entry
+    went with the deleted object), read within ROWS_SETTLE_S of Ready."""
+    f = ctx2.get("fault") or {}
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    deadline, last_poll = time.time() + ROWS_SETTLE_S, 0.0
+    latest, stands = "", set()
+    while time.time() < deadline and not ctx2["closed"]:
+        _read_one(ctx2)
+        now = time.time()
+        if now - last_poll < RECORD_POLL_S:
+            continue
+        last_poll = now
+        latest, _previous = _record_names(fetch_status(ctx2["case_id"]), comp)
+        stands = _record_stands(ctx2["pod_state"], comp)
+        if latest and _revision_name_hash(latest) in stands:
+            break
+    if latest and _revision_name_hash(latest) in stands:
+        checks.append(f"  ✓ recreate: {comp}'s record names the revision the re-created service runs ({_revision_name_hash(latest)})")
+    else:
+        verdict = "FAIL"
+        notes.append(f"the re-created service's record names {latest or 'nothing'}")
+        checks.append(f"  ✗ recreate: {comp}'s record names {latest or 'nothing'} while its pods run "
+                      f"{', '.join(sorted(stands)) or 'nothing'}, {ROWS_SETTLE_S}s after Ready")
     return verdict
 
 
@@ -12442,6 +12667,8 @@ def _idle_fault(case_id, yaml_file, desc, hdr):
         return _finish(case_id, desc, hdr, ctx, *_idle_ctrl_loop(ctx, f, hdr))
     if f["kind"] in WINDOW_FAULTS:
         return _finish(case_id, desc, hdr, ctx, *_idle_window(ctx, f, hdr))
+    if f["kind"] == RECORD_FAULT:
+        return _finish(case_id, desc, hdr, ctx, *_idle_record(ctx, f, hdr))
     if _fix_push_case(hdr):
         expect = "the fix pushed once the break shows"
     elif f["kind"] == READINESS_FAULT:
@@ -15674,10 +15901,11 @@ def _window_op_checks(ctx, op, state, rb, medit, mv, acting, verdict, notes, che
     return verdict
 
 
-def _window_recreate(case_id, yaml_file, desc, hdr, ctx, state, verdict, notes, checks):
+def _window_recreate(case_id, yaml_file, desc, hdr, ctx, state, verdict, notes, checks, after=None):
     """Pass 2 of a window over a delete: once the delete has converged, the
     same manifest is applied again under the same name and must reach
-    Ready on fresh pods."""
+    Ready on fresh pods. after(ctx2, verdict, notes, checks) -> verdict, when
+    given, reads the re-created service before the finish."""
     pass1 = {p["uid"] for p in ctx["pod_state"].values() if p and p.get("uid")}
     _stop_watcher(ctx)
     hdr2 = dict(hdr)
@@ -15699,6 +15927,8 @@ def _window_recreate(case_id, yaml_file, desc, hdr, ctx, state, verdict, notes, 
     else:
         checks.append(f"  ✓ recreate: the service came back under the same name on fresh pods, "
                       f"Ready {ctx2['converged_at']:.0f}s after the apply")
+    if after is not None:
+        verdict = after(ctx2, verdict, notes, checks)
     return _finish(case_id, desc, hdr, ctx2, state, verdict, notes, checks)
 
 
@@ -16305,6 +16535,155 @@ def _hook_op(case_id, yaml_file, desc, hdr):
     if op == "delete" and completed:
         return _window_recreate(case_id, yaml_file, desc, hdr, ctx, state, verdict, notes, checks)
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
+def _record_op(case_id, yaml_file, desc, hdr):
+    """An operation met by a stale revision record (fault=agerecord beyond a
+    canary). The service is rolled once first (preroll=), so a previous
+    revision is on record; then the victim's rolled-out record is written
+    back to it: on the settled service ahead of a scale or a delete
+    (agerecord:idle during=idle), as a push, a rollback, a mid-roll edit or
+    a runtime edit lands or at a hook of its roll, or at a moment of a move.
+    The operation must complete as if the record were right, no pod of the
+    victim may ever be rebuilt onto the aged revision, and the record must
+    name the revision the victim stands on by the end; after a delete the
+    re-created service's record names the revision it runs."""
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    f, configured, ppi = ctx["fault"], ctx["configured"], ctx["pods_per_inst"]
+    f["hook_op"] = True   # this driver fires it; the phase hooks leave it alone
+    members = {m.strip() for m in str(hdr.get("preroll") or "").split(",") if m.strip()} & configured
+    ok, msg = _preroll_history(ctx, members)
+    if not ok:
+        _stop_watcher(ctx)
+        return _write_fail(case_id, desc, hdr, "PREROLL_FAIL", msg)
+    op, hook, comp = _window_operation(hdr), f["param"], f.get("victimcomp") or BREAK_DEFAULT_COMP
+    what = WINDOW_WHAT[op]
+    ahead = hook == IDLE_FAULT_PHASE   # aged on the settled service, then the operation lands on it
+    ctx["on_read"] = lambda c: _record_track(c, f)
+    if ahead:
+        print(f"  Phase 2a: {RECORD_FAULT}:{hook} on the settled service ({comp}'s record aged), then {what}")
+        _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
+        f["hook_op_fired"] = True
+        if f["infra_fail"]:
+            return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
+    when = ("with the record already aged" if ahead
+            else f"{RECORD_FAULT}:{hook} at {hdr.get('at')} of the move" if op == "move"
+            else f"{RECORD_FAULT}:{hook} at {hook}" if hook != "settling" else f"{RECORD_FAULT}:{hook} as it lands")
+    st = _op_launch(ctx, hdr, op, when)
+    if st["error"]:
+        return _finish(case_id, desc, hdr, ctx, "TRIGGER_FAIL", "FAIL",
+                       [f"trigger failed: {st['error']}"], [f"  ✗ trigger failed: {st['error']}"])
+    rb, medit, mv = st["rb"], st["medit"], st["mv"]
+    acting, done, budget = st["acting"], st["done"], st["budget"]
+    if not ahead:
+        reached, why = _window_wait_hook(ctx, op, hook, rb, medit, mv, acting, done, budget)
+        if not reached:
+            f["infra_fail"] = f"{RECORD_FAULT}:{hook}: the hook was never reached — {why}"
+            return _finish(case_id, desc, hdr, ctx, "HOOK_MISSED", "INFRA-FAIL", [why], [f"  ✗ {f['infra_fail']}"])
+        _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
+        f["hook_op_fired"] = True
+        if f["infra_fail"]:
+            return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
+    print(f"  Phase 3: watching {what} complete with {comp}'s record aged (≤{budget}s)")
+    state = _hook_op_watch(ctx, f, done, budget)
+    completed = state == "CONVERGED"
+    verdict, notes, checks = "PASS", [], []
+    if completed:
+        checks.append(f"  ✓ {what} completed {ctx.get('converged_at') or 0:.0f}s after the trigger with the record aged")
+    elif state != "INFRA-FAIL":
+        verdict = "FAIL"
+        notes.append(f"{what} did not complete under the stale record ({state})")
+        checks.append(f"  ✗ {what} did not complete within budget under the stale record ({state})")
+    verdict = _ceiling_checks(ctx, verdict, notes, checks)
+    if op != "delete":
+        verdict = min_ready_checks(ctx, sorted(configured if op == "scale" else acting), verdict, notes, checks)
+        verdict = gang_atomicity_checks(ctx, sorted(acting), verdict, notes, checks)
+        if completed and op != "move":
+            verdict = index_collision_checks(ctx, sorted(acting), verdict, notes, checks)
+        if op in ("push", "rollback", "edit", "runtime"):
+            verdict = surge_before_drain_checks(ctx, sorted(acting), verdict, notes, checks)
+    if completed or op == "edit":
+        verdict = _window_op_checks(ctx, op, state, rb, medit, mv, acting, verdict, notes, checks)
+    if op == "delete":
+        # The record went with the object: the teardown owes the fault having
+        # fired and nothing rebuilt; the re-created service's record is read after it.
+        verdict = _record_fired_checks(f, verdict, notes, checks)
+        if completed:
+            return _window_recreate(case_id, yaml_file, desc, hdr, ctx, state, verdict, notes, checks,
+                                    after=_record_recreate_checks)
+        return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+    verdict = _record_level_checks(f, ctx, f"{what} ended", verdict, notes, checks)
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
+def _idle_record(ctx, f, hdr):
+    """The record fault on the settled service (fault=agerecord:idle
+    during=idle, mode=rollout): the service is rolled once first (preroll=),
+    the victim's rolled-out record is aged, and nothing else is asked of
+    the service. Nothing may move (no pod created or taken down, every
+    Instance keeps serving), no pod may be rebuilt onto the aged revision,
+    and the record must read level again on the controller's next pass
+    over the service: its own within RECORD_OWN_PASS_S, else the one the
+    harness asks for by touching an inert annotation on the ISVC, within
+    RECORD_LEVEL_S more. Returns (state, verdict, notes, checks)."""
+    case_id, N, configured, ppi = ctx["case_id"], ctx["N"], ctx["configured"], ctx["pods_per_inst"]
+    f["hook_op"] = True
+    members = {m.strip() for m in str(hdr.get("preroll") or "").split(",") if m.strip()} & configured
+    ok, msg = _preroll_history(ctx, members)
+    if not ok:
+        return "PREROLL_FAIL", "INFRA-FAIL", [msg], [f"  ✗ {msg}"]
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    ctx["on_read"] = lambda c: _record_track(c, f)
+    ctx["track_comps"] = sorted(configured)
+    print(f"  Phase 2: {RECORD_FAULT}:{f['param']} on the settled service ({comp}'s record aged; no operation follows)")
+    _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
+    f["hook_op_fired"] = True
+    ctx["trigger_ts"] = time.time()
+    if f["infra_fail"]:
+        return "INFRA-FAIL", "INFRA-FAIL", [], []
+    print(f"  Phase 3: waiting ≤{RECORD_OWN_PASS_S}s for the controller's own pass to level the record — nothing may move")
+    leveled = _watch_record_level(ctx, f, RECORD_OWN_PASS_S)
+    if not leveled:
+        _record_nudge(f, case_id)
+        print(f"  Phase 4: waiting ≤{RECORD_LEVEL_S}s for the pass the controller was asked for")
+        leveled = _watch_record_level(ctx, f, RECORD_LEVEL_S)
+    print(f"  Phase 5: holding {LIFT_SETTLE_S}s more — still nothing may move")
+    after = time.time() + LIFT_SETTLE_S
+    while time.time() < after and not ctx["closed"]:
+        _read_one(ctx)
+    state = "LEVELED" if leveled else "STALE"
+    verdict, notes, checks = "PASS", [], []
+    verdict = _record_fired_checks(f, verdict, notes, checks)
+    if leveled:
+        how = ("on the controller's own pass" if f.get("nudged_at") is None or f["leveled_at"] < f["nudged_at"]
+               else f"{f['leveled_at'] - f['nudged_at']:.0f}s after the controller was asked to look")
+        checks.append(f"  ✓ {comp}'s record was brought level with the revision it stands on "
+                      f"{f['leveled_at'] - f['fired_ts']:.0f}s after it was aged ({how})")
+    else:
+        verdict = "FAIL"
+        notes.append(f"{comp}'s record still names the aged revision {f.get('aged_to')}")
+        checks.append(f"  ✗ {comp}'s record still names the aged revision {f.get('aged_to')} after the controller's own pass "
+                      f"({RECORD_OWN_PASS_S}s) and one it was asked for ({RECORD_LEVEL_S}s more)")
+    verdict = _idle_peak_checks(ctx, verdict, notes, checks)
+    min_ready = ctx.get("min_ready") or {}
+    for c in sorted(configured):
+        held = min_ready.get(c, N[c])
+        if held < N[c]:
+            verdict = "FAIL"
+            notes.append(f"{c} dropped to {held} serving Instance(s) on the steady service")
+            checks.append(f"  ✗ {c} dropped to {held} serving Instance(s) (N={N[c]}) while nothing was asked of it")
+        else:
+            checks.append(f"  ✓ {c} kept {N[c]} serving Instance(s) throughout")
+    settled, why = _wait_rows_settled(case_id, N, configured, ROWS_SETTLE_S)
+    if settled:
+        checks.append("  ✓ every row ends Ready with no operation open")
+    else:
+        verdict = "FAIL"
+        notes.append(f"the rows did not settle: {why}")
+        checks.append(f"  ✗ the rows did not settle within {ROWS_SETTLE_S}s: {why}")
+    return state, verdict, notes, checks
 
 
 def _idle_window(ctx, f, hdr):
@@ -17037,9 +17416,12 @@ def validate_case_file(path):
             # The manager deleted on the settled service: once, or again each
             # time it is Ready (repeat=<n>).
             idle_restart = fault_kind == "ctrlrestart" and fault_param == IDLE_FAULT_PHASE
-            if fault_kind not in IDLE_FAULTS and not idle_restart:
+            idle_record = fault_kind == RECORD_FAULT and fault_param == IDLE_FAULT_PHASE
+            if fault_kind not in IDLE_FAULTS and not idle_restart and not idle_record:
                 errs.append(f"{path}:1: during={IDLE_FAULT_PHASE} needs a persistent fault to fire "
                             f"(fault={'|'.join(sorted(IDLE_FAULTS))}:…, or fault=ctrlrestart:{IDLE_FAULT_PHASE} [repeat=<n>])")
+        elif broken_op and fault_kind == RECORD_FAULT:
+            pass   # the record aged on the settled service, then the scale or the delete lands on it (the record rules below)
         elif broken_op:
             break_param = CONFIGKEY_PARAM if fault_kind == "configkey" else CRASHLOOP_VICTIM
             if fault_kind in BROKEN_OP_PENDING:
@@ -17356,6 +17738,52 @@ def validate_case_file(path):
                             f"(the source restored once the hold has settled, or kept to the end)")
             if any(k in fields for k in ("victim", "victimcomp", "victims")):
                 errs.append(f"{path}:1: fault={fields.get('fault')} breaks the whole gate's source; victim knobs do not apply")
+    if fault_kind == RECORD_FAULT:
+        # The rolled-out record aged back to the revision before the one the
+        # victim runs: the service needs that history (preroll= names the
+        # victim), and the fault lands on the settled service, under one
+        # operation at its hook, or at a canary grid state; nothing is lifted
+        # or repeated, since the record stays wrong until the controller
+        # rewrites it.
+        record_victim = str(fields.get("victimcomp") or BREAK_DEFAULT_COMP)
+        prerolled = {m.strip() for m in str(fields.get("preroll") or "").split(",") if m.strip()}
+        if record_victim not in prerolled:
+            errs.append(f"{path}:1: fault={fields.get('fault')} ages {record_victim}'s rolled-out record back to the revision "
+                        f"it ran before the one it runs, so the service needs that history (preroll= must name {record_victim})")
+        record_op = _window_operation(fields)
+        if mode == "canary":
+            pass   # the idle service before the push, or a grid state: the canary rules apply
+        elif mode not in RECORD_OP_MODES:
+            errs.append(f"{path}:1: fault={RECORD_FAULT}:{fault_param} lands on the settled service or under a push, a rollback, "
+                        f"a mid-roll edit, a scale, a runtime edit, a move or a delete (mode={'|'.join(sorted(RECORD_OP_MODES))}), "
+                        f"or at a canary grid state (mode=canary)")
+        elif fault_param == IDLE_FAULT_PHASE:
+            if during != IDLE_FAULT_PHASE or mode not in RECORD_IDLE_MODES:
+                errs.append(f"{path}:1: fault={RECORD_FAULT}:{IDLE_FAULT_PHASE} ages the record on the settled service and goes with "
+                            f"during={IDLE_FAULT_PHASE}: nothing follows (mode=rollout), or a scale or a delete lands on it "
+                            f"(mode={'|'.join(sorted(RECORD_IDLE_MODES - {'rollout'}))})")
+        elif fault_param == WINDOW_MOVE_PHASE:
+            if mode != "migrate" or not at_move:
+                errs.append(f"{path}:1: fault={RECORD_FAULT}:{WINDOW_MOVE_PHASE} ages the record at a moment of a move "
+                            f"(mode=migrate at={'|'.join(sorted(MOVE_HOOKS))})")
+        else:
+            allowed = (RECORD_ROLL_HOOKS if record_op in ("push", "runtime")
+                       else {"settling"} if record_op in ("rollback", "edit") else set())
+            if fault_param not in allowed:
+                errs.append(f"{path}:1: fault={RECORD_FAULT}:{fault_param} fires at a hook of a push or a runtime edit "
+                            f"({'|'.join(sorted(RECORD_ROLL_HOOKS))}), or as a rollback or a mid-roll edit lands once it has "
+                            f"fired at its own hook (settling); a scale and a delete land on the aged record "
+                            f"(fault={RECORD_FAULT}:{IDLE_FAULT_PHASE} during={IDLE_FAULT_PHASE})")
+            if record_op == "rollback" and during not in WINDOW_ROLLBACK_HOOKS:
+                errs.append(f"{path}:1: the record aged over a rollback fires once the rollback has fired at "
+                            f"during={'|'.join(sorted(WINDOW_ROLLBACK_HOOKS))}")
+        if mode != "canary" and str(fields.get("expect", "roll")) != "roll":
+            errs.append(f"{path}:1: expect={fields.get('expect')} does not combine with fault={RECORD_FAULT}: the operation's "
+                        f"completion and the record are the verdict")
+        for k in ("lift", "once", "repeat", "form", "victim", "blocked", "stuck", "pauseat", "push", "break", "needs"):
+            if k in fields:
+                errs.append(f"{path}:1: {k}= does not combine with fault={RECORD_FAULT}:{fault_param} (the record stays wrong "
+                            f"until the controller rewrites it; nothing is lifted or repeated)")
     heals_itself = fault_kind in BREAK_FAULTS and str(fields.get("lift", "")) == HEAL_LIFT
     pushed_pull_once = (fault_kind == "imagepull" and fault_param == CRASHLOOP_NEW and mode == "rollout"
                         and str(fields.get("lift", "")) == HEAL_LIFT)
@@ -17888,15 +18316,17 @@ def validate_case_file(path):
         hook_move = fault_kind in HOOK_OP_FAULTS and fault_param == WINDOW_MOVE_PHASE
         key_move = fault_kind == "configkey" and fault_param == CONFIGKEY_PARAM
         readiness_move = fault_kind == READINESS_FAULT and fault_param == "old"
+        record_move = fault_kind == RECORD_FAULT and fault_param == WINDOW_MOVE_PHASE
         if not (fault_kind in BREAK_FAULTS and break_param == CRASHLOOP_VICTIM) and not window_move and not hook_move \
-                and not key_move and not readiness_move \
+                and not key_move and not readiness_move and not record_move \
                 and not (fault_kind == "node" and str(fields.get("fault", "")).partition(":")[2] == NODE_PARAM):
             errs.append(f"{path}:1: at={fields['at']} fires a break of the running fleet, the missing key, the readiness "
-                        f"switch, a node loss, a pod taken or a window fault "
+                        f"switch, a node loss, a pod taken, a window fault or the record aged "
                         f"(fault=crashloop|imagepull:{CRASHLOOP_VICTIM}, fault=configkey:{CONFIGKEY_PARAM}, "
                         f"fault={READINESS_FAULT}:old, fault=node:{NODE_PARAM}, "
-                        f"fault={'|'.join(sorted(HOOK_OP_FAULTS))}:{WINDOW_MOVE_PHASE} or "
-                        f"fault={'|'.join(sorted(WINDOW_FAULTS))}:{WINDOW_MOVE_PHASE})")
+                        f"fault={'|'.join(sorted(HOOK_OP_FAULTS))}:{WINDOW_MOVE_PHASE}, "
+                        f"fault={'|'.join(sorted(WINDOW_FAULTS))}:{WINDOW_MOVE_PHASE} or "
+                        f"fault={RECORD_FAULT}:{WINDOW_MOVE_PHASE})")
         if fault_kind in BREAK_FAULTS and "lift" in fields and str(fields["lift"]) != HEAL_LIFT:
             errs.append(f"{path}:1: a break at a move moment is kept, healed again (lift={HEAL_LIFT}) or killed once (once=1)")
         if key_move and str(fields.get("lift", "")) not in (HEAL_LIFT, KEPT_LIFT):
@@ -17938,9 +18368,11 @@ def validate_case_file(path):
             if k in fields:
                 errs.append(f"{path}:1: {k}= does not combine with a move-moment fault (victim= names the pod, "
                             f"the verdict is the move's end state)")
-        if "victimcomp" in fields and (move_victim != "sibling" or str(fields["victimcomp"]) not in ("decoder", "router")):
+        if "victimcomp" in fields and fault_kind != RECORD_FAULT \
+                and (move_victim != "sibling" or str(fields["victimcomp"]) not in ("decoder", "router")):
             errs.append(f"{path}:1: victimcomp= under a move-moment fault names the sibling a break hits "
-                        f"(victim=sibling with victimcomp=decoder|router)")
+                        f"(victim=sibling with victimcomp=decoder|router), or the Component whose record is aged "
+                        f"(fault={RECORD_FAULT}:{WINDOW_MOVE_PHASE})")
     elif move_victim in MOVE_VICTIMS and "victim" in fields:
         errs.append(f"{path}:1: victim={fields['victim']} names the pod a move-moment fault hits (needs mode=migrate at=<moment>)")
     if fields.get("blocked") and "fault" not in fields:
@@ -26522,6 +26954,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         return 0
 
     mode_fault = str(hdr.get("fault", "")).partition(":")[0]
+    if mode_fault == RECORD_FAULT and mode in RECORD_OP_MODES:
+        return _record_op(case_id, yaml_file, desc, hdr)
     if mode in ("migrate", "recreate", "runtimerev") and mode_fault in WINDOW_FAULTS:
         return _window_op(case_id, yaml_file, desc, hdr)
     if mode in ("recreate", "runtimerev") and (mode_fault in HOOK_OP_FAULTS or _ctrl_hook_op_case(hdr)
@@ -27029,6 +27463,8 @@ def run_case(case_id):
     if reason:
         print(f"  ⓘ {fault_kind} fault unavailable here: {reason}")
         return _write_fail(case_id, desc, hdr, "SKIP", f"{fault_kind} fault unavailable here: {reason}")
+    if fault_kind == RECORD_FAULT:
+        return _record_op(case_id, yaml_file, desc, hdr)
     if _rollback_fault_case(hdr):
         return _rollback_fault(case_id, yaml_file, desc, hdr)
     if _rollback_held_break_case(hdr):

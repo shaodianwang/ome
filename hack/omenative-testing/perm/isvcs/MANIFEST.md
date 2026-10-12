@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **7040**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **7104**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -53,30 +53,37 @@ Total generated cases: **7040**. The whole-corpus per-PR cap (hand + generated) 
 | gen-conflict | 264 | p8960..p10635 |
 | gen-crash-once | 168 | p8400..p8567 |
 | gen-lift | 138 | p9250..p9387 |
+| gen-stale-record | 60 | p12200..p12259 |
+| gen-canary-stale-record | 4 | p12400..p12403 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 2117 |
-| engine-mn | 1955 |
-| pd | 1615 |
-| pd-mn | 1353 |
+| engine | 2137 |
+| engine-mn | 1977 |
+| pd | 1626 |
+| pd-mn | 1364 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
-| (dormant: nothing rolls) | 878 |
+| (dormant: nothing rolls) | 914 |
 | InPlaceIfPossible | 602 |
 | InPlaceOnly | 281 |
 | RecreatePod | 1261 |
-| SurgeThenDrain | 4018 |
+| SurgeThenDrain | 4046 |
 
 ### By failure verb / phase
 
 | value | cases |
 |---|---|
+| agerecord:canary-serving | 4 |
+| agerecord:draining | 6 |
+| agerecord:idle | 24 |
+| agerecord:migrating | 6 |
+| agerecord:settling | 24 |
 | bad-edit:imagepull | 12 |
 | bad-edit:readiness | 12 |
 | bump-at-accept | 26 |
@@ -572,8 +579,8 @@ Total generated cases: **7040**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (unset — baseline) | 2415 |
-| None | 2871 |
+| (unset — baseline) | 2475 |
+| None | 2875 |
 | RecreateInstance | 1754 |
 
 ### By pause
@@ -581,14 +588,14 @@ Total generated cases: **7040**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 6746 |
+| off | 6810 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 6860 |
+| (no pause around a repair) | 6924 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -597,7 +604,7 @@ Total generated cases: **7040**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 6860 |
+| (no pause around a repair) | 6924 |
 | fix | 90 |
 | none | 90 |
 
@@ -607,7 +614,7 @@ Total generated cases: **7040**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 54 |
 | canary | 30 |
-| none | 6014 |
+| none | 6078 |
 | ratio | 16 |
 | rolling | 892 |
 | seq | 34 |
@@ -616,7 +623,7 @@ Total generated cases: **7040**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| inline | 908 |
+| inline | 912 |
 | policy-referenced | 14 |
 
 ### By mid-roll edit (gen-switch)
@@ -764,7 +771,7 @@ Total generated cases: **7040**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 5108 |
+| (no break) | 5172 |
 | decoder | 166 |
 | engine | 1648 |
 | router | 118 |
@@ -805,21 +812,21 @@ Total generated cases: **7040**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | canary | 51 |
-| delete | 248 |
+| delete | 254 |
 | down1 | 124 |
 | down2 | 28 |
-| edit | 114 |
-| move | 42 |
-| push | 156 |
-| rollback | 114 |
-| runtime | 114 |
+| edit | 120 |
+| move | 48 |
+| push | 168 |
+| rollback | 120 |
+| runtime | 120 |
 | scale | 36 |
 | scale-down | 60 |
 | scale-one | 16 |
 | scale-up | 60 |
-| scaledown | 85 |
-| scaleup | 37 |
-| steady | 36 |
+| scaledown | 91 |
+| scaleup | 43 |
+| steady | 42 |
 | toone | 28 |
 | up1 | 124 |
 
@@ -948,21 +955,21 @@ Total generated cases: **7040**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | canary | 51 |
-| delete | 248 |
+| delete | 254 |
 | down1 | 124 |
 | down2 | 28 |
-| edit | 114 |
-| move | 42 |
-| push | 156 |
-| rollback | 114 |
-| runtime | 114 |
+| edit | 120 |
+| move | 48 |
+| push | 168 |
+| rollback | 120 |
+| runtime | 120 |
 | scale | 36 |
 | scale-down | 60 |
 | scale-one | 16 |
 | scale-up | 60 |
-| scaledown | 85 |
-| scaleup | 37 |
-| steady | 36 |
+| scaledown | 91 |
+| scaleup | 43 |
+| steady | 42 |
 | toone | 28 |
 | up1 | 124 |
 
@@ -1077,16 +1084,17 @@ Total generated cases: **7040**. The whole-corpus per-PR cap (hand + generated) 
 | sibling broken, one-shot, running | 24 |
 | sibling broken, persistent, new | 14 |
 | sibling broken, persistent, running | 25 |
+| stale revision record, persistent | 4 |
 
 ### By shape family (canary-fault-gate)
 
 | value | cases |
 |---|---|
-| engine gang | 66 |
+| engine gang | 67 |
 | engine single | 77 |
-| engine+decoder+router gang | 74 |
-| engine+decoder+router single | 109 |
-| engine+router gang | 74 |
+| engine+decoder+router gang | 75 |
+| engine+decoder+router single | 110 |
+| engine+router gang | 75 |
 | engine+router single | 116 |
 
 ### Ids kept empty (cells of the matrix that are no case)
@@ -1209,6 +1217,17 @@ One family fills the six ledger rows the other families left empty; every cell r
 - `readiness never passes, persistent, running (fix push)` and `readiness never passes, one-shot, running (fix push)`: `readiness:old during=idle form=persist|recover push=fix`; a serving pod stops passing readiness and, once the drop has shown for the settle window, an ordinary bump is pushed, whose re-rendered pods carry no switch file; under form=recover the switch is lifted as the fix lands. The same roll verdict; both restart policies.
 - `image pull, one-shot, running (push)`: `imagepull:old lift=after-settle` with no during=; the running revision's pod is pointed at the unpullable image as the bump lands and back once the failure has held for the settle window, unless the roll has replaced it first; the roll owns the Instance either way; both restart policies.
 - No group axis: a kept cause changes no fleet for a group to pace, and a lifted one leaves the roll to finish as any plain push; the group families cover the gates.
+
+## gen-stale-record and gen-canary-stale-record: a stale revision record under every operation
+
+The rolled-out record is the status entry naming the revision that owns a Component's traffic; a canary rollback reads it as the revision to return to. It goes stale when a status write is lost or overwritten: a conflict with another writer, a manager restarted between the pods' switch and the write, a status put back from a backup, a hand patch. `fault=agerecord` writes the engine's record back to the revision it ran before the one it runs, which needs history, so every case rolls the engine once first (`preroll=engine`). The record stays wrong until the controller rewrites it, so the fault has one form, the persistent one; the ledger removes its one-shot row with that reason.
+
+- `steady` (`during=idle`, no operation follows): nothing moves, and the record reads level again on the controller's next pass over the service; a status write wakes no controller, so the harness touches an inert annotation on the ISVC when no pass of its own has come within a minute.
+- `push settling|draining`, `rollback`, `edit`, `runtime`: the roll completes as if the record were right, no engine pod is ever rebuilt onto the aged revision, and the record names the revision the engine ends on.
+- `scale-up`, `scale-down`, `delete` (`during=idle`: the record aged before the operation lands): the operation completes, nothing is rebuilt onto the aged revision, and the record is level with the revision the engine stands on; after the delete the re-created service's record names the revision it runs.
+- `move` (`at=accept`): the move completes onto the revision the engine stands on, never the aged one, and the record stays level.
+- The canary cells (`gen-canary-stale-record`): the engine's stable identity is aged while the first step serves on a breaching push, so the gate's rollback finds its stable revision running no Instance: the ladder parks Failed with the stable revision reported unavailable and an event naming the engine, and rebuilds nothing onto the aged revision. The engine-only and the engine-behind-a-router single-pod cells are the hand-written canary/ cases.
+- No strategy or group axis: outside a canary no roll reads the record, and the controller writes it once the pods stand on one revision, whatever paced them there.
 
 ## Missing runner verbs/hooks (future coverage, not emitted)
 

@@ -367,6 +367,26 @@ runners (run.py + the KIND CI lane) already implement:
                           parks the Instance Failed with its reason, a
                           lifted one leaves the Instance serving with no
                           hold behind it
+    gen-stale-record/ p12200+  a stale revision record under every operation:
+                          the engine's rolled-out record (the status entry
+                          naming the revision that owns its traffic, which a
+                          canary rollback reads as the revision to return
+                          to) written back to the revision before the one it
+                          runs (fault=agerecord, after a preroll gives the
+                          service that history), on the settled service, as
+                          a push, a rollback, a strategy edit or a runtime
+                          edit lands or at a hook of its roll, ahead of a
+                          scale up, a scale down or a delete, and at a moment
+                          of a move, across the six shape families; the
+                          operation completes as if the record were right,
+                          nothing is rebuilt onto the aged revision, and the
+                          record names the revision the engine stands on
+    gen-canary-stale-record/ p12400+  the same record aged while a canary's
+                          first step serves and its gate fails, on the four
+                          canary-capable shapes the hand-written cases leave:
+                          the gate's rollback finds no Instance on the stable
+                          revision and parks the ladder instead of rebuilding
+                          onto it
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -731,6 +751,8 @@ GEN_BLOCKS = {
     "gen-conflict": (8960, 9050),
     "gen-crash-once": (8400, 8600),
     "gen-lift": (9250, 9400),
+    "gen-stale-record": (12200, 12400),
+    "gen-canary-stale-record": (12400, 12450),
 }
 # A folder mints from its block until the block is full, then from its
 # continuation block; a folder owns an id that lies in either.
@@ -1314,7 +1336,7 @@ GEN_HDR_ORDER = ["mode", "Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r",
                  "restart", "kill", "pause", "fault", "pool", "floor_soft", "floor_hard", "order_soft",
                  "co", "topo",
                  "canary", "bump", "img", "form", "victims", "exitafter", "during", "verb", "verbhold",
-                 "verb2", "during2", "victim", "victimcomp", "release", "releaseafter", "rt",
+                 "verb2", "during2", "victim", "victimcomp", "preroll", "release", "releaseafter", "rt",
                  "analysis", "failurelimit", "terminal", "nophase", "inv_on", "cell"]
 
 
@@ -9262,6 +9284,8 @@ def build_outputs():
     emit_conflict(add)
     emit_crash_once(add)
     emit_lift(add)
+    emit_stale_record(add)
+    emit_canary_stale_record(add)
     _emit_plain_ops(add)
     _emit_leftover_singles(add)
     _emit_tail_cells(add)
@@ -10281,6 +10305,7 @@ def manifest(rows, kept_empty=()):
                      + (f" target={target}" if target else ""))
     lines += heal_notes()
     lines += lift_notes()
+    lines += stale_record_notes()
     lines += [
         "",
         "## Missing runner verbs/hooks (future coverage, not emitted)",
@@ -10653,6 +10678,223 @@ def _emit_key_kept_scale_up(add):
             _broken_configkey_up_reason(topo, n, target, nr), meta,
             cell=("tail", "broken-more", "configkey", "waits", topo, w, op, nr),
             body=functools.partial(_broken_configkey_body, topo=topo, n=n, w=w, nr=nr))
+
+
+# ── gen-stale-record: a stale revision record under every operation ──────────
+# The rolled-out record is the status entry naming the revision that owns a
+# Component's traffic; a canary rollback reads it as the revision to return
+# to. It goes stale when a status write is lost or overwritten: a conflict
+# with another writer, a manager restarted between the pods' switch and the
+# write, a status put back from a backup, a hand patch. fault=agerecord
+# writes the engine's record back to the revision it ran before the one it
+# runs, which needs history: every case rolls the engine once first
+# (preroll=engine). The record stays wrong until the controller rewrites it,
+# so the fault has one form, the persistent one. One case per ledger cell on
+# the six shape families: the settled service with nothing to follow, the
+# push as it lands and as the first old pod goes, a rollback and a strategy
+# edit as each lands, a scale up, a scale down and a delete landing on the
+# aged record, a runtime edit as it lands, and a move as its request is
+# recorded. (operation, the hook the record is aged at.)
+RECORD_FAULT_NAME = "agerecord"
+RECORD_SHAPES = WINDOW_SHAPES
+RECORD_STRAT = WINDOW_STRAT
+RECORD_CELLS = [("steady", "idle"), ("push", "settling"), ("push", "draining"), ("rollback", "settling"),
+                ("edit", "settling"), ("scaleup", "idle"), ("scaledown", "idle"), ("runtime", "settling"),
+                ("move", "migrating"), ("delete", "idle")]
+RECORD_LABEL = {"steady": "steady", "push": "push", "rollback": "rollback", "edit": "edit", "scaleup": "scale-up",
+                "scaledown": "scale-down", "runtime": "runtime", "move": "move", "delete": "delete"}
+RECORD_ROLLS = ("push", "rollback", "edit")
+RECORD_DOES = {
+    "push": "the engine is bumped under SurgeThenDrain",
+    "rollback": "the engine is bumped and the starting revision re-applied at the first pod of the new revision",
+    "edit": "the engine is bumped under SurgeThenDrain and its strategy edited to RecreatePod at the first pod of the new revision",
+    "runtime": ("the dedicated runtime every Component inherits gets a new runner env, so every Component rolls onto its "
+                "own new revision"),
+    "move": "one engine Instance is asked to move",
+}
+RECORD_WHEN = {
+    ("steady", "idle"): "on the settled service, and nothing else is asked of it",
+    ("push", "settling"): "as the push lands, before any pod has moved",
+    ("push", "draining"): "as the first pod of the old revision goes",
+    ("rollback", "settling"): "as the rollback lands",
+    ("edit", "settling"): "as the edit lands",
+    ("scaleup", "idle"): "on the settled service, then the engine is scaled from N to N+1",
+    ("scaledown", "idle"): "on the settled service, then the engine is scaled from N to N-1",
+    ("runtime", "settling"): "as the edit lands",
+    ("move", "migrating"): "as soon as the move's request is recorded, the whole move still ahead",
+    ("delete", "idle"): "on the settled service, then the service is deleted",
+}
+RECORD_END = {
+    "steady": ("nothing may move: no pod is created or taken down and every Instance keeps serving; the record reads level "
+               "with the revision the engine stands on again on the controller's next pass over the service (its own, or "
+               "the one the harness asks for by touching an inert annotation on the ISVC, since a status write wakes no "
+               "controller), and every row ends Ready with no operation open"),
+    "push": ("the roll completes as if the record were right: every Instance ends on the pushed revision and serving, each "
+             "pod slot created once with the capacity floor held, no engine pod is ever rebuilt onto the aged revision, "
+             "and the record names the pushed revision once the roll is done"),
+    "rollback": ("the rollback completes with every Instance back on the starting revision and serving, never on the aged "
+                 "one, each pod slot created at most once in each direction, no engine pod ever rebuilt onto the aged "
+                 "revision, and the record names the starting revision once the rollback is done"),
+    "edit": ("the roll completes under the edited strategy with every Instance on the pushed revision and the edit on the "
+             "live spec, no engine pod ever rebuilt onto the aged revision, and the record names the pushed revision once "
+             "the roll is done"),
+    "scaleup": ("the scale lands at N+1 with the new Instance on the revision the engine stands on, nothing rebuilt onto the "
+                "aged revision, the survivors on their own pods, and the record level with that revision"),
+    "scaledown": ("the scale lands at N-1 with the survivors on their own pods, nothing created or rebuilt onto the aged "
+                  "revision, and the record level with the revision the engine stands on"),
+    "runtime": ("the edit lands on every Instance of every Component, each on its own new revision and serving, no engine "
+                "pod ever rebuilt onto the aged revision, and the engine's record names its new revision once the roll is "
+                "done"),
+    "move": ("the move completes onto the revision the engine stands on, never the aged one: its ledger row reads Completed "
+             "once, the request annotation is consumed, the moved Instance ends whole, Ready and serving off its source "
+             "pod, the engine holds N whole Instances, and the record stays level with that revision"),
+    "delete": ("the delete completes with no pod, InferenceReplica, Service or InferenceService left and nothing rebuilt "
+               "onto the aged revision on the way out, and the same manifest re-applied under the same name comes up whole "
+               "on fresh pods with a record naming the revision it runs"),
+}
+
+
+def _record_reason(op, hook, topo, w, nr):
+    shape = _window_shape(topo, w, nr)
+    does = RECORD_DOES.get(op)
+    lead = f"{does} on {shape}, and " if does else f"on {shape}, "
+    out = (f"the engine rolled once before the story, so its status names the revision each Instance runs and the one "
+           f"before it; {lead}the engine's rolled-out record (the status entry naming the revision that owns its traffic, "
+           f"which a canary rollback would read as the revision to return to) is written back to the revision before the "
+           f"one it runs {RECORD_WHEN[(op, hook)]}; {RECORD_END[op]}")
+    return out + ("" if op == "runtime" else _window_controls(topo, nr))
+
+
+def _record_kv(op, hook, topo, n, nr):
+    """The header, the fleet and the strategy of one record cell: the
+    window families' shapes under the canonical surge budget, the fault at
+    its hook, the engine rolled once first."""
+    strat, surge, unavail = RECORD_STRAT
+    kv = dict(**_window_counts(topo, n, nr), **_window_ceilings(topo, n, nr, strat, surge))
+    kv.update(fault=f"{RECORD_FAULT_NAME}:{hook}", co="none", topo=topo, victimcomp="engine", preroll="engine")
+    if op == "steady":
+        kv.update(during=IDLE_FAULT_HOOK, **_window_ceilings(topo, n, nr, strat, 0, peak_e=n))
+    elif op == "rollback":
+        kv.update(rollback=1, during=WINDOW_ROLLBACK_HOOK)
+    elif op == "edit":
+        strat, surge, unavail = ("SurgeThenDrain",) + switch_budget("SurgeThenDrain", WINDOW_EDIT[1])
+        kv.update(edit=f"{WINDOW_EDIT[0]}:{WINDOW_EDIT[1]}", during=WINDOW_EDIT[2],
+                  **_window_ceilings(topo, n, nr, strat, surge))
+    elif op == "scaleup":
+        kv.update(mode="scaledown", to_e=n + WINDOW_SCALE_UP, during=IDLE_FAULT_HOOK,
+                  **_window_ceilings(topo, n, nr, strat, 0, peak_e=n + WINDOW_SCALE_UP))
+    elif op == "scaledown":
+        kv.update(mode="scaledown", to_e=n - WINDOW_SCALE_DOWN, during=IDLE_FAULT_HOOK,
+                  **_window_ceilings(topo, n, nr, strat, 0, peak_e=n))
+    elif op == "runtime":
+        routers = kv["Nr"]
+        kv.update(mode="runtimerev", edit="env", expect="roll",
+                  ceil_d=(n + 1 if is_pd(topo) else 0), ceil_r=(routers + 1 if routers else 0))
+    elif op == "move":
+        kv.update(mode="migrate", mig="Auto", inst=0, at=WINDOW_MOVE_AT,
+                  **_window_ceilings(topo, n, nr, strat, 0, peak_e=n + 1))
+    elif op == "delete":
+        kv.update(mode="recreate", during=IDLE_FAULT_HOOK, **_window_ceilings(topo, n, nr, strat, 0, peak_e=n))
+    life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+    return kv, _window_comps(topo, n, w_of(topo), nr, life), (strat, surge, unavail)
+
+
+def emit_stale_record(add):
+    for topo, n, w, nr in RECORD_SHAPES:
+        for op, hook in RECORD_CELLS:
+            kv, case_comps, (strat, surge, unavail) = _record_kv(op, hook, topo, n, nr)
+            label = RECORD_LABEL[op] + (f" {hook}" if op == "push" else "")
+            desc = (f"{GEN_MARK} stale record {label} {_window_tag(topo, w, nr)} N={n}"
+                    + (f" {strat} {budget_tag(strat, surge, unavail)}" if op in RECORD_ROLLS else ""))
+            meta = dict(strat=strat if op in RECORD_ROLLS else "(dormant: nothing rolls)",
+                        verb=f"{RECORD_FAULT_NAME}:{hook}", recordop=label, op=op, hook=hook)
+            add("gen-stale-record", desc, kv, case_comps, _record_reason(op, hook, topo, w, nr), meta,
+                cell=("stale-record", op, hook, topo, w, nr), dedicated=(op == "runtime"))
+
+
+# ── gen-canary-stale-record: the record aged under a canary's gate ───────────
+# The engine's stable identity (the rolled-out record and, under the pinned
+# run, the run's stable and the canary record) aged while the first step
+# serves on a breaching push: the gate's rollback would rebuild every
+# Instance onto a revision with no Instance, so the ladder must park. The
+# four canary-capable shapes the hand-written canary/ cases do not cover.
+RECORD_CANARY_SHAPES = [row for row in GATE_SHAPES if row[0] not in ("engine single", "engine+router single")]
+RECORD_CANARY_HOOK = "canary-serving"
+RECORD_CANARY_CELL = "canary/Serving[A]/sampleFails[staleStable]"
+
+
+def _record_canary_steps():
+    gate = lib.analysis_spec(failure_limit=1, metrics=[lib.err_metric(query=lib.CANARY_QUERY)])
+    return [lib.astep("50%", 50, gate), lib.astep("100%", 100)]
+
+
+def _record_canary_reason(family, n, w, group):
+    members = " and ".join(group)
+    return (f"the {members} rolled once through the ladder before the story, so a previous rolled-out revision exists with "
+            f"its ControllerRevision retained and no Instance on it; a breaching push arms the ladder again on "
+            f"{_gate_shape_words(family, n, w)} and, while the split serves at the first step, the engine's stable identity "
+            f"is written back to that revision in the run's pinned stable, the canary record and the rolled-out record; the "
+            f"gate's rollback would rebuild every engine Instance onto it, so the ladder must park Failed at the step with "
+            f"the stable revision reported unavailable (StableRevisionMissing), record an event naming the engine and its "
+            f"empty stable revision (CanaryStableRevisionEmpty), and leave every Instance where it is; no engine pod ever "
+            f"runs the aged revision")
+
+
+def emit_canary_stale_record(add):
+    for family, topo, n, w, nr in RECORD_CANARY_SHAPES:
+        group = gate_group(topo)
+        kv = gate_kv(topo, n, nr)
+        kv.update(canary="auto", preroll=",".join(group), analysis="breach", failurelimit=1, terminal="Failed",
+                  fault=f"{RECORD_FAULT_NAME}:{RECORD_CANARY_HOOK}", victimcomp="engine", co="none", topo=topo,
+                  cell=RECORD_CANARY_CELL)
+        shape = shape_tag(topo, w) + (" router" if nr and not is_pd(topo) else "")
+        desc = f"{GEN_MARK} canary stale record gate rollback {shape} N={n}"
+        meta = dict(strat="SurgeThenDrain", verb=f"{RECORD_FAULT_NAME}:{RECORD_CANARY_HOOK}", rp=GATE_RP,
+                    gate="stale revision record, persistent", shape=family)
+        add("gen-canary-stale-record", desc, kv, gate_comps(topo, n, w, nr, GATE_RP, ann=lib.METRICS_ANN),
+            _record_canary_reason(family, n, w, group), meta, cell=("canary-stale-record", topo, nr),
+            coord=lib.canary_block(_record_canary_steps(), components=group), runtime=gate_runtime(topo, True))
+
+
+def stale_record_notes():
+    """What the record families read, and the axes they do not cross."""
+    return [
+        "",
+        "## gen-stale-record and gen-canary-stale-record: a stale revision record under every operation",
+        "",
+        "The rolled-out record is the status entry naming the revision that owns a"
+        " Component's traffic; a canary rollback reads it as the revision to return to."
+        " It goes stale when a status write is lost or overwritten: a conflict with"
+        " another writer, a manager restarted between the pods' switch and the write, a"
+        " status put back from a backup, a hand patch. `fault=agerecord` writes the"
+        " engine's record back to the revision it ran before the one it runs, which needs"
+        " history, so every case rolls the engine once first (`preroll=engine`). The"
+        " record stays wrong until the controller rewrites it, so the fault has one form,"
+        " the persistent one; the ledger removes its one-shot row with that reason.",
+        "",
+        "- `steady` (`during=idle`, no operation follows): nothing moves, and the record"
+        " reads level again on the controller's next pass over the service; a status"
+        " write wakes no controller, so the harness touches an inert annotation on the"
+        " ISVC when no pass of its own has come within a minute.",
+        "- `push settling|draining`, `rollback`, `edit`, `runtime`: the roll completes as"
+        " if the record were right, no engine pod is ever rebuilt onto the aged revision,"
+        " and the record names the revision the engine ends on.",
+        "- `scale-up`, `scale-down`, `delete` (`during=idle`: the record aged before the"
+        " operation lands): the operation completes, nothing is rebuilt onto the aged"
+        " revision, and the record is level with the revision the engine stands on; after"
+        " the delete the re-created service's record names the revision it runs.",
+        "- `move` (`at=accept`): the move completes onto the revision the engine stands"
+        " on, never the aged one, and the record stays level.",
+        "- The canary cells (`gen-canary-stale-record`): the engine's stable identity is"
+        " aged while the first step serves on a breaching push, so the gate's rollback"
+        " finds its stable revision running no Instance: the ladder parks Failed with the"
+        " stable revision reported unavailable and an event naming the engine, and"
+        " rebuilds nothing onto the aged revision. The engine-only and the"
+        " engine-behind-a-router single-pod cells are the hand-written canary/ cases.",
+        "- No strategy or group axis: outside a canary no roll reads the record, and the"
+        " controller writes it once the pods stand on one revision, whatever paced them"
+        " there.",
+    ]
 
 
 def _emit_tail_cells(add):

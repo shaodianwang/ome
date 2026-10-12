@@ -463,6 +463,17 @@ EVAL_SOFT_FEATURES: list[dict[str, str]] = [
         "gen-crash-once",
         "gen-lift",
     )
+] + [
+    {
+        "feature": feature,
+        "owner": "slin1237",
+        "expires": "2026-10-26",
+        "reason": (
+            "new family: its first main rounds are classified into issues "
+            "and fixes; advisory until they are green"
+        ),
+    }
+    for feature in ("gen-stale-record", "gen-canary-stale-record")
 ]
 
 

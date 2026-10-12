@@ -102,8 +102,11 @@ REVISION_BOUND_FAULTS = [
     "crash at start", "crash after Ready", "image pull", "config missing",
     "readiness never passes", "metric breach", "sibling broken",
 ]
-# A Component's stable identity aged back to its previous rolled-out revision
-# in the status records a rollback reads (fault=agerecord).
+# A Component's rolled-out record (the status entry naming the revision
+# that owns its traffic, which a canary rollback reads as its stable
+# revision) written back to the revision before the one it runs
+# (fault=agerecord). The record stays wrong until the controller rewrites
+# it, so the fault has one form: persistent.
 STALE_RECORD_FAULT = "stale revision record"
 UNBOUND_FAULTS = [
     "pod deleted by hand", "gang member lost", "pod Pending", "node", "evicted or preempted",
@@ -192,6 +195,11 @@ EXCLUDED_CELLS = [
      "lost gang member, an eviction or a preemption repeats only once what it took has come back, and a delete brings "
      "nothing back",
      lambda family, operation, row: operation == "delete" and row[0] in REPEATING_LOSS_FAULTS and row[1] == "persistent"),
+    # the stale revision record: one wrong status entry, no cause to lift or repeat
+    ("a stale revision record has no one-shot form: the record is one wrong status entry that stays until the controller "
+     "rewrites it, not a cause that can be taken away again; a record put right by hand before the controller read it "
+     "proves nothing, and one corrected after it was read changes nothing, so the persistent row is the fault's only row",
+     lambda family, operation, row: row[0] == STALE_RECORD_FAULT and row[1] == "one-shot"),
 ]
 
 
@@ -308,7 +316,9 @@ def _fault(v):
     if kind == "source":
         return param == "idle" or _hook(param)   # the analysis source goes before the push or at a hook
     if kind == "agerecord":
-        return param == "idle" or _hook(param)   # a stable identity aged before the push or at a hook
+        # the record aged on the settled service, as an operation lands or at a hook of its roll,
+        # at a moment of a move, or at a canary grid state
+        return param == "idle" or param in FAULT_PHASES or _hook(param)
     if kind == "cordon":
         return param in ("source", "all")   # the source node, or every node (a roll with no room)
     if kind == "configkey":
@@ -770,7 +780,7 @@ def classify_faults(h, mode, pods, strategy, verbs):
     elif kind == "source":
         faults.append(("analysis source unusable", "one-shot" if lifted else "persistent", "-", str(h.get("form", ""))))
     elif kind == "agerecord":
-        # the victim's stable identity names its previous rolled-out revision until a writer levels it
+        # the victim's rolled-out record names its previous revision until the controller levels it
         faults.append((STALE_RECORD_FAULT, "persistent", "-", str(h.get("victimcomp", "engine"))))
     elif kind == "configkey":
         # the running revision's key removed at idle (missing), or the pushed revision reading a key the ConfigMap lacks (new)
@@ -1155,9 +1165,10 @@ def render_holes(cells):
     per_fault, fault_total = axis_holes(empty, product, lambda key: key[2])
     per_op, op_total = axis_holes(empty, product, lambda key: key[1])
     per_family, family_total = axis_holes(empty, product, lambda key: key[0])
-    nowhere_rows = [row for row in all_fault_rows() if per_fault.get(row) == fault_total.get(row)]
+    # a row the product does not carry at all (every cell removed with a reason) is no hole
+    nowhere_rows = [row for row in all_fault_rows() if fault_total.get(row) and per_fault.get(row) == fault_total.get(row)]
     out += ["### No case anywhere", ""]
-    out.append(f"- fault rows ({len(nowhere_rows)}): " + "; ".join(fault_row_label(r) for r in nowhere_rows))
+    out.append(f"- fault rows ({len(nowhere_rows)}): " + ("; ".join(fault_row_label(r) for r in nowhere_rows) or "none"))
     out.append("- operations: " + (", ".join(o for o in OPERATIONS if per_op.get(o) == op_total.get(o)) or "none"))
     out.append("- shape families: " + (", ".join(f for f in SHAPE_FAMILIES if per_family.get(f) == family_total.get(f)) or "none"))
     out.append("")

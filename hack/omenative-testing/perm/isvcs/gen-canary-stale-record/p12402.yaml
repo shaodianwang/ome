@@ -1,0 +1,40 @@
+# p12402: [gen] canary stale record gate rollback pd N=8  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=2 fault=agerecord:canary-serving co=none topo=pd canary=auto victimcomp=engine preroll=engine,decoder analysis=breach failurelimit=1 terminal=Failed cell=canary/Serving[A]/sampleFails[staleStable]
+# reason: the engine and decoder rolled once through the ladder before the story, so a previous rolled-out revision exists with its ControllerRevision retained and no Instance on it; a breaching push arms the ladder again on engine+decoder+router single (8 Instances) and, while the split serves at the first step, the engine's stable identity is written back to that revision in the run's pinned stable, the canary record and the rolled-out record; the gate's rollback would rebuild every engine Instance onto it, so the ladder must park Failed at the step with the stable revision reported unavailable (StableRevisionMissing), record an event naming the engine and its empty stable revision (CanaryStableRevisionEmpty), and leave every Instance where it is; no engine pod ever runs the aged revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p12402 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-metrics, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          canary:
+            steps:
+              - capacity: "50%"
+                traffic: 50
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}",revision_hash="{{.CanaryRevision}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - { capacity: "100%", traffic: 100 }

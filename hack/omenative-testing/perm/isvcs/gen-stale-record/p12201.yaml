@@ -1,0 +1,13 @@
+# p12201: [gen] stale record push settling engine N=4 SurgeThenDrain s1  Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=agerecord:settling co=none topo=engine victimcomp=engine preroll=engine
+# reason: the engine rolled once before the story, so its status names the revision each Instance runs and the one before it; the engine is bumped under SurgeThenDrain on engine alone, single-pod, and the engine's rolled-out record (the status entry naming the revision that owns its traffic, which a canary rollback would read as the revision to return to) is written back to the revision before the one it runs as the push lands, before any pod has moved; the roll completes as if the record were right: every Instance ends on the pushed revision and serving, each pod slot created once with the capacity floor held, no engine pod is ever rebuilt onto the aged revision, and the record names the pushed revision once the roll is done
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p12201 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

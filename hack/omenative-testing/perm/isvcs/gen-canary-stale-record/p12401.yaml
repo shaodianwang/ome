@@ -1,0 +1,37 @@
+# p12401: [gen] canary stale record gate rollback engine-mn W1 router N=2  mode=canary Ne=2 Nd=0 Nr=2 ceil_e=3 ceil_d=0 ceil_r=2 fault=agerecord:canary-serving co=none topo=engine-mn canary=auto victimcomp=engine preroll=engine analysis=breach failurelimit=1 terminal=Failed cell=canary/Serving[A]/sampleFails[staleStable]
+# reason: the engine rolled once through the ladder before the story, so a previous rolled-out revision exists with its ControllerRevision retained and no Instance on it; a breaching push arms the ladder again on engine+router gang (2 Instances of 1 leader + 1 worker) and, while the split serves at the first step, the engine's stable identity is written back to that revision in the run's pinned stable, the canary record and the rolled-out record; the gate's rollback would rebuild every engine Instance onto it, so the ladder must park Failed at the step with the stable revision reported unavailable (StableRevisionMissing), record an event naming the engine and its empty stable revision (CanaryStableRevisionEmpty), and leave every Instance where it is; no engine pod ever runs the aged revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p12401 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-metrics-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - capacity: "50%"
+                traffic: 50
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}",revision_hash="{{.CanaryRevision}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - { capacity: "100%", traffic: 100 }

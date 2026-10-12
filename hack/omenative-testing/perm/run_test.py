@@ -23812,11 +23812,11 @@ class AgeRecordFaultTest(unittest.TestCase):
     STATUS = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-bbbb",
                                         "previousRolledoutRevision": "p1-engine-rev-aaaa"}}}
 
-    def test_header_forms_name_idle_or_a_canary_hook(self):
+    def test_header_forms_name_idle_an_operation_hook_or_a_canary_hook(self):
         self.assertTrue(run._fault_ok("agerecord:idle"))
         self.assertTrue(run._fault_ok("agerecord:canary-serving"))
         self.assertTrue(run._fault_ok("agerecord:canary-serving@1"))
-        self.assertFalse(run._fault_ok("agerecord:settling"))
+        self.assertTrue(run._fault_ok("agerecord:settling"), "a hook of an operation beyond a canary")
         self.assertFalse(run._fault_ok("agerecord:new"))
         idle = run._fault_new("p1", {"fault": "agerecord:idle", "victimcomp": "engine"})
         self.assertTrue(run._fault_before_push(idle), "the idle form lands before the push")
@@ -23991,10 +23991,236 @@ class PrerollTest(unittest.TestCase):
         self.assertIn("preroll", coverage.HEADER_KEYS)
         self.assertTrue(coverage.HEADER_CHECKS["fault"]("agerecord:idle"))
         self.assertTrue(coverage.HEADER_CHECKS["fault"]("agerecord:canary-serving@1"))
-        self.assertFalse(coverage.HEADER_CHECKS["fault"]("agerecord:rotating"))
+        self.assertTrue(coverage.HEADER_CHECKS["fault"]("agerecord:rotating"), "a hook of a push")
+        self.assertFalse(coverage.HEADER_CHECKS["fault"]("agerecord:new"))
         faults = coverage.classify_faults({"fault": "agerecord:idle", "victimcomp": "engine"}, "canary", "single", "SurgeThenDrain", set())
         self.assertEqual([(coverage.STALE_RECORD_FAULT, "persistent", "-", "engine")], faults)
         self.assertIn(coverage.STALE_RECORD_FAULT, coverage.UNBOUND_FAULTS)
+
+
+class StaleRecordUnderOperationsTest(unittest.TestCase):
+    """fault=agerecord beyond a canary: the victim's rolled-out record aged
+    on the settled service, as an operation lands or at a hook of its roll,
+    or at a moment of a move, after a preroll put a previous revision on
+    record; the operation completes, nothing is rebuilt onto the aged
+    revision, and the record names the revision the victim stands on."""
+
+    BASE = "# p999: x Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 co=none topo=engine victimcomp=engine preroll=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_forms_name_the_settled_service_an_operation_hook_or_a_move_moment(self):
+        for param in ("idle", "settling", "rotating", "draining", "migrating", "canary-serving@1"):
+            self.assertTrue(run._fault_ok(f"agerecord:{param}"), param)
+        for param in ("new", "old", "held", "repair"):
+            self.assertFalse(run._fault_ok(f"agerecord:{param}"), param)
+        good = [
+            " fault=agerecord:idle during=idle",
+            " fault=agerecord:settling", " fault=agerecord:rotating", " fault=agerecord:draining",
+            " fault=agerecord:settling rollback=1 during=rotating",
+            " fault=agerecord:settling edit=strategy:RecreatePod during=rotating",
+            " mode=scaledown to_e=5 fault=agerecord:idle during=idle",
+            " mode=scaledown to_e=3 fault=agerecord:idle during=idle",
+            " mode=runtimerev rt=ome-coordtest-rt-p999 edit=env expect=roll fault=agerecord:draining",
+            " mode=migrate mig=Auto inst=0 at=accept fault=agerecord:migrating",
+            " mode=recreate fault=agerecord:idle during=idle",
+        ]
+        for extra in good:
+            self.assertEqual([], self._errs(self.BASE + extra), extra)
+
+    def test_header_forms_the_validator_refuses(self):
+        def has(frag, header):
+            errs = self._errs(header)
+            self.assertTrue(any(frag in e for e in errs), (frag, header, errs))
+        has("preroll= must name engine", self.BASE.replace(" preroll=engine", "") + " fault=agerecord:settling")
+        has("goes with during=idle", self.BASE + " fault=agerecord:idle")
+        has("fires at a hook of a push or a runtime edit", self.BASE + " mode=scaledown to_e=3 fault=agerecord:settling")
+        has("fires at a hook of a push or a runtime edit", self.BASE + " fault=agerecord:rotating rollback=1 during=rotating")
+        has("at a moment of a move", self.BASE + " mode=migrate mig=Auto inst=0 fault=agerecord:migrating")
+        has("does not combine with fault=agerecord", self.BASE + " fault=agerecord:settling lift=after-settle")
+        has("does not combine with fault=agerecord", self.BASE + " fault=agerecord:settling repeat=2")
+        has("does not combine with fault=agerecord", self.BASE + " mode=recreate fault=agerecord:idle during=idle expect=held")
+
+    def test_history_is_read_off_the_pods_and_the_record(self):
+        ctx = {"pod_state": {"engine-0": dict(pod("engine", 0), hash="bbbb"), "engine-1": dict(pod("engine", 1), hash="bbbb")}}
+        rolled = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-bbbb",
+                                            "previousRolledoutRevision": "p1-engine-rev-aaaa"}}}
+        self.assertEqual((True, ""), run._preroll_recorded(ctx, rolled, {"engine"}))
+        stale = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-aaaa"}}}
+        ok, why = run._preroll_recorded(ctx, stale, {"engine"})
+        self.assertFalse(ok)
+        self.assertIn("not the revision its pods run", why)
+        fresh = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-bbbb"}}}
+        ok, why = run._preroll_recorded(ctx, fresh, {"engine"})
+        self.assertFalse(ok)
+        self.assertIn("no previous", why)
+        src = inspect.getsource(run._preroll_history)
+        for piece in ("_bump_rev(ctx, members, val=PREROLL_VAL)", "_preroll_pods_settled(", "_rolled_ir_settled(",
+                      "_preroll_recorded(", "_rebaseline(ctx)"):
+            self.assertIn(piece, src, piece)
+
+    def _fired(self, param="settling"):
+        f = run._fault_new("p1", {"fault": f"agerecord:{param}", "victimcomp": "engine", "preroll": "engine"})
+        f.update(fired=True, fired_ts=100.0, aged_from="p1-engine-rev-bbbb", aged_to="p1-engine-rev-aaaa", aged_hash="aaaa")
+        return f
+
+    def test_tick_reads_pods_on_the_aged_revision_and_the_record_level_again(self):
+        f = self._fired()
+        pods = {"engine-0": dict(pod("engine", 0), hash="bbbb"), "engine-1": dict(pod("engine", 1), hash="cccc")}
+        run._record_tick(f, None, pods, 101.0)
+        self.assertFalse(f.get("rebuilt_onto_aged"))
+        self.assertIsNone(f.get("leveled_at"), "a read of the pods alone says nothing about the record")
+        aged = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-aaaa"}}}
+        run._record_tick(f, aged, pods, 102.0)
+        self.assertIsNone(f.get("leveled_at"), "the aged entry is not level")
+        pushed = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-cccc"}}}
+        run._record_tick(f, pushed, pods, 103.0)
+        self.assertEqual(103.0, f["leveled_at"], "a revision the pods run, other than the aged one, is level")
+        elsewhere = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-dddd"}}}
+        g = self._fired()
+        run._record_tick(g, elsewhere, pods, 104.0)
+        self.assertIsNone(g.get("leveled_at"), "a revision no pod runs is not level")
+        pods["engine-2"] = dict(pod("engine", 2), hash="aaaa")
+        pods["router-0"] = dict(pod("router", 0), hash="aaaa")
+        run._record_tick(f, None, pods, 105.0)
+        self.assertEqual({"engine-2"}, f["rebuilt_onto_aged"], "only the victim's pods on the aged revision count")
+
+    def test_track_polls_the_status_every_record_poll(self):
+        f = self._fired()
+        calls = []
+        ctx = {"case_id": "p1", "pod_state": {}}
+        with mock.patch.object(run, "fetch_status", lambda cid: calls.append(cid) or {}):
+            run._record_track(ctx, f)
+            run._record_track(ctx, f)
+        self.assertEqual(["p1"], calls, "the second read within RECORD_POLL_S reads the pods alone")
+        self.assertEqual("", f["record_last"])
+
+    def test_fired_and_level_checks(self):
+        f = self._fired()
+        f.update(leveled_at=130.0, record_last="p1-engine-rev-cccc")
+        ctx = {"pod_state": {"engine-0": dict(pod("engine", 0), hash="cccc")}, "closed": False}
+        checks = []
+        self.assertEqual("PASS", run._record_level_checks(f, ctx, "the push ended", "PASS", [], checks))
+        self.assertEqual(3, sum(1 for c in checks if c.startswith("  ✓")), checks)
+        self.assertTrue(any("30s after it was aged" in c for c in checks), checks)
+        notes = []
+        stale = dict(self._fired(), record_last="p1-engine-rev-aaaa")
+        with mock.patch.object(run, "_watch_record_level", lambda ctx, f, budget: False):
+            self.assertEqual("FAIL", run._record_level_checks(stale, ctx, "the push ended", "PASS", notes, []))
+        self.assertTrue(any("still names" in n for n in notes), notes)
+        rebuilt = dict(self._fired(), leveled_at=130.0, record_last="p1-engine-rev-cccc", rebuilt_onto_aged={"engine-3"})
+        notes = []
+        self.assertEqual("FAIL", run._record_level_checks(rebuilt, ctx, "the push ended", "PASS", notes, []))
+        self.assertTrue(any("rebuilt onto the aged revision" in n for n in notes), notes)
+        unfired = run._fault_new("p1", {"fault": "agerecord:settling", "victimcomp": "engine"})
+        notes = []
+        self.assertEqual("FAIL", run._record_fired_checks(unfired, "PASS", notes, []))
+        self.assertTrue(any("never fired" in n for n in notes), notes)
+        self.assertEqual("PASS", run._record_fired_checks(dict(unfired, infra_fail="x"), "PASS", [], []))
+
+    def test_the_nudge_is_an_inert_annotation_on_the_isvc(self):
+        calls = []
+        f = self._fired("idle")
+
+        def fake_kubectl(*a, **k):
+            calls.append(a)
+            return subprocess.CompletedProcess(a, 0, stdout="", stderr="")
+        with mock.patch.object(run, "kubectl", fake_kubectl):
+            self.assertTrue(run._record_nudge(f, "p1"))
+        self.assertEqual(1, len(calls))
+        self.assertIn("annotate", calls[0])
+        self.assertIn("isvc", calls[0])
+        self.assertTrue(any(str(a).startswith(run.RECORD_NUDGE_ANNO + "=") for a in calls[0]), calls[0])
+        self.assertIsNotNone(f.get("nudged_at"))
+        self.assertTrue(any("asked to look" in n for n in f["notes"]), f["notes"])
+
+    def test_recreate_check_reads_the_fresh_record(self):
+        f = self._fired("idle")
+        ctx2 = {"case_id": "p1", "fault": f, "closed": False, "pod_state": {"engine-0": dict(pod("engine", 0), hash="aaaa")}}
+        fresh = {"components": {"engine": {"latestRolledoutRevision": "p1-engine-rev-aaaa"}}}
+        checks = []
+        with mock.patch.object(run, "_read_one", lambda c, timeout=1.0: None), \
+                mock.patch.object(run, "fetch_status", lambda cid: fresh):
+            self.assertEqual("PASS", run._record_recreate_checks(ctx2, "PASS", [], checks))
+        self.assertTrue(any("re-created service runs" in c for c in checks), checks)
+        notes = []
+        with mock.patch.object(run, "_read_one", lambda c, timeout=1.0: None), \
+                mock.patch.object(run, "fetch_status", lambda cid: {"components": {}}), \
+                mock.patch.object(run, "ROWS_SETTLE_S", 0.2), mock.patch.object(run, "RECORD_POLL_S", 0.0):
+            self.assertEqual("FAIL", run._record_recreate_checks(ctx2, "PASS", notes, []))
+        self.assertTrue(any("names nothing" in n for n in notes), notes)
+
+    def test_routing_and_the_drivers_shape(self):
+        route = inspect.getsource(run.run_case)
+        self.assertIn("if fault_kind == RECORD_FAULT:", route)
+        self.assertLess(route.index("_idle_fault("), route.index("if fault_kind == RECORD_FAULT:"),
+                        "the settled-service form keeps the idle driver")
+        self.assertLess(route.index("if fault_kind == RECORD_FAULT:"), route.index("_rollback_fault_case("),
+                        "the record driver is picked before the rollback and edit drivers")
+        self.assertIn("mode_fault == RECORD_FAULT and mode in RECORD_OP_MODES", inspect.getsource(run.run_mode_case))
+        self.assertIn("_idle_record(", inspect.getsource(run._idle_fault))
+        src = inspect.getsource(run._record_op)
+        for piece in ("_preroll_history(", "_op_launch(", "_window_wait_hook(", "_hook_op_watch(", "_window_op_checks(",
+                      "_record_level_checks(", "after=_record_recreate_checks", 'f["hook_op"] = True'):
+            self.assertIn(piece, src, piece)
+        steady = inspect.getsource(run._idle_record)
+        for piece in ("_preroll_history(", "_watch_record_level(", "_record_nudge(", "_idle_peak_checks(", "_wait_rows_settled("):
+            self.assertIn(piece, steady, piece)
+        self.assertIn(run.RECORD_FAULT, run.HOOK_FAULTS)
+        self.assertEqual({"rollout", "scaledown", "runtimerev", "migrate", "recreate"}, run.RECORD_OP_MODES)
+
+    def test_generated_families_fill_the_persistent_row(self):
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for f, n, kv, m in rows if f == "gen-stale-record"]
+        self.assertEqual(60, len(fam))
+        self.assertEqual([f"p{i}" for i in range(12200, 12260)], [n for n, _kv, _m in fam])
+        self.assertEqual(6, len({(kv["topo"], kv["Nd"] > 0, kv["Nr"] > 0) for _n, kv, _m in fam}), "six shape families")
+        self.assertEqual({op for op, _h in generate_cases.RECORD_CELLS}, {m["op"] for _n, _kv, m in fam})
+        for name, kv, _m in fam:
+            self.assertEqual(("engine", "engine"), (kv["victimcomp"], kv["preroll"]), name)
+            self.assertTrue(kv["fault"].startswith("agerecord:"), name)
+            text = outputs[f"gen-stale-record/{name}.yaml"]
+            self.assertTrue(text.splitlines()[1].startswith("# reason: the engine rolled once before the story"), name)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(text)
+                self.assertEqual([], run.validate_case_file(path), name)
+        canary = [(n, kv, m) for f, n, kv, m in rows if f == "gen-canary-stale-record"]
+        self.assertEqual([f"p{i}" for i in range(12400, 12404)], [n for n, _kv, _m in canary])
+        for name, kv, _m in canary:
+            self.assertEqual(("canary", "agerecord:canary-serving", "breach", "Failed"),
+                             (kv["mode"], kv["fault"], kv["analysis"], kv["terminal"]), name)
+            self.assertIn("engine", kv["preroll"].split(","), name)
+            text = outputs[f"gen-canary-stale-record/{name}.yaml"]
+            self.assertIn("analysis:", text, name)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(text)
+                self.assertEqual([], run.validate_case_file(path), name)
+        manifest = outputs[generate_cases.MANIFEST_REL]
+        self.assertIn("## gen-stale-record and gen-canary-stale-record", manifest)
+
+    def test_ledger_reads_every_cell_of_the_persistent_row(self):
+        cases = (coverage.load_cases(coverage.ISVCS / "gen-stale-record")
+                 + coverage.load_cases(coverage.ISVCS / "gen-canary-stale-record"))
+        row = (coverage.STALE_RECORD_FAULT, "persistent", "-")
+        for c in cases:
+            # a canary cell also carries the breach its gate reads
+            self.assertIn(row, c.fault_rows(), c.id)
+            self.assertEqual(c.operation == "canary", len(c.fault_rows()) == 2, c.id)
+        cells = collections.Counter((c.shape_family, c.operation) for c in cases)
+        ops = ("steady state", "push", "rollback", "strategy or policy edit", "scale up", "scale down",
+               "runtime edit", "migrate", "delete")
+        for family in coverage.SHAPE_FAMILIES:
+            for op in ops:
+                self.assertEqual(2 if op == "push" else 1, cells[(family, op)], (family, op))
+        self.assertEqual({"engine gang", "engine+router gang", "engine+decoder+router single", "engine+decoder+router gang"},
+                         {c.shape_family for c in cases if c.operation == "canary"})
+        self.assertEqual({"steady state", "settling", "draining", "migrating", "canary analysis"}, {c.timing for c in cases})
 
 
 class IdleUnitRecordTest(unittest.TestCase):

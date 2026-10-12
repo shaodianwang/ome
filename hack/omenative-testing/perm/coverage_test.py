@@ -648,16 +648,18 @@ class LedgerTest(unittest.TestCase):
         # the steady state with no fault, a lost gang member on single pods, a
         # hand-deleted pod on gangs, the four sibling rows on the two
         # engine-only families, then the pause and freeze columns, the new-side
-        # rows at steady state, the gate rows outside a canary, and the
-        # one-shot new-side rows under a scale, a move and a delete, and the
-        # repeating pod losses under a delete
-        self.assertEqual(raw - 6 - 72 - 72 - 96 - 564 - 80 - 312 - 136 - 12, len(product))
+        # rows at steady state, the gate rows outside a canary, the one-shot
+        # new-side rows under a scale, a move and a delete, the repeating pod
+        # losses under a delete, and the one-shot stale-revision-record row
+        self.assertEqual(raw - 6 - 72 - 72 - 96 - 564 - 80 - 312 - 136 - 12 - 60, len(product))
         # 51 rows over 72 family-operation pairs. The two stale-revision-record
         # rows (one-shot and persistent, no side) are 144 of them: 24 fall to
-        # the pause and freeze columns, the other 120 stand on the ten
+        # the pause and freeze columns, the one-shot row's other 60 leave with
+        # their own reason, and the persistent row's 60 stand on the ten
         # remaining operations of every family.
-        self.assertEqual(3672 - 1350, len(product))
-        self.assertEqual(120, sum(1 for _f, _o, row in product if row[0] == coverage.STALE_RECORD_FAULT))
+        self.assertEqual(3672 - 1410, len(product))
+        self.assertEqual(60, sum(1 for _f, _o, row in product if row[0] == coverage.STALE_RECORD_FAULT))
+        self.assertEqual({"persistent"}, {row[1] for _f, _o, row in product if row[0] == coverage.STALE_RECORD_FAULT})
 
     def test_the_triage_removals_name_their_sentences_and_counts(self):
         sentences = {
@@ -675,13 +677,17 @@ class LedgerTest(unittest.TestCase):
             "a repeating node loss during a delete has no state left to lose after the first loss: a pod deleted by hand, a "
             "lost gang member, an eviction or a preemption repeats only once what it took has come back, and a delete brings "
             "nothing back": 12,
+            # the one-shot row on the ten operations of six families
+            "a stale revision record has no one-shot form: the record is one wrong status entry that stays until the controller "
+            "rewrites it, not a cause that can be taken away again; a record put right by hand before the controller read it "
+            "proves nothing, and one corrected after it was read changes nothing, so the persistent row is the fault's only row": 60,
         }
         removed = coverage.removed_by_reason()
         self.assertEqual(sentences, {reason: removed[reason] for reason in sentences})
-        self.assertEqual([reason for reason, _p in coverage.EXCLUDED_CELLS][-5:], list(sentences))
-        # 1326 for the rows of every other fault, and the 24 pause and freeze
-        # cells of the two stale-revision-record rows.
-        self.assertEqual(1350, sum(removed.values()))
+        self.assertEqual([reason for reason, _p in coverage.EXCLUDED_CELLS][-6:], list(sentences))
+        # 1326 for the rows of every other fault, the 24 pause and freeze
+        # cells of the two stale-revision-record rows, and the one-shot row.
+        self.assertEqual(1410, sum(removed.values()))
         product = coverage.product_cells()
         # the pause and freeze columns keep only the kill family's own cells
         self.assertIn(("engine single", "pause", ("pod deleted by hand", "one-shot", "-")), product)
@@ -712,6 +718,29 @@ class LedgerTest(unittest.TestCase):
         self.assertIn(("engine single", "delete", ("pod deleted by hand", "one-shot", "-")), product)
         self.assertIn(("engine single", "delete", ("node", "persistent", "-")), product)
         self.assertIn(("engine single", "scale up", ("evicted or preempted", "persistent", "-")), product)
+
+    def test_the_stale_record_has_one_row_and_a_row_removed_whole_is_no_hole(self):
+        one_shot = (coverage.STALE_RECORD_FAULT, "one-shot", "-")
+        persistent = (coverage.STALE_RECORD_FAULT, "persistent", "-")
+        for family in coverage.SHAPE_FAMILIES:
+            for operation in coverage.OPERATIONS:
+                self.assertTrue(coverage.excluded(family, operation, one_shot), (family, operation))
+                self.assertEqual(operation in ("pause", "freeze"), coverage.excluded(family, operation, persistent),
+                                 (family, operation))
+        self.assertTrue(coverage.HEADER_CHECKS["fault"]("agerecord:settling"))
+        self.assertTrue(coverage.HEADER_CHECKS["fault"]("agerecord:migrating"))
+        self.assertFalse(coverage.HEADER_CHECKS["fault"]("agerecord:new"))
+        faults = coverage.classify_faults({"fault": "agerecord:settling", "victimcomp": "engine", "preroll": "engine"},
+                                          "rollout", "single", "SurgeThenDrain", set())
+        self.assertEqual([(coverage.STALE_RECORD_FAULT, "persistent", "-", "engine")], faults)
+        # a scratch corpus leaves most rows with no case anywhere; a row the
+        # product does not carry at all is not among them
+        self.corpus.write(fault="podkill:rotating", topo="engine")
+        text = "\n".join(coverage.render_holes(coverage.matrix_cells(self.corpus.cases())))
+        line = next(l for l in text.splitlines() if l.startswith("- fault rows ("))
+        self.assertIn("controller restart, one-shot", line)
+        self.assertNotIn("stale revision record, one-shot", line)
+        self.assertIn("stale revision record, persistent", line)
 
     def test_check_fails_on_a_removed_cell_with_a_case_and_on_a_rule_removing_nothing(self):
         from unittest import mock
@@ -800,6 +829,19 @@ class CommittedCorpusTest(unittest.TestCase):
     def test_check_passes(self):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(0, coverage.check(self.cases))
+
+    def test_the_committed_product_has_no_empty_cell(self):
+        cells = coverage.matrix_cells(self.cases)
+        self.assertEqual([], coverage.empty_cells(cells))
+        row = (coverage.STALE_RECORD_FAULT, "persistent", "-")
+        for family in coverage.SHAPE_FAMILIES:
+            for operation in coverage.OPERATIONS:
+                if operation in ("pause", "freeze"):
+                    continue
+                self.assertTrue(cells.get((family, operation, row)), (family, operation))
+        text = coverage.render_markdown(self.cases)
+        self.assertIn("0 of the product's", text)
+        self.assertIn("- fault rows (0): none", text)
 
     def test_generated_families_classify_as_their_generator_describes(self):
         for case in self.by_folder["gen-rollout"]:
